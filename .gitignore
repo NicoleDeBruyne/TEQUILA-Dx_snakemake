@@ -11,14 +11,11 @@
 *
 # ...but allow descending into  directories, so file-level rules below
 # can still be evaluated (otherwise git won't even look inside them).
-# Only descend 5 levels deep into any directory.
+# Only descend 2 levels deep into any directory.
 !*/
 !*/*/
-!*/*/*/
-!*/*/*/*/
-!*/*/*/*/*/
-!*/*/*/*/*/*/
-*/*/*/*/*/*/*
+*/*/*
+resources/NanoTS
 
 # --- Top-level files ---
 !/Snakefile
