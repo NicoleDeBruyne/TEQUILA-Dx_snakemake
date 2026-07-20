@@ -1,0 +1,19 @@
+# profile/config.yaml
+# Standard Snakemake 7 cluster-profile configuration. Invoked via:
+#   snakemake --profile profile/
+# This wires together the cluster submission script, the status-polling
+# script, and sane default execution parameters for SLURM.
+
+cluster: "slurm-submit.py"
+cluster-status: "slurm-status.py"
+jobscript: "slurm-jobscript.sh"
+
+jobs: 50
+max-jobs-per-second: 1
+max-status-checks-per-second: 10
+local-cores: 1
+latency-wait: 60
+restart-times: 1
+rerun-incomplete: true
+printshellcmds: true
+keep-going: false

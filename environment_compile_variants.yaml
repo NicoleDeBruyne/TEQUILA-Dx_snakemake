@@ -1,0 +1,71 @@
+name: RNA-Dx-compile-variants
+channels:
+  - bioconda
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11.*
+  # >=8.25.2, not the 7.32.4 pinned in the main environment.yaml: CADD.sh
+  # (invoked as a subprocess by compile_variants.py's run_CADD_chunk) shells
+  # out to its own internal `snakemake --sdm conda ...` call, and --sdm is a
+  # Snakemake 8.0+-only flag. The main pipeline's Snakemake stays on 7.x
+  # (pinned for the classic cluster/cluster-status profile syntax used
+  # elsewhere) -- this dedicated env exists so the compile_variants rule can
+  # use a different Snakemake version than every other rule, without either
+  # one shadowing the other. See rules/compile_variants.smk, which activates
+  # this env (not the main conda_env) for just this one rule's shell command.
+  #
+  # Capped below 9.0: only the >=8.25.2 floor (for --sdm) was ever actually
+  # required, but leaving this unbounded let a fresh solve silently pick up
+  # whatever the latest 9.x release happened to be. That's how we ended up
+  # on Snakemake 9.23.1, which added a stricter `conda >= 24.7.1` version
+  # check for its own `--sdm conda` env-build step -- unrelated to anything
+  # this pipeline needs, but it's what broke CADD.sh's singularity/apptainer
+  # mode (tried and reverted; see compile_variants.py's run_CADD_chunk
+  # docstring) by rejecting the outdated conda bundled in CADD-scripts'
+  # published container image. Pinning to the 8.x line avoids future point
+  # releases introducing similar surprises for a version bump nothing here
+  # asked for.
+  - snakemake>=8.25.2,<9
+  - htslib>=1.18
+  - samtools>=1.18
+  - bcftools>=1.18
+  - tabix
+  - pysam>=0.24.0
+  # Capped below 2.3.0: that's where NumPy hard-removed the binary mode of
+  # np.fromstring (deprecated since 1.14, removed in 2.3.0 -- see NumPy's
+  # 2.3.0 release notes), which spliceai==1.3.1's own utils.py still relies
+  # on (spliceai/utils.py's one_hot_encode -> np.fromstring(seq, np.int8)).
+  # Without this cap, a fresh solve (or the separate pip install of
+  # tensorflow/spliceai below) can pull in NumPy >=2.3 and every SpliceAI
+  # chunk fails with "ValueError: The binary mode of fromstring is removed,
+  # use frombuffer instead" -- a bug in spliceai's own unmaintained code,
+  # not this pipeline.
+  - numpy>=1.21.0,<2.3
+  - pandas>=2.3.0
+  - perl>=5.32.0
+  - pip
+  # spliceai==1.3.1 (unmaintained since ~2020) still does
+  # `from pkg_resources import get_distribution` in its own __init__.py --
+  # pkg_resources comes from setuptools, not python itself. Recent
+  # setuptools releases (>=81, 2025) removed pkg_resources entirely as
+  # part of deprecating it, and a fresh env isn't guaranteed to have any
+  # setuptools at all installed by default -- either way, spliceai fails
+  # at import time with "ModuleNotFoundError: No module named
+  # 'pkg_resources'" unless a compatible setuptools is pinned explicitly.
+  - setuptools<81
+  # spliceai pulls in TensorFlow, which has a deep, conflict-prone dependency
+  # tree -- letting conda's solver reconcile that against everything else in
+  # this environment is slow and prone to silently failing/skipping the
+  # package. pip only has to solve TensorFlow's own dependencies in
+  # isolation, so it's installed via pip instead, after conda has already
+  # resolved and installed everything above.
+  #
+  # NOTE: unlike the bioconda spliceai package (which declares tensorflow as
+  # a real dependency), PyPI's spliceai package does NOT install TensorFlow
+  # for you -- it has to be installed separately, or `spliceai` will import
+  # fine but fail at runtime. Listed explicitly here so a fresh env build
+  # doesn't end up in that half-installed state.
+  - pip:
+      - tensorflow
+      - spliceai>=1.3.1

@@ -1,0 +1,25 @@
+name: RNA-Dx
+channels:
+  - bioconda
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11.*
+  - snakemake=7.32.4
+  - htslib>=1.18
+  - samtools>=1.18
+  - bcftools>=1.18
+  - tabix
+  - pysam>=0.24.0
+  - pyvcf3>=1.0.0
+  - longcallr=2.0.0
+  - whatshap>=2.2
+  - numpy>=1.21.0
+  - pandas>=2.3.0
+  - scipy>=1.17.0
+  - statsmodels>=0.14.0
+  - matplotlib>=3.11.0
+  - seaborn>=0.13.0
+  - scikit-learn>=1.5.0
+  - perl>=5.32.0
+  - pip
