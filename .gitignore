@@ -1,0 +1,49 @@
+# ---------------------------------------------------------------------------
+# Allowlist .gitignore: ignore everything by default, then explicitly
+# un-ignore only the pipeline-definition files that should be tracked.
+#
+# NOTE: since this is an allowlist, any NEW file you add to the repo
+# (a new rule, a new script, a new resource) needs its own `!` line here,
+# or it won't be tracked even after `git add`.
+# ---------------------------------------------------------------------------
+
+# Ignore everything...
+*
+# ...but allow descending into  directories, so file-level rules below
+# can still be evaluated (otherwise git won't even look inside them).
+# Only descend 5 levels deep into any directory.
+!*/
+!*/*/
+!*/*/*/
+!*/*/*/*/
+!*/*/*/*/*/
+!*/*/*/*/*/*/
+*/*/*/*/*/*/*
+
+# --- Top-level files ---
+!/Snakefile
+!/environment.yaml
+!/environment_compile_variants.yaml
+!/setup.sh
+!/.gitignore
+!/README.md
+
+# --- config/ ---
+!/config/config.yaml
+
+# --- profile/ (SLURM profile) ---
+!/profile/config.yaml
+!/profile/slurm-jobscript.sh
+!/profile/slurm-status.py
+!/profile/slurm-submit.py
+!/profile/slurm_utils.py
+
+# --- resources/ (only bundled small reference data) ---
+!/resources/omim_data/
+!/resources/omim_data/*
+
+# --- rules/ ---
+!/rules/*.smk
+
+# --- scripts/ ---
+!/scripts/*.py
