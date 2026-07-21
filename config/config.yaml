@@ -8,6 +8,16 @@
 # pipeline directory itself at runtime (see _BUNDLED_PATH_KEYS in the
 # Snakefile); use an absolute path here to point at an existing/shared copy
 # instead.
+#
+# Sections below are ordered to roughly follow the order rules actually run
+# in: run manifest -> stage toggles -> shared environments -> reference data
+# -> variant callers (longcallr/nanots/clair3_rna/deepvariant) ->
+# compile_variants -> phase_reads -> ase_analysis -> junction_analysis ->
+# cohort_junction_analysis -> merge_hits -> validate_sample_types ->
+# resource defaults. A handful of thresholds are shared across multiple
+# stages (e.g. padj_threshold, sample_coverage_threshold) -- each such key
+# is defined once, at its first point of use, with a comment noting where
+# else it's reused.
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -43,7 +53,41 @@ merge_hits:                 true
 validate_sample_types:      true
 
 # ---------------------------------------------------------------------------
-# Reference files (GENCODE)
+# Shared conda environments (used across most rules -- see per-stage
+# sections below for tool-specific images/binaries instead).
+# ---------------------------------------------------------------------------
+conda_env:        "envs/conda_env"
+# Dedicated env for the compile_variants rule only, built from
+# environment_compile_variants.yaml (see setup_resources.sh's CADD-scripts
+# section) -- identical to conda_env above except for its Snakemake version
+# (>=8.25.2, not 7.x) and its extra dependencies (perl/htslib/pysam/
+# spliceai/etc. -- see environment_compile_variants.yaml). Needed because
+# compile_variants.py itself must run under this env's Python, and
+# directly shells out to several of its other tools (ANNOVAR's perl,
+# bcftools/tabix/bgzip, spliceai). rules/compile_variants.smk activates
+# this env (not conda_env) for just that one rule's shell command.
+#
+# Its Snakemake >=8.25.2 is also where CADD_wrapper.sh (see cadd_script
+# below) gets the `snakemake` binary CADD.sh's own conda mode needs for
+# its internal `snakemake --sdm conda ...` call (--sdm is a Snakemake
+# 8.0+-only flag conda_env's 7.x, pinned for the classic cluster/
+# cluster-status profile syntax used elsewhere, doesn't understand) -- but
+# the wrapper gets it via a self-contained shim, not by inheriting this
+# env's PATH wholesale, to avoid its other tools (particularly its own
+# `perl`) leaking into CADD.sh's own per-rule conda environments. See
+# setup_resources.sh's CADD-scripts section for the full story.
+# compile_variants.py itself knows nothing about any of this environment
+# management -- only CADD_wrapper.sh and this rule's shell command do.
+conda_env_compile_variants: "envs/conda_env_compile_variants"
+# singularity_binds is no longer a static config value -- rules/nanots.smk,
+# clair3_rna.smk, and deepvariant.smk each compute bind directories
+# dynamically per job (see _bind_dirs), from whatever BAM/genome/model
+# files that rule actually needs, so paths don't need to match wherever
+# this was originally configured.
+
+# ---------------------------------------------------------------------------
+# Reference files (GENCODE) -- used starting with the variant callers below,
+# and throughout most other stages.
 # Relative paths here are resolved against the pipeline directory itself
 # (see _BUNDLED_PATH_KEYS in the Snakefile), i.e. snakemake/resources/... --
 # same as every other resource below. Set an absolute path instead if your
@@ -53,11 +97,20 @@ genome:     "resources/gencode_data/GRCh38.primary_assembly.genome.fa"
 annotation: "resources/gencode_data/gencode.v44.primary_assembly.annotation.gtf"
 
 # ---------------------------------------------------------------------------
-# Annotation / variant databases
-# Relative paths resolve against the pipeline directory (see
-# _BUNDLED_PATH_KEYS in the Snakefile), so no edits are needed after
-# cloning/copying the pipeline as long as resources/ ships alongside this
-# config. Use an absolute path to point at a shared network location instead.
+# Variant callers (rules/longcallr.smk, nanots.smk, clair3_rna.smk,
+# deepvariant.smk)
+# ---------------------------------------------------------------------------
+longcallr_bin:    "envs/conda_env/bin/longcallR"
+nanots_image:     "library://zelinliu/nanots/nanots:1.0.0"
+nanots_model_unphased: "resources/NanoTS/model/unphased_cDNA_nanopore_R104_HG002.pth"
+nanots_model_phased:   "resources/NanoTS/model/phased_cDNA_nanopore_R104_HG002.pth"
+clair3_rna_image: "docker://hkubal/clair3-rna:v0.2.2"
+deepvariant_image: "docker://google/deepvariant:1.6.1"
+
+# ---------------------------------------------------------------------------
+# Variant compilation / annotation (rules/compile_variants.smk)
+# Merges the four callers' VCFs and annotates with ANNOVAR, gnomAD,
+# ClinVar, CADD, and SpliceAI.
 #
 # gnomad_base/gnomad_mito_vcf/clinvar_vcf default to local copies under
 # resources/gnomad_data/ and resources/clinvar_data/, downloaded by
@@ -76,7 +129,8 @@ annotation: "resources/gencode_data/gencode.v44.primary_assembly.annotation.gtf"
 # substitutes the canonical public URL automatically. This explicitly says
 # "don't use the local install, even if one exists" -- useful for testing
 # before running setup_resources.sh, or comparing local vs. remote results.
-# gnomad_mito_vcf has no "remote" of its own; it just follows gnomad_base.
+# gnomad_mito_vcf has no "remote" sentinel of its own here -- it just
+# follows gnomad_base.
 # For cadd_script, "remote" means: skip the local CADD-scripts run entirely
 # and fall straight to the local pre-scored lookup (cadd_local_prescored_snv/
 # cadd_local_prescored_indel below), then the remote pre-scored SNV lookup
@@ -116,6 +170,13 @@ annovar_dir:         "resources/annovar"
 # this environment-specific logic in the wrapper (rather than in
 # compile_variants.py itself) keeps that script portable / runnable
 # outside Snakemake.
+# CADD_wrapper.sh (generated by setup_resources.sh alongside CADD.sh) --
+# NOT CADD.sh directly. The wrapper runs CADD-scripts' own conda envs
+# (-m flag) via CADD.sh, but takes care of its Snakemake >=8.25.2
+# requirement itself (see the comment above) rather than relying on
+# whatever's already on PATH when compile_variants.py invokes it --
+# nothing CADD-specific needed here.
+cadd_script:       "resources/CADD-scripts-1.7.1/CADD_wrapper.sh"
 # cadd_data_dir must live alongside cadd_script as CADD-scripts' own
 # <install_dir>/data (CADD.sh finds it relative to itself, regardless of
 # whether it's invoked directly or through the wrapper).
@@ -169,7 +230,6 @@ spliceai_prescored_indel_vcf: ""
 # through to "fail" the same as an unconfigured, failed live run would.
 spliceai_force_prescored_lookup: false
 
-
 gnomad_chroms:
   - chr1
   - chr2
@@ -200,53 +260,109 @@ gnomad_chroms:
 # local/remote choice automatically (see the comment on gnomad_base above).
 gnomad_mito_vcf: "resources/gnomad_data/gnomad.genomes.v3.1.sites.chrM.vcf.bgz"
 
-# ---------------------------------------------------------------------------
-# External tool environments / images
-# ---------------------------------------------------------------------------
-conda_env:        "envs/conda_env"
-# Dedicated env for the compile_variants rule only, built from
-# environment_compile_variants.yaml (see setup_resources.sh's CADD-scripts
-# section) -- identical to conda_env above except for its Snakemake version
-# (>=8.25.2, not 7.x) and its extra dependencies (perl/htslib/pysam/
-# spliceai/etc. -- see environment_compile_variants.yaml). Needed because
-# compile_variants.py itself must run under this env's Python, and
-# directly shells out to several of its other tools (ANNOVAR's perl,
-# bcftools/tabix/bgzip, spliceai). rules/compile_variants.smk activates
-# this env (not conda_env) for just that one rule's shell command.
-#
-# Its Snakemake >=8.25.2 is also where CADD_wrapper.sh (see cadd_script
-# below) gets the `snakemake` binary CADD.sh's own conda mode needs for
-# its internal `snakemake --sdm conda ...` call (--sdm is a Snakemake
-# 8.0+-only flag conda_env's 7.x, pinned for the classic cluster/
-# cluster-status profile syntax used elsewhere, doesn't understand) -- but
-# the wrapper gets it via a self-contained shim, not by inheriting this
-# env's PATH wholesale, to avoid its other tools (particularly its own
-# `perl`) leaking into CADD.sh's own per-rule conda environments. See
-# setup_resources.sh's CADD-scripts section for the full story.
-# compile_variants.py itself knows nothing about any of this environment
-# management -- only CADD_wrapper.sh and this rule's shell command do.
-conda_env_compile_variants: "envs/conda_env_compile_variants"
-# singularity_binds is no longer a static config value -- rules/nanots.smk,
-# clair3_rna.smk, and deepvariant.smk each compute bind directories
-# dynamically per job (see _bind_dirs), from whatever BAM/genome/model
-# files that rule actually needs, so paths don't need to match wherever
-# this was originally configured.
+# CADD's own pre-filter (--CADD-gnomadAF-threshold/--CADD-CLNSIG-filter) --
+# independent of gnomad_af_threshold/clnsig_filter above (which drive the
+# FINAL overall variant filter). Defaulted to match gnomad_af_threshold/
+# clnsig_filter out of the box, but changeable separately -- e.g. to run
+# CADD on a broader variant set than your final output filter. Mirrors how
+# spliceai_gnomad_af_threshold/spliceai_clnsig_filter below already work
+# for SpliceAI's own pre-filter.
+cadd_gnomad_af_threshold: 0.01
+cadd_clnsig_filter:
+  - "Benign"
+  - "Likely_benign"
+  - "Benign/Likely_benign"
+cadd_threshold:         15   # final CADD PHRED filter
 
-longcallr_bin:    "envs/conda_env/bin/longcallR"
-nanots_image:     "library://zelinliu/nanots/nanots:1.0.0"
-nanots_model_unphased: "resources/NanoTS/model/unphased_cDNA_nanopore_R104_HG002.pth"
-nanots_model_phased:   "resources/NanoTS/model/phased_cDNA_nanopore_R104_HG002.pth"
-clair3_rna_image: "docker://hkubal/clair3-rna:v0.2.2"
-deepvariant_image: "docker://google/deepvariant:1.6.1"
-# CADD_wrapper.sh (generated by setup_resources.sh alongside CADD.sh) --
-# NOT CADD.sh directly. The wrapper runs CADD-scripts' own conda envs
-# (-m flag) via CADD.sh, but takes care of its Snakemake >=8.25.2
-# requirement itself (see cadd_data_dir's comment above) rather than
-# relying on whatever's already on PATH when compile_variants.py invokes
-# it -- nothing CADD-specific needed here.
-cadd_script:       "resources/CADD-scripts-1.7.1/CADD_wrapper.sh"
+# Pre-filter threshold for which variants SpliceAI actually gets run on
+# (--SpliceAI-gnomadAF-threshold/--SpliceAI-CLNSIG-filter in
+# compile_variants.py -- see _gnomad_clnsig_filter_mask). These keys are
+# independent of gnomad_af_threshold/clnsig_filter above, defaulted to
+# match out of the box, but changeable separately (e.g. run SpliceAI on a
+# broader variant set than CADD/the final filter).
+spliceai_gnomad_af_threshold: 0.01
+spliceai_clnsig_filter:
+  - "Benign"
+  - "Likely_benign"
+  - "Benign/Likely_benign"
+spliceai_threshold:     0.2   # final SpliceAI score filter
 
+# compile_variants.py's filtering thresholds. gnomad_af_threshold and
+# clnsig_filter drive the FINAL overall variant filter (--final-gnomadAF-threshold/
+# --final-CLNSIG-filter, always driven directly by these two keys).
+gnomad_af_threshold:    0.01
+clnsig_filter:
+  - "Benign"
+  - "Likely_benign"
+  - "Benign/Likely_benign"
+
+# compile_variants.py's final-stage depth/allele-frequency filters. Empty
+# string ("") means "don't apply this filter" (compile_variants.py's own
+# argparse default is None/unset) -- set a number to enable it.
+final_dp_threshold: ""
+final_af_threshold: ""
+
+# ---------------------------------------------------------------------------
+# Read phasing (rules/phase_reads.smk)
+# Builds a merged VCF from all four callers, then runs WhatsHap-based
+# per-gene phasing.
+# ---------------------------------------------------------------------------
+# phase_reads.py: min proportion of a read's max/expected coverage that
+# must phase to haplotypes for it to be used at all. (Was previously a
+# hardcoded script default, not passed by any rule -- now exposed here.)
+phasing_threshold:      0.5
+
+# phase_reads.py: proportion of a read's length from its terminus within
+# which a variant is considered "terminal" (and treated with more caution
+# during phasing, since terminal variants are more error-prone).
+terminal_variant_proportion: 0.5
+
+# phase_reads.py: minimum distance (bp) a variant must be from a read's end
+# to be used for phasing at all.
+min_dist_from_read_end_variant_phasing: 20
+
+# ---------------------------------------------------------------------------
+# Allele-specific expression analysis (rules/ase_analysis.smk)
+# Binomial test for ASE per gene from phased haplotype counts.
+# ---------------------------------------------------------------------------
+# Shared with junction_analysis.smk and cohort_junction_analysis.smk below.
+sample_coverage_threshold: 20
+# Shared with junction_analysis.smk, cohort_junction_analysis.smk, and
+# merge_hits.smk (as the padj:delta pair for outlier calling) below.
+padj_threshold:         0.05
+haplotype_ratio_threshold: 0.1
+
+# detect_ase_outliers.py: min fraction of max coverage phased to haplotypes
+# for an ASE call to be trusted. (Was previously a hardcoded script
+# default, not passed by any rule -- now exposed here. Notably lower by
+# default than jxn_phasing_threshold/cohort_jxn_phasing_threshold below.)
+ase_phasing_threshold:  0.5
+
+# ---------------------------------------------------------------------------
+# Splice junction outlier analysis vs. GTEx reference tissues
+# (rules/junction_analysis.smk)
+# ---------------------------------------------------------------------------
 gtex_data_dir: "resources/gtex_data"
+gtex_coverage_threshold:   20
+gtex_n_threshold:          100
+# Shared with cohort_junction_analysis.smk below (as delta_psi_threshold).
+delta_psi_threshold:    0.1
+
+# perform_splice_junction_beta_binomial_tests.py: min fraction of bulk
+# coverage a junction's hap1+hap2 must reach to be trusted. (Was previously
+# a hardcoded script default, not passed by any rule -- now exposed here.)
+jxn_phasing_threshold:  0.8
+
+# ---------------------------------------------------------------------------
+# Cohort-level junction outlier analysis (rules/cohort_junction_analysis.smk)
+# Fits per-junction Beta distributions across a (bed, sample_type) group's
+# own bulk BAMs (rather than against GTEx reference tissues -- see
+# junction_analysis.smk above for that), then flags per-sample outliers
+# using padj_threshold/delta_psi_threshold above as the padj:delta pair.
+# ---------------------------------------------------------------------------
+cohort_jxn_phasing_threshold: 0.8   # min fraction of bulk coverage a junction's hap1+hap2 must reach to be trusted
+cohort_jxn_n_threshold:        30   # min number of bulk samples with usable coverage before fitting a junction's Beta distribution
+cohort_jxn_min_reads:          20   # a junction needs >= this many reads in >=1 bulk sample to be tested at all
 
 # ---------------------------------------------------------------------------
 # Cross-sample merge stage (rules/merge_hits.smk)
@@ -287,94 +403,6 @@ sample_type_colors:
   lymphocytes: "#57AA3E"
   PBMCs: "#4C8FCA"
   wholeblood: "#B271AB"
-
-# ---------------------------------------------------------------------------
-# Thresholds and analysis parameters
-# ---------------------------------------------------------------------------
-gnomad_af_threshold:    0.01
-# CADD's own pre-filter (--CADD-gnomadAF-threshold/--CADD-CLNSIG-filter) --
-# independent of gnomad_af_threshold/clnsig_filter above (which drive the
-# FINAL overall variant filter). Defaulted to match gnomad_af_threshold/
-# clnsig_filter out of the box, but changeable separately -- e.g. to run
-# CADD on a broader variant set than your final output filter. Mirrors how
-# spliceai_gnomad_af_threshold/spliceai_clnsig_filter already work for
-# SpliceAI's own pre-filter.
-cadd_gnomad_af_threshold: 0.01
-cadd_clnsig_filter:
-  - "Benign"
-  - "Likely_benign"
-  - "Benign/Likely_benign"
-cadd_threshold:         15
-spliceai_threshold:     0.2
-sample_coverage_threshold: 20
-gtex_coverage_threshold:   20
-gtex_n_threshold:          100
-padj_threshold:         0.05
-delta_psi_threshold:    0.1
-haplotype_ratio_threshold: 0.1
-
-# compile_variants.py's final-stage depth/allele-frequency filters. Empty
-# string ("") means "don't apply this filter" (compile_variants.py's own
-# argparse default is None/unset) -- set a number to enable it.
-final_dp_threshold: ""
-final_af_threshold: ""
-
-# ---------------------------------------------------------------------------
-# Phasing-reliability thresholds. These were previously hardcoded script
-# defaults (not passed by any rule, not configurable here) -- now exposed
-# so they can be tuned per deployment. Each gates a different stage:
-#   phasing_threshold      -- phase_reads.py: min proportion of a read's
-#                              max/expected coverage that must phase to
-#                              haplotypes for it to be used at all
-#   ase_phasing_threshold  -- detect_ase_outliers.py: min fraction of max
-#                              coverage phased to haplotypes, for ASE calls
-#   jxn_phasing_threshold  -- perform_splice_junction_beta_binomial_tests.py
-#                              (GTEx-reference junction analysis): min
-#                              fraction of bulk coverage a junction's
-#                              hap1+hap2 must reach to be trusted
-# (cohort_jxn_phasing_threshold above is the cohort-junction-analysis
-#  equivalent of jxn_phasing_threshold, and was already configurable.)
-# ---------------------------------------------------------------------------
-phasing_threshold:      0.5
-ase_phasing_threshold:  0.5
-jxn_phasing_threshold:  0.8
-
-# phase_reads.py: proportion of a read's length from its terminus within
-# which a variant is considered "terminal" (and treated with more caution
-# during phasing, since terminal variants are more error-prone).
-terminal_variant_proportion: 0.5
-
-# phase_reads.py: minimum distance (bp) a variant must be from a read's end
-# to be used for phasing at all.
-min_dist_from_read_end_variant_phasing: 20
-
-# Pre-filter threshold for which variants SpliceAI actually gets run on
-# (--SpliceAI-gnomadAF-threshold/--SpliceAI-CLNSIG-filter in
-# compile_variants.py -- see _gnomad_clnsig_filter_mask). CADD's equivalent
-# pre-filter (--CADD-gnomadAF-threshold/--CADD-CLNSIG-filter) still uses
-# gnomad_af_threshold/clnsig_filter above -- same as --final-gnomadAF-
-# threshold/--final-CLNSIG-filter always have. These SpliceAI-specific keys
-# are independent, defaulted to match CADD's out of the box, but changeable
-# separately (e.g. run SpliceAI on a broader variant set than CADD).
-spliceai_gnomad_af_threshold: 0.01
-spliceai_clnsig_filter:
-  - "Benign"
-  - "Likely_benign"
-  - "Benign/Likely_benign"
-
-# Cohort-level junction outlier analysis (rules/cohort_junction_analysis.smk).
-# Fits per-junction Beta distributions across a (bed, sample_type) group's own
-# bulk BAMs (rather than against GTEx reference tissues -- see
-# rules/junction_analysis.smk for that), then flags per-sample outliers using
-# padj_threshold/delta_psi_threshold above as the padj:delta pair.
-cohort_jxn_phasing_threshold: 0.8   # min fraction of bulk coverage a junction's hap1+hap2 must reach to be trusted
-cohort_jxn_n_threshold:        30   # min number of bulk samples with usable coverage before fitting a junction's Beta distribution
-cohort_jxn_min_reads:          20   # a junction needs >= this many reads in >=1 bulk sample to be tested at all
-
-clnsig_filter:
-  - "Benign"
-  - "Likely_benign"
-  - "Benign/Likely_benign"
 
 # ---------------------------------------------------------------------------
 # Resource defaults (override per rule if needed)
