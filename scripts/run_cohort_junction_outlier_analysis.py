@@ -3017,49 +3017,54 @@ def main() -> None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
         # ---- Outlier summary for this threshold ----
-        _METRIC_DISPLAY = {
-            "junction_PSI":            "PSI",
-            "junction_PSI_approx":     "PSI_approx",
-            "5ss_IR_ratio":            "5ss_IR",
-            "3ss_IR_ratio":            "3ss_IR",
-            "junction_full_IR_ratio":  "full_IR",
-            "junction_IPA_ratio":      "IPA",
-        }
-        _METRIC_ORDER   = list(_METRIC_DISPLAY.keys())
-        computed_mets   = {c.replace("p_value_", "") for c in p_cols}
-        metrics_present = [m for m in _METRIC_ORDER if m in computed_mets]
+        try:
+            _METRIC_DISPLAY = {
+                "junction_PSI":            "PSI",
+                "junction_PSI_approx":     "PSI_approx",
+                "5ss_IR_ratio":            "5ss_IR",
+                "3ss_IR_ratio":            "3ss_IR",
+                "junction_full_IR_ratio":  "full_IR",
+                "junction_IPA_ratio":      "IPA",
+            }
+            _METRIC_ORDER   = list(_METRIC_DISPLAY.keys())
+            computed_mets   = {c.replace("p_value_", "") for c in p_cols}
+            metrics_present = [m for m in _METRIC_ORDER if m in computed_mets]
 
-        if "sample" in sig_df.columns and "gene" in sig_df.columns:
-            rows_any = sig_df[["sample", "gene"]].drop_duplicates()
-            any_ser  = rows_any.groupby("sample")["gene"].nunique().rename("_any")
-            metric_sers = []
-            for mc in metrics_present:
-                ocol = f"outlier_{mc}"
-                if ocol not in sig_df.columns: continue
-                ms = (sig_df[sig_df[ocol].astype(bool)][["sample", "gene"]]
-                      .drop_duplicates()
-                      .groupby("sample")["gene"].nunique().rename(mc))
-                metric_sers.append(ms)
-            summary = pd.concat([any_ser] + metric_sers, axis=1).fillna(0).astype(int)
-            summary = summary.sort_values("_any", ascending=False).reset_index()
-
-            header_metrics = ["Genes"] + [_METRIC_DISPLAY[m] for m in metrics_present
-                                           if m in summary.columns]
-            col_w  = max(10, max(len(h) for h in header_metrics) + 2)
-            header = f"  {'Sample':<40}" + "".join(f"{h:>{col_w}}" for h in header_metrics)
-            sep    = f"  {'-'*40}" + ("-"*col_w) * len(header_metrics)
-            print("\n" + "="*len(sep.rstrip()))
-            print(f"  Outlier summary — padj<={padj_threshold}, |delta|>={delta_threshold}")
-            print(f"  (samples ranked by total genes with outlier)")
-            print("="*len(sep.rstrip()))
-            print(header); print(sep)
-            for _, row in summary.iterrows():
-                vals = f"  {row['sample']:<40}{row['_any']:>{col_w}}"
-                for m in metrics_present:
-                    if m in summary.columns:
-                        vals += f"{row.get(m, 0):>{col_w}}"
-                print(vals)
-            print("="*len(sep.rstrip()))
+            if "sample" in sig_df.columns and "gene" in sig_df.columns:
+                rows_any = sig_df[["sample", "gene"]].drop_duplicates()
+                any_ser  = rows_any.groupby("sample")["gene"].nunique().rename("_any")
+                metric_sers = []
+                for mc in metrics_present:
+                    ocol = f"outlier_{mc}"
+                    if ocol not in sig_df.columns: continue
+                    ms = (sig_df[sig_df[ocol].astype(bool)][["sample", "gene"]]
+                          .drop_duplicates()
+                          .groupby("sample")["gene"].nunique().rename(mc))
+                    metric_sers.append(ms)
+                summary = pd.concat([any_ser] + metric_sers, axis=1)
+                summary = summary.fillna(0)
+                for col in summary.columns:
+                    summary[col] = pd.to_numeric(summary[col], errors="coerce").fillna(0).astype(int)
+                summary = summary.sort_values("_any", ascending=False).reset_index()
+                header_metrics = ["Genes"] + [_METRIC_DISPLAY[m] for m in metrics_present
+                                               if m in summary.columns]
+                col_w  = max(10, max(len(h) for h in header_metrics) + 2)
+                header = f"  {'Sample':<40}" + "".join(f"{h:>{col_w}}" for h in header_metrics)
+                sep    = f"  {'-'*40}" + ("-"*col_w) * len(header_metrics)
+                print("\n" + "="*len(sep.rstrip()))
+                print(f"  Outlier summary — padj<={padj_threshold}, |delta|>={delta_threshold}")
+                print(f"  (samples ranked by total genes with outlier)")
+                print("="*len(sep.rstrip()))
+                print(header); print(sep)
+                for _, row in summary.iterrows():
+                    vals = f"  {row['sample']:<40}{row['_any']:>{col_w}}"
+                    for m in metrics_present:
+                        if m in summary.columns:
+                            vals += f"{row.get(m, 0):>{col_w}}"
+                    print(vals)
+                print("="*len(sep.rstrip()))
+        except Exception as e:
+            print(f"[WARNING] Outlier summary failed: {e}"); traceback.print_exc()
 
         print(f"\n  Finished threshold: padj <= {padj_threshold}, |delta| >= {delta_threshold} ({time.time()-t_thr:.2f}s)")
 

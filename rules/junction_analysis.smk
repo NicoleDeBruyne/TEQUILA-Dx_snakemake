@@ -69,6 +69,7 @@ rule perform_binomial_tests:
         samp_cov   = config["sample_coverage_threshold"],
         gtex_cov   = config["gtex_coverage_threshold"],
         gtex_n     = config["gtex_n_threshold"],
+        phasing_thr= config["jxn_phasing_threshold"],
         script     = workflow.basedir + "/scripts/perform_splice_junction_beta_binomial_tests.py",
     threads: lambda wc: _rule_threads(wc, "perform_binomial_tests")
     resources:
@@ -86,6 +87,7 @@ rule perform_binomial_tests:
             --sample-coverage-threshold {params.samp_cov} \\
             --gtex-coverage-threshold   {params.gtex_cov} \\
             --gtex-n-threshold          {params.gtex_n} \\
+            --phasing-threshold         {params.phasing_thr} \\
             --annotation-file           {params.annotation} \\
             --threads                   {threads} \\
         2>&1 | tee {log}

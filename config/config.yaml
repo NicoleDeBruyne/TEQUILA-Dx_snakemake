@@ -292,6 +292,18 @@ sample_type_colors:
 # Thresholds and analysis parameters
 # ---------------------------------------------------------------------------
 gnomad_af_threshold:    0.01
+# CADD's own pre-filter (--CADD-gnomadAF-threshold/--CADD-CLNSIG-filter) --
+# independent of gnomad_af_threshold/clnsig_filter above (which drive the
+# FINAL overall variant filter). Defaulted to match gnomad_af_threshold/
+# clnsig_filter out of the box, but changeable separately -- e.g. to run
+# CADD on a broader variant set than your final output filter. Mirrors how
+# spliceai_gnomad_af_threshold/spliceai_clnsig_filter already work for
+# SpliceAI's own pre-filter.
+cadd_gnomad_af_threshold: 0.01
+cadd_clnsig_filter:
+  - "Benign"
+  - "Likely_benign"
+  - "Benign/Likely_benign"
 cadd_threshold:         15
 spliceai_threshold:     0.2
 sample_coverage_threshold: 20
@@ -300,6 +312,41 @@ gtex_n_threshold:          100
 padj_threshold:         0.05
 delta_psi_threshold:    0.1
 haplotype_ratio_threshold: 0.1
+
+# compile_variants.py's final-stage depth/allele-frequency filters. Empty
+# string ("") means "don't apply this filter" (compile_variants.py's own
+# argparse default is None/unset) -- set a number to enable it.
+final_dp_threshold: ""
+final_af_threshold: ""
+
+# ---------------------------------------------------------------------------
+# Phasing-reliability thresholds. These were previously hardcoded script
+# defaults (not passed by any rule, not configurable here) -- now exposed
+# so they can be tuned per deployment. Each gates a different stage:
+#   phasing_threshold      -- phase_reads.py: min proportion of a read's
+#                              max/expected coverage that must phase to
+#                              haplotypes for it to be used at all
+#   ase_phasing_threshold  -- detect_ase_outliers.py: min fraction of max
+#                              coverage phased to haplotypes, for ASE calls
+#   jxn_phasing_threshold  -- perform_splice_junction_beta_binomial_tests.py
+#                              (GTEx-reference junction analysis): min
+#                              fraction of bulk coverage a junction's
+#                              hap1+hap2 must reach to be trusted
+# (cohort_jxn_phasing_threshold above is the cohort-junction-analysis
+#  equivalent of jxn_phasing_threshold, and was already configurable.)
+# ---------------------------------------------------------------------------
+phasing_threshold:      0.5
+ase_phasing_threshold:  0.5
+jxn_phasing_threshold:  0.8
+
+# phase_reads.py: proportion of a read's length from its terminus within
+# which a variant is considered "terminal" (and treated with more caution
+# during phasing, since terminal variants are more error-prone).
+terminal_variant_proportion: 0.5
+
+# phase_reads.py: minimum distance (bp) a variant must be from a read's end
+# to be used for phasing at all.
+min_dist_from_read_end_variant_phasing: 20
 
 # Pre-filter threshold for which variants SpliceAI actually gets run on
 # (--SpliceAI-gnomadAF-threshold/--SpliceAI-CLNSIG-filter in

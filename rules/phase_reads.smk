@@ -49,9 +49,12 @@ rule phase_reads:
         ase_infile = "{outdir}/phased_reads/{sample}_phasing_summary.tsv",
         mapping    = "{outdir}/phased_reads/{sample}_gene_bam_mapping_file.tsv",
     params:
-        genome    = config["genome"],
-        phased_dir= "{outdir}/phased_reads",
-        script    = workflow.basedir + "/scripts/phase_reads.py",
+        genome         = config["genome"],
+        phased_dir     = "{outdir}/phased_reads",
+        phasing_thr    = config["phasing_threshold"],
+        terminal_prop  = config["terminal_variant_proportion"],
+        min_dist       = config["min_dist_from_read_end_variant_phasing"],
+        script         = workflow.basedir + "/scripts/phase_reads.py",
     threads: lambda wc: _rule_threads(wc, "phase_reads")
     resources:
         mem_mb     = lambda wc, threads, attempt: max(4096, attempt * threads * 1024),
@@ -69,5 +72,8 @@ rule phase_reads:
             --outdir     {params.phased_dir} \\
             --name       {wildcards.sample} \\
             --threads    {threads} \\
+            --phasing-threshold             {params.phasing_thr} \\
+            --terminal-variant-proportion   {params.terminal_prop} \\
+            --min-distance-from-read-end    {params.min_dist} \\
         2>&1 | tee {log}
         """

@@ -284,8 +284,11 @@ def _rule_threads(wc, rule_key):
 # Per-group / per-bed-panel thread & memory overrides.
 #
 # The group- and bed-level rules (build_group_junction_matrix,
-# run_cohort_junction_outlier_analysis, merge_hits_by_sample_type,
-# final_merge, validate_sample_types) don't have a single sample to key off
+# run_cohort_junction_outlier_analysis, the merge_hits.smk stages --
+# merge_group_variants, merge_group_ase, merge_group_junctions,
+# split_group_hits_by_sample, merge_sample_hits, concat_group_hits,
+# plot_group_hits -- final_merge, validate_sample_types) don't have a
+# single sample to key off
 # of the way _rule_threads() does above -- they run once per (bed,
 # sample_type) group, or once per bed panel. Overrides for these are looked
 # up by group_id (e.g. "IEI422_gene_symbols_fibroblasts") or bare bed_id
@@ -351,8 +354,11 @@ def all_outputs():
                 )
 
     if flag("merge_hits"):
-        # Requesting final_merge's output pulls merge_hits_by_sample_type along
-        # with it, since this flag gates the whole merge_hits.smk chain.
+        # Requesting final_merge's output pulls the whole merge_hits.smk chain
+        # along with it (merge_group_variants -> merge_group_ase ->
+        # merge_group_junctions -> split_group_hits_by_sample ->
+        # merge_sample_hits -> concat_group_hits -> plot_group_hits), since
+        # this flag gates that whole chain as a unit.
         for bid in BED_GROUPS:
             bod = bed_outdir(bid)
             outs.append(f"{bod}/merged_all_hits.tsv")

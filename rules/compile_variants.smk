@@ -16,8 +16,19 @@ def _gnomad_vcf_list(base, mito_vcf):
 def _clnsig_args(wc):
     return " ".join(f'"{s}"' for s in config["clnsig_filter"])
 
+def _cadd_clnsig_args(wc):
+    return " ".join(f'"{s}"' for s in config["cadd_clnsig_filter"])
+
 def _spliceai_clnsig_args(wc):
     return " ".join(f'"{s}"' for s in config["spliceai_clnsig_filter"])
+
+def _final_dp_flag(wc):
+    v = config.get("final_dp_threshold", "")
+    return f"--final-DP-threshold {v}" if str(v).strip() != "" else ""
+
+def _final_af_flag(wc):
+    v = config.get("final_af_threshold", "")
+    return f"--final-AF-threshold {v}" if str(v).strip() != "" else ""
 
 
 rule compile_variants:
@@ -66,10 +77,14 @@ rule compile_variants:
         spliceai_force_prescored = lambda wc: "--SpliceAI-force-prescored-lookup" if config["spliceai_force_prescored_lookup"] else "",
         clnsig      = _clnsig_args,
         gnomad_af   = config["gnomad_af_threshold"],
+        cadd_gnomad_af = config["cadd_gnomad_af_threshold"],
+        cadd_clnsig    = _cadd_clnsig_args,
         spliceai_gnomad_af = config["spliceai_gnomad_af_threshold"],
         spliceai_clnsig    = _spliceai_clnsig_args,
         cadd_thr    = config["cadd_threshold"],
         spliceai_thr= config["spliceai_threshold"],
+        final_dp_flag = _final_dp_flag,
+        final_af_flag = _final_af_flag,
         outprefix   = "{outdir}/variant_calling/compiled_variants/{sample}",
         script      = workflow.basedir + "/scripts/compile_variants.py",
         conda_env_compile_variants = config["conda_env_compile_variants"],
@@ -123,8 +138,8 @@ rule compile_variants:
             --CADD-local-prescored-snv "{params.cadd_local_prescored_snv}" \\
             --CADD-local-prescored-indel "{params.cadd_local_prescored_indel}" \\
             --CADD-prescored-url {params.cadd_prescored_url} \\
-            --CADD-gnomadAF-threshold {params.gnomad_af} \\
-            --CADD-CLNSIG-filter {params.clnsig} \\
+            --CADD-gnomadAF-threshold {params.cadd_gnomad_af} \\
+            --CADD-CLNSIG-filter {params.cadd_clnsig} \\
             --include-SpliceAI-scores \\
             --SpliceAI-annotation {params.spliceai_annotation} \\
             --SpliceAI-prescored-snv-vcf "{params.spliceai_prescored_snv}" \\
@@ -136,6 +151,8 @@ rule compile_variants:
             --final-CLNSIG-filter {params.clnsig} \\
             --final-CADD-phred-threshold {params.cadd_thr} \\
             --final-SpliceAI-threshold {params.spliceai_thr} \\
+            {params.final_dp_flag} \\
+            {params.final_af_flag} \\
             --threads {threads} \\
         2>&1 | tee {log}
         """
