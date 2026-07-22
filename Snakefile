@@ -1,11 +1,9 @@
 """
 RNA-Dx Snakemake Pipeline
 Multi-sample wrapper for variant calling, phasing, ASE, and splice junction analysis.
+See docs/general.md for an overview of the pipeline structure.
 
-Note: `configfile:` is not declared here, since that path is resolved
-relative to Snakemake's working directory, not this file's location.
-The config is instead supplied via `--configfile` on the command line
-(see submit_snakemake.sh).
+Config is supplied via --config/--configfile on the command line (see README.md).
 """
 
 import yaml
@@ -16,8 +14,8 @@ from collections import defaultdict
 from math import ceil
 import shlex
 
-# Ensure pipe failures aren't masked (e.g. `cmd 2>&1 | tee {log}` would
-# otherwise report tee's exit status instead of cmd's).
+# Ensure pipe failures aren't masked (e.g. tee's exit status doesn't
+# shadow the real command's).
 shell.prefix("set -euo pipefail;")
 
 
@@ -29,17 +27,15 @@ with open(config["run"]) as fh:
 
 SAMPLES = run_cfg["samples"]
 
-# Merge every other top-level run-config key over config.yaml's defaults
-# (e.g. the "Pipeline stage booleans" block, or any run-specific override).
+# Merge every other top-level run-config key over config.yaml's defaults.
 # samples/merged_outdir keep their own special-cased handling below.
 for _key, _val in run_cfg.items():
     if _key in ("samples", "merged_outdir"):
         continue
     config[_key] = _val
 
-# merged_outdir is cohort-specific, so it can be set either on the command
-# line (--config merged_outdir=<path>, takes priority) or as a top-level
-# key in the run config YAML alongside "samples:".
+# merged_outdir can be set via --config merged_outdir=<path> (takes
+# priority) or as a top-level key in the run config YAML.
 if not config.get("merged_outdir"):
     config["merged_outdir"] = run_cfg.get("merged_outdir", "")
 
@@ -52,10 +48,8 @@ if not config.get("merged_outdir"):
 
 # ---------------------------------------------------------------------------
 # Resolve pipeline-relative reference-data / environment paths against the
-# pipeline directory itself (workflow.basedir), so config.yaml can use
-# relative paths (e.g. "resources/gnomad_data") instead of machine-specific
-# absolute ones -- keeping the whole folder self-contained and relocatable.
-# Absolute paths and remote URLs in config.yaml are left untouched.
+# pipeline directory itself (workflow.basedir). Absolute paths, remote
+# URLs, and the "remote" sentinel are left untouched. See docs/general.md.
 # ---------------------------------------------------------------------------
 _BUNDLED_PATH_KEYS = [
     "genome", "annotation",
@@ -68,9 +62,8 @@ _BUNDLED_PATH_KEYS = [
 _URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 def _is_remote_sentinel(value):
-    """True if a config value is the literal keyword 'remote' (case-insensitive,
-    whitespace-insensitive) -- an explicit request to use the public HTTPS
-    resource instead of a local copy. See _resolved_*() helpers below."""
+    """True if a config value is the literal keyword 'remote' -- an explicit
+    request to use the public HTTPS resource instead of a local copy."""
     return isinstance(value, str) and value.strip().lower() == "remote"
 
 for _key in _BUNDLED_PATH_KEYS:
@@ -79,9 +72,8 @@ for _key in _BUNDLED_PATH_KEYS:
         config[_key] = os.path.join(workflow.basedir, _val)
 
 # ---------------------------------------------------------------------------
-# Canonical public HTTPS locations for gnomAD/ClinVar/CADD, used when a
-# config value is the "remote" sentinel above, and as the fallback
-# compile_variants.py retries against if a configured local copy fails.
+# Canonical public HTTPS locations for gnomAD/ClinVar/CADD -- used for the
+# "remote" sentinel, and as compile_variants.py's fallback if a local copy fails.
 # ---------------------------------------------------------------------------
 _REMOTE_GNOMAD_BASE = "https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/genomes"
 _REMOTE_GNOMAD_MITO_VCF = ("https://storage.googleapis.com/gcp-public-data--gnomad/release/3.1/"
@@ -90,23 +82,21 @@ _REMOTE_CLINVAR_VCF = "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinv
 _REMOTE_CADD_PRESCORED_URL = "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/whole_genome_SNVs.tsv.gz"
 
 def _resolved_gnomad_base():
-    """config['gnomad_base'], or the canonical public gnomAD base URL if the
-    config value is the 'remote' sentinel."""
+    """config['gnomad_base'], or the canonical public gnomAD base URL if
+    the config value is the 'remote' sentinel."""
     return _REMOTE_GNOMAD_BASE if _is_remote_sentinel(config["gnomad_base"]) else config["gnomad_base"]
 
 def _resolved_gnomad_mito_vcf():
-    """config['gnomad_mito_vcf'], or the canonical public gnomAD v3.1 mito URL
-    if gnomad_base is the 'remote' sentinel -- mito follows the same
-    local/remote switch as the autosomal/X/Y chromosomes."""
+    """config['gnomad_mito_vcf'], or the canonical public gnomAD v3.1 mito
+    URL if gnomad_base is the 'remote' sentinel."""
     return _REMOTE_GNOMAD_MITO_VCF if _is_remote_sentinel(config["gnomad_base"]) else config["gnomad_mito_vcf"]
 
 def _resolved_clinvar_vcf():
     return _REMOTE_CLINVAR_VCF if _is_remote_sentinel(config["clinvar_vcf"]) else config["clinvar_vcf"]
 
 def _cadd_use_local():
-    """False if config['cadd_script'] is the 'remote' sentinel -- i.e. the
-    user wants to skip the local CADD-scripts install and rely on the
-    remote pre-scored SNV lookup instead."""
+    """False if config['cadd_script'] is the 'remote' sentinel (skip the
+    local CADD-scripts install, use the remote pre-scored lookup instead)."""
     return not _is_remote_sentinel(config["cadd_script"])
 
 # ---------------------------------------------------------------------------
@@ -114,8 +104,7 @@ def _cadd_use_local():
 # ---------------------------------------------------------------------------
 def _parse_tissues(raw):
     """Normalize a sample's 'tissues' value to a list of tissue names.
-    Accepts either a YAML list (parsed directly by PyYAML) or a plain
-    comma-separated string, for backward compatibility."""
+    Accepts either a YAML list or a plain comma-separated string."""
     if isinstance(raw, list):
         return [str(t).strip() for t in raw]
     return [t.strip() for t in str(raw).strip("[]").split(",")]
@@ -134,11 +123,9 @@ def sample_tissues(sample):
 
 
 # ---------------------------------------------------------------------------
-# Group samples by (bed, sample_type) for cross-sample merging (rules/merge_hits.smk).
-# Each sample's run-config entry must include a "sample_type" field (e.g. "fibroblasts",
-# "PBMC") alongside the existing "bed" field. Samples sharing both the same BED panel
-# and the same sample_type are merged together, mirroring how merge_candidate_hits.sh
-# was previously run once per (panel, sample_type) combination.
+# Group samples by (bed, sample_type) for cross-sample merging (rules/6_merge_hits.smk).
+# Each sample's run-config entry must include a "sample_type" field. Samples
+# sharing both the same BED panel and sample_type are merged together.
 # ---------------------------------------------------------------------------
 def _bed_id(bed):
     """Filesystem-safe identifier for a BED panel, e.g. 'IEI422_gene_symbols'."""
@@ -151,17 +138,15 @@ def _group_id(bed, sample_type):
 
 
 def _group_id_from_ids(bed_id, sample_type):
-    """Reconstruct a group_id from its already-split bed_id/sample_type wildcards
-    (used by rules whose output path has {bed_id}/{sample_type} as separate
-    wildcards, to look back up into GROUPS/GROUP_* dicts keyed by group_id)."""
+    """Reconstruct a group_id from its already-split bed_id/sample_type wildcards."""
     return f"{bed_id}_{sample_type}"
 
 
 def all_groups():
     """Return {group_id: [sample, sample, ...]} for every unique (bed, sample_type)
     combination present in the run config. Also populates GROUP_BED_ID and
-    GROUP_SAMPLE_TYPE, since group_id is just a concatenation and shouldn't be
-    re-split (bed stems or sample_types could themselves contain underscores)."""
+    GROUP_SAMPLE_TYPE (group_id is a concatenation and shouldn't be re-split,
+    since bed stems or sample_types could themselves contain underscores)."""
     groups = defaultdict(list)
     for s in SAMPLES:
         if "sample_type" not in SAMPLES[s]:
@@ -199,12 +184,11 @@ def group_outdir(group_id):
 
 # ---------------------------------------------------------------------------
 # Group (bed, sample_type) groups by BED panel alone, for stages that operate
-# across all sample types on the same panel: validating sample types against
-# GTEx reference tissues, and the final cross-sample-type merge of all_hits.
+# across all sample types on the same panel: validating sample types, and
+# the final cross-sample-type merge of all_hits.
 # ---------------------------------------------------------------------------
 def all_bed_groups():
-    """Return {bed_id: [group_id, ...]} for every BED panel present in the run,
-    where each group_id is one of the (bed, sample_type) keys in GROUPS."""
+    """Return {bed_id: [group_id, ...]} for every BED panel present in the run."""
     groups = defaultdict(list)
     for gid, members in GROUPS.items():
         bed = SAMPLES[members[0]]["bed"]
@@ -227,8 +211,8 @@ def bed_outdir(bed_id):
 
 
 def _quoted(items):
-    """Shell-quote each item in a list (e.g. hex colors like '#8BBF9F' would
-    otherwise be treated as a bash comment when passed unquoted in a shell: block)."""
+    """Shell-quote each item in a list (hex colors like '#8BBF9F' would
+    otherwise be treated as a bash comment when unquoted)."""
     return [shlex.quote(str(x)) for x in items]
 
 
@@ -236,9 +220,9 @@ _DEFAULT_SAMPLE_TYPE_PALETTE = ["#8BBF9F", "#D27D7D", "#A78BC5", "#E8B04B", "#4A
 
 
 def sample_type_color(sample_type):
-    """Color for a sample_type in validate_sample_types plots. Looks up
-    config['sample_type_colors'][sample_type] first; otherwise assigns a
-    deterministic color from a default palette based on sorted sample_type order."""
+    """Color for a sample_type in validate_sample_types plots. Uses
+    config['sample_type_colors'][sample_type] if set, else a deterministic
+    color from a default palette."""
     configured = config.get("sample_type_colors", {})
     if sample_type in configured:
         return configured[sample_type]
@@ -248,8 +232,7 @@ def sample_type_color(sample_type):
 
 
 def sample_fraction_threshold(group_id, fraction):
-    """Round-up sample-count threshold for a given fraction of a group's sample size
-    (mirrors the bash script's `echo "(n * frac + 0.9999)/1" | bc` rounding)."""
+    """Round-up sample-count threshold for a given fraction of a group's sample size."""
     return ceil(len(GROUPS[group_id]) * fraction)
 
 
@@ -261,46 +244,28 @@ def flag(key):
 
 
 # ---------------------------------------------------------------------------
-# Helper: per-sample, per-rule thread count.
-#
-# Rules look up their thread count with:
+# Helper: per-sample, per-rule thread count. Rules use:
 #   threads: lambda wc: _rule_threads(wc, "rule_key")
-#
-# Resolution order:
-#   1. run_config.yaml sample entry  e.g. longcallr_threads: 4
-#   2. config/config.yaml            threads: 8   (global default)
-#
-# The following rules are always single-threaded and do NOT use this helper:
-#   detect_ase_outliers, get_junction_counts
+# Resolution order: run_config.yaml sample entry (e.g. longcallr_threads: 4),
+# else config/config.yaml's global "threads:" default.
+# (detect_ase_outliers and get_junction_counts are always single-threaded
+# and don't use this helper.)
 # ---------------------------------------------------------------------------
 def _rule_threads(wc, rule_key):
-    """Return the thread count for a given rule and sample.
-    Looks for <rule_key>_threads in the sample's run-config entry first,
-    then falls back to the global config["threads"] default."""
     return int(SAMPLES[wc.sample].get(f"{rule_key}_threads", config["threads"]))
 
 
 # ---------------------------------------------------------------------------
-# Per-group / per-bed-panel thread & memory overrides.
-#
-# The group- and bed-level rules (build_group_junction_matrix,
-# run_cohort_junction_outlier_analysis, the merge_hits.smk stages --
-# merge_group_variants, merge_group_ase, merge_group_junctions,
-# split_group_hits_by_sample, merge_sample_hits, concat_group_hits,
-# plot_group_hits -- final_merge, validate_sample_types) don't have a
-# single sample to key off
-# of the way _rule_threads() does above -- they run once per (bed,
-# sample_type) group, or once per bed panel. Overrides for these are looked
-# up by group_id (e.g. "IEI422_gene_symbols_fibroblasts") or bare bed_id
-# (for the two rules that operate per-BED-panel rather than per-group), via
-# a top-level `groups:` block in the run config YAML:
+# Per-group / per-bed-panel thread & memory overrides, for rules that run
+# once per (bed, sample_type) group or once per bed panel rather than per
+# sample. Set via a top-level `groups:` block in the run config YAML:
 #
 #   groups:
 #     IEI422_gene_symbols_fibroblasts:            # group-level: bed_id_sample_type
 #       build_group_junction_matrix_threads: 1
 #       build_group_junction_matrix_mem_gb: 40
-#       run_cohort_junction_outlier_analysis_threads: 16
-#       run_cohort_junction_outlier_analysis_mem_gb: 96
+#       identify_cohort_junction_outliers_threads: 16
+#       identify_cohort_junction_outliers_mem_gb: 96
 #     IEI422_gene_symbols:                        # bed-level: bare bed_id
 #       validate_sample_types_mem_gb: 300
 #
@@ -344,21 +309,16 @@ def all_outputs():
             outs.append(f"{od}/ase_analysis/{s}_binomial_ase_results.tsv")
 
         if flag("junction_analysis"):
-            # Requesting the chain's final output (identify_junction_outliers)
-            # pulls get_junction_counts -> perform_binomial_tests along with it,
-            # since this flag now gates the whole junction_analysis.smk chain
-            # as a single unit.
+            # Requesting the chain's final output pulls the rest of the
+            # junction_analysis.smk chain along with it.
             for t in sample_tissues(s):
                 outs.append(
                     f"{od}/junction_analysis/gtex_{t}/{s}_gtex_{t}_outlier_junctions.tsv"
                 )
 
     if flag("merge_hits"):
-        # Requesting final_merge's output pulls the whole merge_hits.smk chain
-        # along with it (merge_group_variants -> merge_group_ase ->
-        # merge_group_junctions -> split_group_hits_by_sample ->
-        # merge_sample_hits -> concat_group_hits -> plot_group_hits), since
-        # this flag gates that whole chain as a unit.
+        # Requesting final_merge's output pulls the whole merge_hits.smk
+        # chain along with it (see docs/rules/6_merge_hits.md).
         for bid in BED_GROUPS:
             bod = bed_outdir(bid)
             outs.append(f"{bod}/merged_all_hits.tsv")
@@ -372,8 +332,7 @@ def all_outputs():
             )
 
     if flag("validate_sample_types"):
-        # Requesting validate_sample_types' output pulls build_group_junction_matrix
-        # along with it, since this flag gates the whole validate_sample_types.smk chain.
+        # Requesting validate_sample_types' output pulls build_group_junction_matrix along with it.
         for bid in BED_GROUPS:
             bod = bed_outdir(bid)
             outs.append(f"{bod}/validate_sample_types/{bid}_distance_heatmap.pdf")
@@ -389,14 +348,11 @@ rule all:
 # ---------------------------------------------------------------------------
 # Include modular rule files
 # ---------------------------------------------------------------------------
-include: "rules/longcallr.smk"
-include: "rules/nanots.smk"
-include: "rules/clair3_rna.smk"
-include: "rules/deepvariant.smk"
-include: "rules/compile_variants.smk"
-include: "rules/phase_reads.smk"
-include: "rules/ase_analysis.smk"
-include: "rules/junction_analysis.smk"
-include: "rules/cohort_junction_analysis.smk"
-include: "rules/merge_hits.smk"
-include: "rules/validate_sample_types.smk"
+include: "rules/1_call_variants.smk"
+include: "rules/2_compile_variants.smk"
+include: "rules/3_phase_reads.smk"
+include: "rules/4_ase_analysis.smk"
+include: "rules/5_junction_analysis.smk"
+include: "rules/6_merge_hits.smk"
+include: "rules/7_cohort_junction_analysis.smk"
+include: "rules/8_validate_sample_types.smk"

@@ -1,13 +1,14 @@
 """
-rules/compile_variants.smk
+rules/2_compile_variants.smk
 Merges longcallR / NanoTS / Clair3-RNA / DeepVariant VCFs, annotates with
 ANNOVAR, gnomAD, ClinVar, CADD, and SpliceAI.
+See docs/rules/2_compile_variants.md for the CADD/SpliceAI fallback tiers,
+the dedicated conda env, and the CADD_wrapper.sh PATH-isolation details.
 """
 
 def _gnomad_vcf_list(base, mito_vcf):
     """Build the comma-separated gnomAD VCF list from a given base URL/path
-    and mito VCF -- used for both the primary (resolved) and fallback
-    (always-canonical-remote) lists below."""
+    and mito VCF -- used for both the primary and fallback (always-remote) lists."""
     chroms = config["gnomad_chroms"]
     vcfs   = [f"{base}/gnomad.genomes.v4.1.sites.{c}.vcf.bgz" for c in chroms]
     vcfs.append(mito_vcf)
@@ -31,7 +32,7 @@ def _final_af_flag(wc):
     return f"--final-AF-threshold {v}" if str(v).strip() != "" else ""
 
 
-rule compile_variants:
+rule _2A_compile_variants:
     input:
         longcallr  = "{outdir}/variant_calling/longcallR/{sample}_longcallR_norm.vcf.gz",
         nanots     = "{outdir}/variant_calling/nanoTS/{sample}_nanoTS_norm.vcf.gz",
@@ -44,25 +45,18 @@ rule compile_variants:
     params:
         genome      = config["genome"],
         annotation  = config["annotation"],
-        # Primary: whatever's configured (local path, explicit URL, or the
-        # "remote" sentinel resolved to the canonical public URL -- see
-        # _resolved_gnomad_base() etc. in the Snakefile). Fallback: always
-        # the canonical public URL, so compile_variants.py can retry there
-        # if the primary (e.g. a configured local copy) fails at runtime.
+        # Primary: whatever's configured (local, explicit URL, or "remote"
+        # resolved to the canonical public URL). Fallback: always the
+        # canonical public URL, for compile_variants.py to retry against.
         gnomad_vcf           = _gnomad_vcf_list(_resolved_gnomad_base(), _resolved_gnomad_mito_vcf()),
         gnomad_vcf_fallback  = _gnomad_vcf_list(_REMOTE_GNOMAD_BASE, _REMOTE_GNOMAD_MITO_VCF),
         clinvar_vcf          = _resolved_clinvar_vcf(),
         clinvar_vcf_fallback = _REMOTE_CLINVAR_VCF,
         annovar_dir = config["annovar_dir"],
-        # cadd_script/cadd_data_dir are only passed through if a local CADD
-        # install should be attempted at all (_cadd_use_local() is False when
-        # cadd_script is the "remote" sentinel). cadd_local_prescored_snv/
-        # cadd_local_prescored_indel and cadd_prescored_url are always
-        # passed, so compile_variants.py can fall back to the local
-        # pre-scored lookup, then the remote pre-scored SNV lookup, if
-        # local scoring isn't configured/requested or fails at runtime
-        # (indels are only covered by the local pre-scored file -- the
-        # remote one is SNV-only).
+        # Only passed through if a local CADD install should be attempted
+        # (_cadd_use_local() is False when cadd_script is "remote"). The
+        # pre-scored paths are always passed as further fallback tiers --
+        # see docs/rules/2_compile_variants.md.
         cadd_script         = lambda wc: config["cadd_script"] if _cadd_use_local() else "",
         cadd_data_dir       = lambda wc: config["cadd_data_dir"] if _cadd_use_local() else "",
         cadd_local_prescored_snv   = config["cadd_local_prescored_snv"],
@@ -71,9 +65,8 @@ rule compile_variants:
         spliceai_annotation = config["spliceai_annotation"],
         spliceai_prescored_snv   = config["spliceai_prescored_snv_vcf"],
         spliceai_prescored_indel = config["spliceai_prescored_indel_vcf"],
-        # store_true flag in compile_variants.py -- either the flag itself or
-        # nothing, not a value, so this is a lambda rather than a plain
-        # config[...] lookup like the params around it.
+        # store_true flag in compile_variants.py -- either the flag itself
+        # or nothing, hence the lambda instead of a plain config[...] lookup.
         spliceai_force_prescored = lambda wc: "--SpliceAI-force-prescored-lookup" if config["spliceai_force_prescored_lookup"] else "",
         clnsig      = _clnsig_args,
         gnomad_af   = config["gnomad_af_threshold"],
@@ -97,20 +90,12 @@ rule compile_variants:
     shell:
         """
         mkdir -p $(dirname {params.outprefix})
-        # This rule uses its own dedicated environment (not the main
-        # conda_env every other rule's SLURM job activates via
-        # profile/slurm-jobscript.sh) -- see conda_env_compile_variants's
-        # comment in config.yaml for why: compile_variants.py needs to run
-        # under this env's own Python (pandas/pysam/spliceai/etc.), and
-        # directly shells out to several of this env's other tools
-        # (ANNOVAR's perl, bcftools/tabix/bgzip, spliceai). Prepending here,
-        # same PATH-prepend style as the jobscript itself, so only this
-        # rule is affected -- every other rule keeps using conda_env
-        # untouched. NOTE: CADD itself does NOT rely on this PATH export --
-        # cadd_script points at CADD_wrapper.sh (see config.yaml), which is
-        # self-contained and builds its own PATH rather than inheriting
-        # this one, specifically so conda_env_compile_variants's own `perl`
-        # can't leak into CADD.sh's per-rule conda environments.
+        # This rule uses its own dedicated environment (conda_env_compile_variants,
+        # not the main conda_env every other rule uses) -- see
+        # docs/rules/2_compile_variants.md for why. CADD itself does NOT rely
+        # on this PATH export -- cadd_script points at CADD_wrapper.sh,
+        # which builds its own PATH so this env's `perl` can't leak into
+        # CADD.sh's per-rule conda environments.
         export PATH="{params.conda_env_compile_variants}/bin:$PATH"
         python -u {params.script} \\
             --vcf-files \\

@@ -36,17 +36,14 @@ TEQUILA-Dx_snakemake/
 │   ├── slurm-jobscript.sh             # Per-job wrapper (activates conda env, etc.)
 │   └── slurm_utils.py
 ├── rules/                              # One .smk file per pipeline stage (included by Snakefile)
-│   ├── longcallr.smk
-│   ├── nanots.smk
-│   ├── clair3_rna.smk
-│   ├── deepvariant.smk
-│   ├── compile_variants.smk
-│   ├── phase_reads.smk
-│   ├── ase_analysis.smk
-│   ├── junction_analysis.smk
-│   ├── cohort_junction_analysis.smk
-│   ├── merge_hits.smk
-│   └── validate_sample_types.smk
+│   ├── 1_call_variants.smk            # 4 independent callers: longcallR, NanoTS, Clair3-RNA, DeepVariant
+│   ├── 2_compile_variants.smk
+│   ├── 3_phase_reads.smk
+│   ├── 4_ase_analysis.smk
+│   ├── 5_junction_analysis.smk
+│   ├── 6_merge_hits.smk
+│   ├── 7_cohort_junction_analysis.smk
+│   └── 8_validate_sample_types.smk
 ├── scripts/                            # Python scripts invoked by the rules above
 ├── resources/
 │   └── omim_data/OMIM.tsv             # Bundled OMIM gene → phenotype/inheritance table
@@ -125,7 +122,7 @@ samples:
 ```
 
 Samples sharing the same `bed` panel and `sample_type` are grouped together for cross-sample
-merging (`rules/merge_hits.smk`) and cohort-level analyses.
+merging (`rules/6_merge_hits.smk`) and cohort-level analyses.
 
 ## Usage
 

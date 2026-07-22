@@ -1,16 +1,13 @@
 """
-rules/junction_analysis.smk
-1. get_junction_counts          – per-sample junction counts + count matrix       [1 thread, always]
-2. perform_binomial_tests       – beta-binomial tests against each GTEx tissue    [per-sample configurable]
-3. identify_junction_outliers   – filter to significant outlier junctions         [per-sample configurable]
-
-(the per-gene BAM mapping file these depend on is built once, in rules/phase_reads.smk)
+rules/5_junction_analysis.smk
+Per-sample splice junction outlier analysis vs. GTEx reference tissues.
+See docs/rules/5_junction_analysis.md for details.
 """
 
 # ---------------------------------------------------------------------------
 # Get splice junction counts  [always 1 thread]
 # ---------------------------------------------------------------------------
-rule get_junction_counts:
+rule _5A_get_junction_counts:
     input:
         mapping = "{outdir}/phased_reads/{sample}_gene_bam_mapping_file.tsv",
         bam     = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -22,13 +19,10 @@ rule get_junction_counts:
         script_matrix= workflow.basedir + "/scripts/make_junction_count_matrix.py",
     threads: 1
     resources:
-        # make_junction_count_matrix.py scans the ENTIRE BAM genome-wide into
-        # in-memory dicts/dataframes (unlike get_splice_junction_counts_by_region.py,
-        # which is restricted to the BED panel's regions), so this can get
-        # silently OOM-killed on larger BAMs right at the tail end of the
-        # job (after useful output has already been logged, which is why
-        # the log can look like it finished successfully even though the
-        # job failed). Scale with BAM size, same pattern as the variant callers.
+        # make_junction_count_matrix.py scans the whole BAM genome-wide into
+        # memory (unlike get_splice_junction_counts_by_region.py, which is
+        # restricted to the BED panel), so this can OOM on large BAMs. Scale
+        # with BAM size, same pattern as the variant callers.
         mem_mb     = lambda wc, attempt: max(4096, attempt * _bam_size_gb(wc) * 2 * 1024),
         runtime    = config["time"],
     log:
@@ -58,7 +52,7 @@ def _gtex_mem(wc, threads, attempt):
     return max(4096, attempt * threads * (5 if wc.tissue == "brain" else 2) * 1024)
 
 
-rule perform_binomial_tests:
+rule _5B_perform_binomial_tests:
     input:
         jxn_counts = "{outdir}/junction_analysis/junction_counts/{sample}_splice_junction_counts.tsv",
         gtex_file  = lambda wc: _gtex_file(wc.tissue),
@@ -98,7 +92,7 @@ rule perform_binomial_tests:
 # Filter to significant outlier junctions
 # [per-sample configurable via identify_junction_outliers_threads in run config]
 # ---------------------------------------------------------------------------
-rule identify_junction_outliers:
+rule _5C_identify_junction_outliers:
     input:
         all_jxns = "{outdir}/junction_analysis/gtex_{tissue}/{sample}_gtex_{tissue}_all_junctions.tsv",
     output:

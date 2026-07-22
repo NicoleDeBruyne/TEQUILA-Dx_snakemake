@@ -38,13 +38,9 @@ def runtime_to_hms(runtime_minutes):
 
 def default_conda_env_dir():
     """Absolute path to envs/conda_env/, a sibling of this profile/ directory.
-
-    Computed here rather than inside the generated jobscript: this file is
-    invoked directly by Python, so __file__ reliably reflects its real
-    location. The jobscript, by contrast, is submitted via sbatch, and
-    SLURM copies job scripts into its own spool directory before running
-    them -- so self-locating via $0/$BASH_SOURCE inside a running job
-    doesn't give the script's real path, only the spool copy's."""
+    Computed here (not in the jobscript) since __file__ reliably reflects
+    this file's real location -- see docs/slurm.md for why the jobscript
+    itself can't self-locate the same way."""
     profile_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(profile_dir, "..", "envs", "conda_env")
 
@@ -59,13 +55,9 @@ def build_sbatch_command(job_properties, jobscript, log_dir):
     mem_mb  = resources.get("mem_mb", 4000)
     runtime = resources.get("runtime", 720)  # minutes
 
-    # Build a readable job/log name: rule + sample wildcard only.
-    # NOTE: wildcards can include path-like values (e.g. `outdir`, which is
-    # a full filesystem path used as a wildcard in this pipeline's rules).
-    # Joining ALL wildcard values blindly previously produced filenames
-    # containing "/" characters, which broke --output (sbatch silently
-    # created directories instead of log files). Only use short,
-    # filename-safe wildcards here — primarily `sample`.
+    # Build a readable job/log name: rule + sample wildcard only. Only
+    # short, filename-safe wildcards are used here (some wildcards, like
+    # `outdir`, are full filesystem paths and would break --output).
     SAFE_WILDCARD_KEYS = {"sample", "tissue"}
     safe_values = [
         str(v) for k, v in wildcards.items()
@@ -75,18 +67,15 @@ def build_sbatch_command(job_properties, jobscript, log_dir):
     job_label = f"{rule_name}_{wildcard_str}" if wildcard_str else rule_name
 
     # Route logs into a per-sample subdirectory when a sample wildcard
-    # exists, so each run's directory is organized by sample:
-    #   ${LOG_DIR}/<sample>/slurm-<jobid>_<rule>_<sample>.out
+    # exists:  ${LOG_DIR}/<sample>/slurm-<jobid>_<rule>_<sample>.out
     # Falls back to LOG_DIR directly for jobs with no sample wildcard.
     sample = wildcards.get("sample")
     target_dir = os.path.join(log_dir, sample) if sample else log_dir
     os.makedirs(target_dir, exist_ok=True)
 
-    # `%j` in --output below is the SLURM job ID, which is different every
-    # submission -- so a rerun (retry, or a person re-launching a failed/updated
-    # job) leaves the previous attempt's log file behind under a different name.
-    # Remove any prior log(s) for this exact rule+sample before submitting the
-    # new one, so only the most recent attempt's log file remains.
+    # `%j` (SLURM job ID) differs on every submission, so a rerun leaves
+    # the previous attempt's log behind under a different name. Remove any
+    # prior log(s) for this exact rule+sample before submitting the new one.
     stale_pattern = os.path.join(target_dir, f"slurm-*_{job_label}.out")
     for stale_log in glob.glob(stale_pattern):
         try:
