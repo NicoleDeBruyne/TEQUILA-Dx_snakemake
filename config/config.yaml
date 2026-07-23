@@ -200,8 +200,9 @@ min_dist_from_read_end_variant_phasing: 20   # min distance (bp) from a read's e
 # Also used by junction_analysis.smk and cohort_junction_analysis.smk.
 sample_coverage_threshold: 20
 # Also used by junction_analysis.smk, merge_hits.smk (as the padj:delta pair
-# for outlier calling), and cohort_junction_analysis.smk when
-# cohort_jxn_method is "beta_binomial" (ignored for "modified_zscore").
+# for outlier calling), and cohort_junction_analysis.smk for groups using
+# beta_binomial (ignored for groups using modified_zscore -- see
+# cohort_jxn_method below).
 padj_threshold:         0.05
 haplotype_ratio_threshold: 0.1
 # Min fraction of max coverage phased to haplotypes for an ASE call to be trusted.
@@ -215,7 +216,7 @@ gtex_data_dir: "resources/gtex_data"
 gtex_coverage_threshold:   20
 gtex_n_threshold:          100
 # Also used by cohort_junction_analysis.smk below (as delta_psi_threshold)
-# when cohort_jxn_method is "beta_binomial" (ignored for "modified_zscore",
+# for groups using beta_binomial (ignored for groups using modified_zscore,
 # which uses cohort_jxn_z_threshold instead).
 delta_psi_threshold:    0.1
 jxn_phasing_threshold:  0.8   # min fraction of bulk coverage a junction's hap1+hap2 must reach to be trusted
@@ -225,8 +226,7 @@ jxn_phasing_threshold:  0.8   # min fraction of bulk coverage a junction's hap1+
 # Computes per-junction coverage/usage metrics across a (bed, sample_type)
 # group's own bulk BAMs (rather than GTEx reference tissues), fits a
 # per-junction reference distribution from the cohort's bulk samples, then
-# flags per-sample outliers. Two statistical methods are available, chosen
-# via cohort_jxn_method:
+# flags per-sample outliers. Two statistical methods are available:
 #   "beta_binomial"    -- fits a Beta distribution per junction, tests each
 #                          sample with a beta-binomial test, FDR-corrects
 #                          across the whole cohort. Outlier = padj_threshold/
@@ -234,13 +234,24 @@ jxn_phasing_threshold:  0.8   # min fraction of bulk coverage a junction's hap1+
 #   "modified_zscore"  -- takes the median/MAD of each junction's rescaled
 #                          value across bulk samples; outlier = |modZ| >=
 #                          cohort_jxn_z_threshold. No p-values/FDR involved.
-# Groups with fewer than cohort_jxn_min_samples samples are skipped entirely
-# (a note explaining why is written alongside that group's other output --
-# see rules/7_cohort_junction_analysis.smk's `note` output) rather than fitting
-# a per-junction distribution from too few samples to be meaningful.
+# cohort_jxn_method picks between them:
+#   "auto" (default) -- per group, beta_binomial if the group has >=
+#                        cohort_jxn_beta_min_samples bulk samples, else
+#                        modified_zscore. A per-junction Beta distribution
+#                        needs enough bulk samples to fit meaningfully;
+#                        smaller cohorts fall back to the median/MAD
+#                        approach instead.
+#   "beta_binomial" / "modified_zscore" -- force that one method for every
+#                        group regardless of size.
+# Groups with fewer than cohort_jxn_min_samples samples are skipped entirely,
+# regardless of cohort_jxn_method (a note explaining why is written alongside
+# that group's other output -- see rules/7_cohort_junction_analysis.smk's
+# `note` output) -- this is a lower, separate floor below which neither
+# method is meaningful at all.
 # ---------------------------------------------------------------------------
 cohort_jxn_min_samples:        10   # groups with fewer bulk samples than this are skipped entirely
-cohort_jxn_method: "beta_binomial"  # "beta_binomial" or "modified_zscore"
+cohort_jxn_method:       "auto"     # "auto", "beta_binomial", or "modified_zscore"
+cohort_jxn_beta_min_samples:   30   # "auto" only: beta_binomial at/above this sample count, else modified_zscore
 cohort_jxn_z_threshold:       3.5   # modified_zscore only: |modZ| >= this value flags an outlier
 cohort_jxn_phasing_threshold: 0.8   # min fraction of bulk coverage a junction's hap1+hap2 must reach to be trusted
 cohort_jxn_n_threshold:        30   # min number of bulk samples with usable coverage before fitting a junction's reference distribution

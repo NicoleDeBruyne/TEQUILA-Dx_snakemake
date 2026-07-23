@@ -183,6 +183,50 @@ def group_outdir(group_id):
 
 
 # ---------------------------------------------------------------------------
+# rules/7_cohort_junction_analysis.smk's statistical method: forced via
+# config["cohort_jxn_method"] if set to "beta_binomial"/"modified_zscore", or
+# auto-selected per group by cohort size otherwise ("auto", the default) --
+# beta_binomial for groups with >= cohort_jxn_beta_min_samples samples (a
+# per-junction Beta distribution needs enough bulk samples to fit
+# meaningfully), modified_zscore for smaller groups. Used by both
+# all_outputs() below and rules/7_cohort_junction_analysis.smk -- defined
+# here (rather than in that rules file) so all_outputs() can call it too,
+# since rule all's input is evaluated before any include: runs.
+def _cja_method_for_group(group_id):
+    method = config.get("cohort_jxn_method", "auto")
+    if method in ("beta_binomial", "modified_zscore"):
+        return method
+    if method != "auto":
+        raise ValueError(
+            "config['cohort_jxn_method'] must be 'auto', 'beta_binomial', or "
+            "'modified_zscore', got " + repr(method)
+        )
+    n     = len(GROUPS[group_id])
+    min_n = config.get("cohort_jxn_beta_min_samples", 30)
+    return "beta_binomial" if n >= min_n else "modified_zscore"
+
+
+def _cja_thr_label(group_id):
+    """Output-subdirectory label for this group's cohort_junction_analysis
+    outlier threshold, e.g. 'padj0.05_delta0.1' or 'z3.5' -- see
+    _cja_method_for_group()."""
+    if _cja_method_for_group(group_id) == "beta_binomial":
+        return "padj" + str(config["padj_threshold"]) + "_delta" + str(config["delta_psi_threshold"])
+    z = config.get("cohort_jxn_z_threshold", 3.5)
+    return "z" + str(z)
+
+
+def _cja_thr_flag(group_id):
+    """--bb-thresholds/--z-thresholds CLI flag for this group's
+    identify_cohort_junction_outliers.py invocation -- see
+    _cja_method_for_group()."""
+    if _cja_method_for_group(group_id) == "beta_binomial":
+        return "--bb-thresholds " + str(config["padj_threshold"]) + ":" + str(config["delta_psi_threshold"])
+    z = config.get("cohort_jxn_z_threshold", 3.5)
+    return "--z-thresholds " + str(z)
+
+
+# ---------------------------------------------------------------------------
 # Group (bed, sample_type) groups by BED panel alone, for stages that operate
 # across all sample types on the same panel: validating sample types, and
 # the final cross-sample-type merge of all_hits.
@@ -327,8 +371,8 @@ def all_outputs():
         for gid in GROUPS:
             god = group_outdir(gid)
             outs.append(
-                f"{god}/cohort_junction_analysis/{gid}_padj{config['padj_threshold']}"
-                f"_delta{config['delta_psi_threshold']}/{gid}_outliers.tsv"
+                god + "/cohort_junction_analysis/" + gid + "_" + _cja_thr_label(gid)
+                + "/" + gid + "_outliers.tsv"
             )
 
     if flag("validate_sample_types"):

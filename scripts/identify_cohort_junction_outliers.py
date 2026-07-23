@@ -1448,28 +1448,39 @@ def make_hit_boxplots(
 
         for gene, jxn_map in sorted(gene_jxn_map.items()):
             for jxn, hit_samples in sorted(jxn_map.items()):
-                sub = fmt_updated[(fmt_updated["gene"] == gene) & (fmt_updated["junction"] == jxn)]
-                if sub.empty: continue
-                vals = pd.to_numeric(sub[rescaled_col], errors="coerce")
-                sub = sub.assign(_val=vals).dropna(subset=["_val"])
-                if sub.empty: continue
+                try:
+                    sub = fmt_updated[(fmt_updated["gene"] == gene) & (fmt_updated["junction"] == jxn)]
+                    if sub.empty: continue
+                    vals = pd.to_numeric(sub[rescaled_col], errors="coerce")
+                    sub = sub.assign(_val=vals).dropna(subset=["_val"])
+                    if sub.empty: continue
 
-                fig, ax = plt.subplots(figsize=(4.0, 3.2))
-                phasings = [p for p in ("bulk", "hap1", "hap2") if p in sub["phasing"].unique()]
-                data = [sub[sub["phasing"] == p]["_val"].to_numpy() for p in phasings]
-                bp = ax.boxplot(data, labels=phasings, showfliers=False, widths=0.5)
-                for i, p in enumerate(phasings):
-                    p_vals = sub[sub["phasing"] == p]
-                    is_hit = p_vals["sample"].isin(hit_samples)
-                    x_jitter = np.random.normal(i + 1, 0.04, size=len(p_vals))
-                    colors = ["#c0392b" if h else "#7f8c8d" for h in is_hit]
-                    ax.scatter(x_jitter, p_vals["_val"], c=colors, s=14, alpha=0.8, zorder=3)
-                ax.set_title(f"{gene}: {jxn}", fontsize=9)
-                ax.set_ylabel(rescaled_col, fontsize=8)
-                fig.tight_layout()
-                pdf.savefig(fig, bbox_inches="tight")
-                plt.close(fig)
-                n_written += 1
+                    fig, ax = plt.subplots(figsize=(4.0, 3.2))
+                    phasings = [p for p in ("bulk", "hap1", "hap2") if p in sub["phasing"].unique()]
+                    data = [sub[sub["phasing"] == p]["_val"].to_numpy() for p in phasings]
+                    bp = ax.boxplot(data, labels=phasings, showfliers=False, widths=0.5)
+                    for i, p in enumerate(phasings):
+                        p_vals = sub[sub["phasing"] == p]
+                        is_hit = p_vals["sample"].isin(hit_samples)
+                        x_jitter = np.random.normal(i + 1, 0.04, size=len(p_vals))
+                        colors = ["#c0392b" if h else "#7f8c8d" for h in is_hit]
+                        ax.scatter(x_jitter, p_vals["_val"], c=colors, s=14, alpha=0.8, zorder=3)
+                    ax.set_title(f"{gene}: {jxn}", fontsize=9)
+                    ax.set_ylabel(rescaled_col, fontsize=8)
+                    fig.tight_layout()
+                    pdf.savefig(fig, bbox_inches="tight")
+                    plt.close(fig)
+                    n_written += 1
+                except Exception as e:
+                    # One bad hit shouldn't truncate the whole PDF -- log which
+                    # (gene, junction) failed and why, close any half-built
+                    # figure so it doesn't leak, and move on to the next hit.
+                    print(f"[WARNING] Box plot failed for {gene}: {jxn} ({metric_col}): {e}")
+                    traceback.print_exc()
+                    try:
+                        plt.close(fig)
+                    except Exception:
+                        pass
     print(f"  Box plots ({metric_col}, {n_written}/{n_hits}) → {out_pdf} ({time.time()-t_box:.2f}s)")
 
 
@@ -1508,12 +1519,21 @@ def main() -> None:
 
     print(f"Method: {method}")
 
-    prefix      = args.outprefix.rstrip("/")
-    outdir      = os.path.dirname(os.path.abspath(prefix))
-    prefix_name = os.path.basename(prefix)
-    base_results = os.path.join(outdir, f"{prefix_name}_results")
-    qc_dir       = os.path.join(outdir, f"{prefix_name}_qc")
-    tmp_dir      = os.path.join(outdir, f"{prefix_name}_tmp")
+    prefix        = args.outprefix.rstrip("/")
+    outdir        = os.path.dirname(os.path.abspath(prefix))
+    prefix_name   = os.path.basename(prefix)
+    # Per-gene results columns differ by method (alpha/beta/expected/... for
+    # beta_binomial vs. median/mad/modz for modified_zscore), so the method
+    # is baked into this directory's name -- otherwise, re-running against
+    # the same _raw/ input with the other method would silently overwrite
+    # results computed under the first method, even though _raw/ itself
+    # (written once by cohort_junction_analysis.py) supports being re-scored
+    # under either method as many times as you like.
+    base_results  = os.path.join(outdir, f"{prefix_name}_results_{method}")
+    # Same reasoning as base_results above -- which columns a QC figure's
+    # "proportion fit" bar reads (alpha_ vs. median_) depends on method.
+    qc_dir        = os.path.join(outdir, f"{prefix_name}_qc_{method}")
+    tmp_dir       = os.path.join(outdir, f"{prefix_name}_tmp")
 
     def _results_dir():
         os.makedirs(base_results, exist_ok=True); return base_results

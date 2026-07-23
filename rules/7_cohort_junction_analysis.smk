@@ -7,7 +7,19 @@ rules/3_phase_reads.smk) into a single cohort-wide gene/sample/BAM mapping file,
 then computes per-junction, per-sample coverage/usage metrics and flags
 per-sample outliers against the whole cohort's own bulk BAMs (rather than
 against GTEx reference tissues, as rules/5_junction_analysis.smk does), using
-either beta-binomial testing or a modified z-score (config["cohort_jxn_method"]).
+either beta-binomial testing or a modified z-score.
+
+Which method a given group uses is decided by _cja_method_for_group() in the
+main Snakefile (config["cohort_jxn_method"]: "auto" by default -- beta_binomial
+for groups with >= config["cohort_jxn_beta_min_samples"] bulk samples,
+modified_zscore for smaller groups -- or force one method for every group via
+"beta_binomial"/"modified_zscore"). Since a group's method can only be known
+once GROUPS is built, and Snakemake output: paths must be static wildcard
+templates (not a value chosen per-group at parse time), the outlier output
+path below uses an extra {thr_label} wildcard rather than picking between two
+different literal path templates; _7B's own params re-derive the method from
+{bed_id}/{sample_type} directly (not by inspecting {thr_label}) to keep a
+single source of truth with the Snakefile's target-building in all_outputs().
 
 Split into two rules:
   1. _7A_cohort_junction_analysis          -- per-gene metric computation
@@ -43,23 +55,6 @@ _merged_outdir = config["merged_outdir"]
 def _group_gene_bam_mapping_files(group_id):
     return [f"{SAMPLES[s]['outdir']}/phased_reads/{s}_gene_bam_mapping_file.tsv" for s in GROUPS[group_id]]
 
-
-# Output subdirectory naming and the --bb-thresholds/--z-thresholds flag
-# depend on which method is configured; computed once here since config is
-# static at parse time. Built via string concatenation rather than
-# f-strings -- see the note above _merged_outdir.
-if config["cohort_jxn_method"] == "beta_binomial":
-    _cja_thr_dirname   = "padj" + str(config["padj_threshold"]) + "_delta" + str(config["delta_psi_threshold"])
-    _cja_thr_flag      = "--bb-thresholds " + str(config["padj_threshold"]) + ":" + str(config["delta_psi_threshold"])
-elif config["cohort_jxn_method"] == "modified_zscore":
-    _cja_z_threshold   = config.get("cohort_jxn_z_threshold", 3.5)
-    _cja_thr_dirname   = "z" + str(_cja_z_threshold)
-    _cja_thr_flag      = "--z-thresholds " + str(_cja_z_threshold)
-else:
-    raise ValueError(
-        "config['cohort_jxn_method'] must be 'beta_binomial' or 'modified_zscore', "
-        "got " + repr(config["cohort_jxn_method"])
-    )
 
 _cja_manifest_path = _merged_outdir + "/{bed_id}/{sample_type}/cohort_junction_analysis/{bed_id}_{sample_type}_gene_manifest.tsv"
 
@@ -130,14 +125,19 @@ rule _7B_identify_cohort_junction_outliers:
         manifest = _cja_manifest_path,
         bed      = lambda wc: bed_path(wc.bed_id),
     output:
-        # Path mirrors identify_cohort_junction_outliers.py's own naming for
-        # the single threshold passed via --bb-thresholds/--z-thresholds
-        # below (see _cja_thr_dirname/_cja_thr_flag above).
-        outliers = _merged_outdir + "/{bed_id}/{sample_type}/cohort_junction_analysis/{bed_id}_{sample_type}_" + _cja_thr_dirname + "/{bed_id}_{sample_type}_outliers.tsv",
+        # {thr_label} is an extra wildcard (rather than a value chosen once
+        # for the whole file, as the rest of this path is) since which
+        # method -- and therefore which label, e.g. "padj0.05_delta0.1" vs
+        # "z3.5" -- applies varies per group. Snakemake binds it from
+        # whatever concrete path was actually requested (built by
+        # all_outputs() via _cja_thr_label()); it isn't otherwise used
+        # below, since params.thr_flag re-derives the method independently
+        # from {bed_id}/{sample_type} rather than parsing this wildcard.
+        outliers = _merged_outdir + "/{bed_id}/{sample_type}/cohort_junction_analysis/{bed_id}_{sample_type}_{thr_label}/{bed_id}_{sample_type}_outliers.tsv",
     params:
         outprefix = lambda wc: f"{group_outdir(_group_id_from_ids(wc.bed_id, wc.sample_type))}/cohort_junction_analysis/{_group_id_from_ids(wc.bed_id, wc.sample_type)}",
         has_ipa   = "--has-ipa" if config["genome"] else "",
-        thr_flag  = _cja_thr_flag,
+        thr_flag  = lambda wc: _cja_thr_flag(_group_id_from_ids(wc.bed_id, wc.sample_type)),
         gtf       = config["annotation"],
         cov_thr   = config["sample_coverage_threshold"],
         n_thr     = config["cohort_jxn_n_threshold"],
@@ -148,7 +148,7 @@ rule _7B_identify_cohort_junction_outliers:
             _group_id_from_ids(wc.bed_id, wc.sample_type), "identify_cohort_junction_outliers", threads * 4)),
         runtime    = config["time"],
     log:
-        _merged_outdir + "/{bed_id}/{sample_type}/logs/identify_cohort_junction_outliers.log"
+        _merged_outdir + "/{bed_id}/{sample_type}/logs/identify_cohort_junction_outliers_{thr_label}.log"
     shell:
         """
         mkdir -p $(dirname {log})
