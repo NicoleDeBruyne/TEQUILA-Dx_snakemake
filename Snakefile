@@ -208,12 +208,13 @@ def _cja_method_for_group(group_id):
 
 def _cja_thr_label(group_id):
     """Output-subdirectory label for this group's cohort_junction_analysis
-    outlier threshold, e.g. 'padj0.05_delta0.1' or 'z3.5' -- see
+    outlier threshold, e.g. 'padj0.05_delta0.1' or 'z3.5_delta0.1' -- see
     _cja_method_for_group()."""
     if _cja_method_for_group(group_id) == "beta_binomial":
         return "padj" + str(config["padj_threshold"]) + "_delta" + str(config["delta_psi_threshold"])
     z = config.get("cohort_jxn_z_threshold", 3.5)
-    return "z" + str(z)
+    d = config.get("cohort_jxn_z_delta_threshold", 0.1)
+    return "z" + str(z) + "_delta" + str(d)
 
 
 def _cja_thr_flag(group_id):
@@ -223,7 +224,22 @@ def _cja_thr_flag(group_id):
     if _cja_method_for_group(group_id) == "beta_binomial":
         return "--bb-thresholds " + str(config["padj_threshold"]) + ":" + str(config["delta_psi_threshold"])
     z = config.get("cohort_jxn_z_threshold", 3.5)
-    return "--z-thresholds " + str(z)
+    d = config.get("cohort_jxn_z_delta_threshold", 0.1)
+    return "--z-thresholds " + str(z) + ":" + str(d)
+
+
+def _cja_n_threshold(group_id):
+    """--n-threshold value for this group's identify_cohort_junction_outliers.py
+    invocation -- the minimum number of bulk samples with usable coverage a
+    junction needs before a reference distribution is fit at all. Kept
+    separate per method (config["cohort_jxn_beta_n_threshold"] /
+    config["cohort_jxn_zscore_n_threshold"]) since modified_zscore groups are,
+    by construction, smaller than cohort_jxn_beta_min_samples -- reusing the
+    beta_binomial default here would make every junction in every
+    modified_zscore group unfittable ("low_n")."""
+    if _cja_method_for_group(group_id) == "beta_binomial":
+        return config.get("cohort_jxn_beta_n_threshold", 30)
+    return config.get("cohort_jxn_zscore_n_threshold", 10)
 
 
 # ---------------------------------------------------------------------------

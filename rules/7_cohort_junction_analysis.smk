@@ -140,7 +140,7 @@ rule _7B_identify_cohort_junction_outliers:
         thr_flag  = lambda wc: _cja_thr_flag(_group_id_from_ids(wc.bed_id, wc.sample_type)),
         gtf       = config["annotation"],
         cov_thr   = config["sample_coverage_threshold"],
-        n_thr     = config["cohort_jxn_n_threshold"],
+        n_thr     = lambda wc: _cja_n_threshold(_group_id_from_ids(wc.bed_id, wc.sample_type)),
         script    = workflow.basedir + "/scripts/identify_cohort_junction_outliers.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.bed_id, wc.sample_type), "identify_cohort_junction_outliers", config["threads"])
     resources:

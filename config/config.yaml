@@ -233,7 +233,12 @@ jxn_phasing_threshold:  0.8   # min fraction of bulk coverage a junction's hap1+
 #                          delta_psi_threshold above.
 #   "modified_zscore"  -- takes the median/MAD of each junction's rescaled
 #                          value across bulk samples; outlier = |modZ| >=
-#                          cohort_jxn_z_threshold. No p-values/FDR involved.
+#                          cohort_jxn_z_threshold AND |delta| >=
+#                          cohort_jxn_z_delta_threshold, where delta is the
+#                          same empirical p1/p99-based effect size
+#                          beta_binomial uses (no p-values/FDR involved,
+#                          though -- modZ itself is the significance side
+#                          of this pair, not a p-value).
 # cohort_jxn_method picks between them:
 #   "auto" (default) -- per group, beta_binomial if the group has >=
 #                        cohort_jxn_beta_min_samples bulk samples, else
@@ -252,9 +257,17 @@ jxn_phasing_threshold:  0.8   # min fraction of bulk coverage a junction's hap1+
 cohort_jxn_min_samples:        10   # groups with fewer bulk samples than this are skipped entirely
 cohort_jxn_method:       "auto"     # "auto", "beta_binomial", or "modified_zscore"
 cohort_jxn_beta_min_samples:   30   # "auto" only: beta_binomial at/above this sample count, else modified_zscore
-cohort_jxn_z_threshold:       3.5   # modified_zscore only: |modZ| >= this value flags an outlier
+cohort_jxn_z_threshold:       3.5   # modified_zscore only: |modZ| >= this value flags an outlier (paired with delta below)
+cohort_jxn_z_delta_threshold: 0.1   # modified_zscore only: |delta| >= this value flags an outlier (paired with modZ above)
 cohort_jxn_phasing_threshold: 0.8   # min fraction of bulk coverage a junction's hap1+hap2 must reach to be trusted
-cohort_jxn_n_threshold:        30   # min number of bulk samples with usable coverage before fitting a junction's reference distribution
+# Min number of bulk samples with usable coverage before fitting a
+# junction's reference distribution -- kept separate per method since
+# modified_zscore groups are, by construction, smaller than
+# cohort_jxn_beta_min_samples (else they'd be running beta_binomial
+# instead); reusing a single higher threshold across both would make every
+# junction in every modified_zscore group unfittable ("low_n").
+cohort_jxn_beta_n_threshold:     30   # beta_binomial only
+cohort_jxn_zscore_n_threshold:   10   # modified_zscore only
 cohort_jxn_min_reads:          20   # a junction needs >= this many reads in >=1 bulk sample to be tested at all
 
 # ---------------------------------------------------------------------------

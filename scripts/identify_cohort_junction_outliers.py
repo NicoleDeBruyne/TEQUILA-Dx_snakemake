@@ -94,11 +94,17 @@ def parse_args() -> argparse.Namespace:
     method_group.add_argument(
         "--z-thresholds",
         nargs="*", default=None,
-        metavar="MODZ",
+        metavar="MODZ:DELTA",
         help="Use modified z-score testing (per-junction median/MAD, no "
-             "p-values or FDR correction). One or more |modZ| cutoffs, e.g. "
-             "3.5 5 -- each produces its own output subdirectory. Defaults "
-             "to 3.5 if the flag is given with no values.")
+             "p-values or FDR correction). One or more modZ:delta threshold "
+             "pairs, e.g. 3.5:0.1 5:0.1 -- each combination produces its own "
+             "output subdirectory. Outlier = |modZ| >= modZ AND |delta| >= "
+             "delta, where delta is the same empirical p1/p99-based effect "
+             "size used by --bb-thresholds. Pass with no values to compute "
+             "modified z-score statistics (columns "
+             "n/median/mad/modz/p1/p99/delta per metric) without "
+             "identifying outliers. Defaults to 3.5:0.1 if the flag is "
+             "given with no values.")
     p.add_argument("--no-ss-IR",                   action="store_true")
     p.add_argument("--gtf",                        default=None,
                    help="GTF/GTF.gz. If provided, adds junction_type column.")
@@ -319,7 +325,18 @@ def beta_binomial_test_chunk(
 # distributed data -- the standard Iglewicz & Hoaglin formulation).
 #
 # No p-value or FDR correction is computed for this method -- outliers are
-# identified by a direct |modZ| cutoff (see --z-thresholds).
+# identified by |modZ| >= a cutoff AND |delta| >= a separate cutoff (see
+# --z-thresholds), the same two-pronged significance-and-effect-size shape
+# --bb-thresholds uses (padj + delta). delta itself is computed identically
+# to the beta_binomial path: the empirical 1st/99th percentile of the bulk
+# cohort's own values for a junction, and how far outside that range a
+# row's value falls (see p1_{metric}/p99_{metric}/delta_{metric} in
+# _run_one_metric) -- modZ and delta are complementary here, not
+# redundant: modZ is a distributional significance measure (how unusual is
+# this value given the fitted spread), while delta is a plain empirical
+# effect size in the metric's own units, letting a genuinely tiny but
+# "significant" wobble be screened out the same way it already is for
+# beta_binomial groups.
 
 _MODZ_CONST = 0.6745        # MAD -> z-score scaling constant
 _MEANAD_CONST = 0.7979      # mean-absolute-deviation -> z-score scaling constant
@@ -403,7 +420,7 @@ def _run_one_metric(
     """Fits a per-junction reference distribution across bulk samples and
     scores every row (bulk + hap1/hap2) against it, using either:
       method="beta_binomial"    -- n/alpha/beta/expected/p1/p99/delta/p_value
-      method="modified_zscore"  -- n/median/mad/modz
+      method="modified_zscore"  -- n/median/mad/modz/p1/p99/delta
     columns per metric. See the module docstring / --bb-thresholds vs.
     --z-thresholds for how these feed into outlier identification.
     """
@@ -433,15 +450,15 @@ def _run_one_metric(
         .astype(np.float32)
     )
 
-    n_col = f"n_{metric_col}"
+    n_col   = f"n_{metric_col}"
+    p1_col  = f"p1_{metric_col}"
+    p99_col = f"p99_{metric_col}"
+    delta_col = f"delta_{metric_col}"
     if method == "beta_binomial":
         alpha_col    = f"alpha_{metric_col}"
         beta_col     = f"beta_{metric_col}"
         expected_col = f"expected_{metric_col}"
-        delta_col    = f"delta_{metric_col}"
         p_col        = f"p_value_{metric_col}"
-        p1_col       = f"p1_{metric_col}"
-        p99_col      = f"p99_{metric_col}"
         fit_indicator_col = alpha_col
         empty_cols = (alpha_col, beta_col, expected_col, p1_col, p99_col, delta_col, p_col)
     else:
@@ -449,7 +466,7 @@ def _run_one_metric(
         mad_col    = f"mad_{metric_col}"
         modz_col   = f"modz_{metric_col}"
         fit_indicator_col = median_col
-        empty_cols = (median_col, mad_col, modz_col)
+        empty_cols = (median_col, mad_col, modz_col, p1_col, p99_col, delta_col)
 
     if bulk_wide.empty:
         combined_df[n_col] = 0
@@ -532,50 +549,55 @@ def _run_one_metric(
     # low_phased only applies when the row also has coverage (otherwise low_coverage wins)
     is_low_phased_hap = is_hap & is_low_phased & has_cov
 
+    # p1/p99/delta are computed the same way regardless of method -- they're
+    # purely empirical (the 1st/99th percentile of the bulk cohort's own
+    # values for this junction, and how far outside that range a row's own
+    # value falls), independent of whichever distribution was fit above.
+    # Use ceil(n * percentile) as index for conservative bounds:
+    # e.g. n=107: ceil(107*0.01)=2 → take 3rd value (0-based index 2),
+    # excluding the bottom 2; p99 takes the (n - ceil(n*0.01) - 1)th value.
+    p1_vals  = np.full(len(feat_names), np.nan)
+    p99_vals = np.full(len(feat_names), np.nan)
+    for row_i in range(len(mat)):
+        row  = mat[row_i]
+        vals = np.sort(row[~np.isnan(row)])
+        n    = len(vals)
+        if n == 0:
+            continue
+        if n <= 10:
+            p1_vals[row_i]  = vals[0]
+            p99_vals[row_i] = vals[-1]
+        else:
+            k = math.ceil(n * 0.01)
+            p1_vals[row_i]  = vals[k]
+            p99_vals[row_i] = vals[n - 1 - k]
+    p1_series  = pd.Series(p1_vals,  index=feat_names, name=p1_col)
+    p99_series = pd.Series(p99_vals, index=feat_names, name=p99_col)
+    combined_df = combined_df.merge(
+        p1_series.reset_index().rename(columns={"index": fit_id_col}),
+        on=fit_id_col, how="left")
+    combined_df = combined_df.merge(
+        p99_series.reset_index().rename(columns={"index": fit_id_col}),
+        on=fit_id_col, how="left")
+    for pc in (p1_col, p99_col):
+        combined_df[pc] = combined_df[pc].where(combined_df[pc].notna(), other="low_n")
+
+    rescaled_v = pd.to_numeric(combined_df[rescaled_col], errors="coerce")
+    p1_v       = pd.to_numeric(combined_df[p1_col],       errors="coerce")
+    p99_v      = pd.to_numeric(combined_df[p99_col],      errors="coerce")
+    delta_num  = np.where(
+        rescaled_v > p99_v, rescaled_v - p99_v,
+        np.where(rescaled_v < p1_v, rescaled_v - p1_v, 0.0)
+    )
+    delta_v = pd.Series(delta_num, index=combined_df.index).astype(object)
+    delta_v[is_low_n]                    = "low_n"
+    delta_v[is_error]                    = "error"
+    delta_v[is_no_var]                   = "no_variance"
+    delta_v[has_fit & ~has_cov]          = "low_coverage"
+    delta_v[has_fit & is_low_phased_hap] = "low_phased_coverage"
+    combined_df[delta_col] = delta_v
+
     if method == "beta_binomial":
-        # Use ceil(n * percentile) as index for conservative bounds:
-        # e.g. n=107: ceil(107*0.01)=2 → take 3rd value (0-based index 2),
-        # excluding the bottom 2; p99 takes the (n - ceil(n*0.01) - 1)th value.
-        p1_vals  = np.full(len(feat_names), np.nan)
-        p99_vals = np.full(len(feat_names), np.nan)
-        for row_i in range(len(mat)):
-            row  = mat[row_i]
-            vals = np.sort(row[~np.isnan(row)])
-            n    = len(vals)
-            if n == 0:
-                continue
-            if n <= 10:
-                p1_vals[row_i]  = vals[0]
-                p99_vals[row_i] = vals[-1]
-            else:
-                k = math.ceil(n * 0.01)
-                p1_vals[row_i]  = vals[k]
-                p99_vals[row_i] = vals[n - 1 - k]
-        p1_series  = pd.Series(p1_vals,  index=feat_names, name=p1_col)
-        p99_series = pd.Series(p99_vals, index=feat_names, name=p99_col)
-        combined_df = combined_df.merge(
-            p1_series.reset_index().rename(columns={"index": fit_id_col}),
-            on=fit_id_col, how="left")
-        combined_df = combined_df.merge(
-            p99_series.reset_index().rename(columns={"index": fit_id_col}),
-            on=fit_id_col, how="left")
-        for pc in (p1_col, p99_col):
-            combined_df[pc] = combined_df[pc].where(combined_df[pc].notna(), other="low_n")
-
-        rescaled_v = pd.to_numeric(combined_df[rescaled_col], errors="coerce")
-        p1_v       = pd.to_numeric(combined_df[p1_col],       errors="coerce")
-        p99_v      = pd.to_numeric(combined_df[p99_col],      errors="coerce")
-        delta_num  = np.where(
-            rescaled_v > p99_v, rescaled_v - p99_v,
-            np.where(rescaled_v < p1_v, rescaled_v - p1_v, 0.0)
-        )
-        delta_v = pd.Series(delta_num, index=combined_df.index).astype(object)
-        delta_v[is_low_n]                       = "low_n"
-        delta_v[is_error]                       = "error"
-        delta_v[has_fit & ~has_cov]             = "low_coverage"
-        delta_v[has_fit & is_low_phased_hap]    = "low_phased_coverage"
-        combined_df[delta_col] = delta_v
-
         # Assign p_value sentinel strings in priority order:
         #   1. low_coverage  — row coverage < threshold (takes priority over everything)
         #   2. low_phased_coverage — hap row that fails phasing check for this metric
@@ -607,10 +629,10 @@ def _run_one_metric(
 
         testable = has_fit & has_cov & ~is_low_phased_hap
         if testable.any():
-            rescaled_v = pd.to_numeric(combined_df.loc[testable, rescaled_col], errors="coerce")
+            rescaled_v2 = pd.to_numeric(combined_df.loc[testable, rescaled_col], errors="coerce")
             median_v   = pd.to_numeric(combined_df.loc[testable, median_col],   errors="coerce")
             mad_v      = pd.to_numeric(combined_df.loc[testable, mad_col],      errors="coerce")
-            modz_v     = _MODZ_CONST * (rescaled_v - median_v) / mad_v
+            modz_v     = _MODZ_CONST * (rescaled_v2 - median_v) / mad_v
             combined_df.loc[testable, modz_col] = modz_v.astype(object)
 
     if is_ss_metric:
@@ -1455,16 +1477,53 @@ def make_hit_boxplots(
                     sub = sub.assign(_val=vals).dropna(subset=["_val"])
                     if sub.empty: continue
 
+                    # The box itself reflects only bulk values (this is the
+                    # same data the reference distribution was fit from) --
+                    # hap1/hap2 values are overlay-only, and only shown for
+                    # the sample(s) actually flagged as hits for this
+                    # junction, not the whole cohort's phased data.
+                    bulk_sub = sub[sub["phasing"] == "bulk"]
+                    if bulk_sub.empty: continue
+                    phased_hits = sub[sub["phasing"].isin(("hap1", "hap2")) &
+                                      sub["sample"].isin(hit_samples)]
+                    overlay = pd.concat([bulk_sub, phased_hits], ignore_index=True)
+
                     fig, ax = plt.subplots(figsize=(4.0, 3.2))
-                    phasings = [p for p in ("bulk", "hap1", "hap2") if p in sub["phasing"].unique()]
-                    data = [sub[sub["phasing"] == p]["_val"].to_numpy() for p in phasings]
-                    bp = ax.boxplot(data, labels=phasings, showfliers=False, widths=0.5)
-                    for i, p in enumerate(phasings):
-                        p_vals = sub[sub["phasing"] == p]
-                        is_hit = p_vals["sample"].isin(hit_samples)
-                        x_jitter = np.random.normal(i + 1, 0.04, size=len(p_vals))
-                        colors = ["#c0392b" if h else "#7f8c8d" for h in is_hit]
-                        ax.scatter(x_jitter, p_vals["_val"], c=colors, s=14, alpha=0.8, zorder=3)
+                    _black = dict(color="black")
+                    bp = ax.boxplot([bulk_sub["_val"].to_numpy()], showfliers=False, widths=0.5,
+                                    boxprops=_black, whiskerprops=_black, capprops=_black,
+                                    medianprops=_black)
+                    ax.set_xticks([])
+
+                    # Color encodes both phasing and hit status: bulk points
+                    # from non-hit samples (the box itself is built from all
+                    # of these) are blue; a hit sample's own bulk value is
+                    # red; a hit sample's hap1/hap2 values (only ever shown
+                    # for hit samples -- see overlay above) are a lighter
+                    # red. A black outline on hit points reinforces this
+                    # further.
+                    is_hit = overlay["sample"].isin(hit_samples)
+
+                    def _point_color(phasing, hit):
+                        if phasing == "bulk":
+                            return "#c0392b" if hit else "#2c7fb8"   # red / blue
+                        return "#f1948a"                              # light red (hap1/hap2, hits only)
+
+                    x_jitter    = np.random.normal(1, 0.04, size=len(overlay))
+                    fill_colors = [_point_color(p, h) for p, h in zip(overlay["phasing"], is_hit)]
+                    edge_colors = ["black" if h else "none" for h in is_hit]
+                    edge_widths = [1.0 if h else 0.0 for h in is_hit]
+                    ax.scatter(x_jitter, overlay["_val"], c=fill_colors, s=16, alpha=0.85,
+                              zorder=3, edgecolors=edge_colors, linewidths=edge_widths)
+
+                    # Label hit-sample points with their sample name (one
+                    # label per point -- a hit sample can have up to three:
+                    # bulk, hap1, hap2) instead of a legend.
+                    for x, y, samp, hit in zip(x_jitter, overlay["_val"], overlay["sample"], is_hit):
+                        if hit:
+                            ax.annotate(samp, (x, y), fontsize=6, xytext=(4, 0),
+                                       textcoords="offset points", va="center")
+
                     ax.set_title(f"{gene}: {jxn}", fontsize=9)
                     ax.set_ylabel(rescaled_col, fontsize=8)
                     fig.tight_layout()
@@ -1514,8 +1573,14 @@ def main() -> None:
                   "statistics and write per-gene TSVs / QC figures only (no outlier identification).")
     else:
         method = "modified_zscore"
-        z_vals = args.z_thresholds if args.z_thresholds else [3.5]
-        threshold_specs = [float(z) for z in z_vals]
+        z_vals = args.z_thresholds if args.z_thresholds else ["3.5:0.1"]
+        threshold_specs = []
+        for tok in z_vals:
+            try:
+                z_str, d_str = tok.split(":")
+                threshold_specs.append((float(z_str), float(d_str)))
+            except Exception:
+                raise ValueError(f"Invalid threshold format '{tok}'. Expected modZ:delta, e.g. 3.5:0.1")
 
     print(f"Method: {method}")
 
@@ -1547,7 +1612,8 @@ def main() -> None:
         if method == "beta_binomial":
             padj_threshold, effect_threshold = thr
             return f"padj{padj_threshold}_delta{effect_threshold}"
-        return f"z{thr}"
+        z_threshold, effect_threshold = thr
+        return f"z{z_threshold}_delta{effect_threshold}"
 
     gene_info = load_bed(args.bed)
     manifest  = load_manifest(args.manifest)
@@ -1768,21 +1834,21 @@ def main() -> None:
                 delta_v = pd.to_numeric(df[_effect_col(mc)], errors="coerce")
                 return padj_v.le(padj_threshold) & delta_v.abs().ge(effect_threshold)
         else:
-            z_threshold      = thr
-            effect_threshold = z_threshold
-            stat_label = "modZ"
-            thr_desc   = f"|modZ| >= {z_threshold}"
+            z_threshold, effect_threshold = thr
+            stat_label = "delta"
+            thr_desc   = f"|modZ| >= {z_threshold}, |delta| >= {effect_threshold}"
 
-            def _effect_col(mc): return f"modz_{mc}"
+            def _effect_col(mc): return f"delta_{mc}"
 
             def _metric_cols_ok(df, mc):
-                return _effect_col(mc) in df.columns
+                return f"modz_{mc}" in df.columns and _effect_col(mc) in df.columns
 
             def _outlier_mask(df, mc):
                 if not _metric_cols_ok(df, mc):
                     return pd.Series(False, index=df.index)
-                zv = pd.to_numeric(df[_effect_col(mc)], errors="coerce")
-                return zv.abs().ge(z_threshold)
+                zv = pd.to_numeric(df[f"modz_{mc}"], errors="coerce")
+                delta_v = pd.to_numeric(df[_effect_col(mc)], errors="coerce")
+                return zv.abs().ge(z_threshold) & delta_v.abs().ge(effect_threshold)
 
         def _pos_mask(df, mc):
             ec = _effect_col(mc)
