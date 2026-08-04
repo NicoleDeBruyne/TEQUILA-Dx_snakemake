@@ -9,10 +9,10 @@ See docs/rules/8_validate_sample_types.md for details.
 # placeholder like "{bed_id}" -- an f-string's "{{bed_id}}" escape (to
 # produce a literal "{bed_id}") does not survive Snakemake's own rule
 # parsing and raises a NameError at load time.
-_merged_outdir = config["merged_outdir"]
+_cohort_outdir = config["output_dir"] + "/cohort"
 
 def _group_junction_matrix_inputs(group_id):
-    return [f"{SAMPLES[s]['outdir']}/junction_analysis/junction_counts/{s}_junction_count_matrix.tsv"
+    return [(str(SAMPLES[s]['outdir']) + '/junction_analysis/junction_counts/' + str(s) + '_junction_count_matrix.tsv')
             for s in GROUPS[group_id]]
 
 
@@ -20,7 +20,7 @@ rule _8A_build_group_junction_matrix:
     input:
         matrices = lambda wc: _group_junction_matrix_inputs(_group_id_from_ids(wc.bed_id, wc.sample_type)),
     output:
-        matrix = _merged_outdir + "/{bed_id}/{sample_type}/junction_analysis/junction_count_matrix.tsv",
+        matrix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_junction_analysis/junction_count_matrix.tsv",
     params:
         samples = lambda wc: GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)],
         script  = workflow.basedir + "/scripts/build_group_junction_matrix.py",
@@ -34,7 +34,7 @@ rule _8A_build_group_junction_matrix:
             max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])))),
         runtime = config["time"],
     log:
-        _merged_outdir + "/{bed_id}/{sample_type}/logs/group_junction_matrix.log"
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/group_junction_matrix.log"
     shell:
         """
         mkdir -p $(dirname {log})
@@ -49,16 +49,16 @@ rule _8A_build_group_junction_matrix:
 rule _8B_validate_sample_types:
     input:
         query_matrices = lambda wc: [
-            f"{group_outdir(gid)}/junction_analysis/junction_count_matrix.tsv"
+            (str(group_outdir(gid)) + '/merged_junction_analysis/junction_count_matrix.tsv')
             for gid in BED_GROUPS[wc.bed_id]
         ],
         gtex_matrices = lambda wc: [_gtex_file(t) for t in config["validate_ref_tissues"]],
         bed = lambda wc: bed_path(wc.bed_id),
     output:
-        heatmap = _merged_outdir + "/{bed_id}/validate_sample_types/{bed_id}_distance_heatmap.pdf",
-        pca     = _merged_outdir + "/{bed_id}/validate_sample_types/{bed_id}_PCA.pdf",
+        heatmap = _cohort_outdir + "/{bed_id}/output/validate_sample_types/{bed_id}_distance_heatmap.pdf",
+        pca     = _cohort_outdir + "/{bed_id}/output/validate_sample_types/{bed_id}_PCA.pdf",
     params:
-        outprefix    = lambda wc: f"{bed_outdir(wc.bed_id)}/validate_sample_types/{wc.bed_id}",
+        outprefix    = lambda wc: (str(bed_outdir(wc.bed_id)) + '/validate_sample_types/' + str(wc.bed_id)),
         ref_names    = lambda wc: _quoted(config["validate_ref_tissues"]),
         ref_colors   = lambda wc: _quoted(config["validate_ref_colors"]),
         query_names  = lambda wc: _quoted([GROUP_SAMPLE_TYPE[gid] for gid in BED_GROUPS[wc.bed_id]]),
@@ -69,7 +69,7 @@ rule _8B_validate_sample_types:
         mem_mb  = lambda wc, attempt: max(4096, attempt * 1024 * _group_mem_gb(wc.bed_id, "validate_sample_types", 256)),
         runtime = 1440,   # 1 day, matches the old bash wrapper's --time=1-00:00:00
     log:
-        _merged_outdir + "/{bed_id}/logs/{bed_id}_validate_sample_types.log"
+        _cohort_outdir + "/{bed_id}/logs/{bed_id}_validate_sample_types.log"
     shell:
         """
         mkdir -p $(dirname {log})

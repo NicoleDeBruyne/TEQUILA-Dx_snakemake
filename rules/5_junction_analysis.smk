@@ -26,7 +26,7 @@ rule _5A_get_junction_counts:
         mem_mb     = lambda wc, attempt: max(4096, attempt * _bam_size_gb(wc) * 2 * 1024),
         runtime    = config["time"],
     log:
-        "{outdir}/logs/{sample}_junction_counts.log"
+        "{outdir}/../logs/{sample}_junction_counts.log"
     shell:
         """
         mkdir -p $(dirname {output.jxn_counts})
@@ -46,7 +46,7 @@ rule _5A_get_junction_counts:
 # [per-sample configurable via perform_binomial_tests_threads in run config]
 # ---------------------------------------------------------------------------
 def _gtex_file(tissue):
-    return f"{config['gtex_data_dir']}/gtex_{tissue}_jxn_counts.txt"
+    return (str(config['gtex_data_dir']) + '/gtex_' + str(tissue) + '_jxn_counts.txt')
 
 def _gtex_mem(wc, threads, attempt):
     return max(4096, attempt * threads * (5 if wc.tissue == "brain" else 2) * 1024)
@@ -70,7 +70,7 @@ rule _5B_perform_binomial_tests:
         mem_mb     = _gtex_mem,
         runtime    = config["time"],
     log:
-        "{outdir}/logs/{sample}_{tissue}_betabinom.log"
+        "{outdir}/../logs/{sample}_{tissue}_betabinom.log"
     shell:
         """
         mkdir -p $(dirname {output.all_jxns})
@@ -106,7 +106,7 @@ rule _5C_identify_junction_outliers:
         mem_mb     = lambda wc, attempt: max(4096, attempt * 4 * 1024),
         runtime    = config["time"],
     log:
-        "{outdir}/logs/{sample}_{tissue}_jxn_outliers.log"
+        "{outdir}/../logs/{sample}_{tissue}_jxn_outliers.log"
     shell:
         """
         python -u {params.script} \\

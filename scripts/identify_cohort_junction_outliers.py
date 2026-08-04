@@ -1428,6 +1428,12 @@ def make_hit_boxplots(
     is_ir_ipa: bool = False,
     has_jxn_type_filter: bool = False,
 ) -> None:
+    # outlier_map[metric_col][gene][junction] is {sample: {hit phasings}}.
+    # Highlighting rule: a sample that's a hit only at bulk gets just its
+    # bulk point highlighted; a sample that's a hit at either hap gets bulk
+    # AND both haps highlighted (even if bulk itself wasn't individually
+    # flagged), since a phased effect is only interpretable next to its own
+    # bulk value and its other haplotype.
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -1469,7 +1475,7 @@ def make_hit_boxplots(
         plt.close(fig_t)
 
         for gene, jxn_map in sorted(gene_jxn_map.items()):
-            for jxn, hit_samples in sorted(jxn_map.items()):
+            for jxn, hit_sample_phasings in sorted(jxn_map.items()):
                 try:
                     sub = fmt_updated[(fmt_updated["gene"] == gene) & (fmt_updated["junction"] == jxn)]
                     if sub.empty: continue
@@ -1477,15 +1483,23 @@ def make_hit_boxplots(
                     sub = sub.assign(_val=vals).dropna(subset=["_val"])
                     if sub.empty: continue
 
+                    hit_samples = set(hit_sample_phasings.keys())
+                    # Only samples whose hit was (at least partly) at hap1 or
+                    # hap2 get their hap rows overlaid -- a sample that's a
+                    # bulk-only hit shows just its bulk point, per the
+                    # highlighting rule described in this function's header.
+                    samples_needing_haps = {s for s, phases in hit_sample_phasings.items()
+                                             if phases & {"hap1", "hap2"}}
+
                     # The box itself reflects only bulk values (this is the
                     # same data the reference distribution was fit from) --
                     # hap1/hap2 values are overlay-only, and only shown for
-                    # the sample(s) actually flagged as hits for this
+                    # the sample(s) actually flagged as a hap hit for this
                     # junction, not the whole cohort's phased data.
                     bulk_sub = sub[sub["phasing"] == "bulk"]
                     if bulk_sub.empty: continue
                     phased_hits = sub[sub["phasing"].isin(("hap1", "hap2")) &
-                                      sub["sample"].isin(hit_samples)]
+                                      sub["sample"].isin(samples_needing_haps)]
                     overlay = pd.concat([bulk_sub, phased_hits], ignore_index=True)
 
                     fig, ax = plt.subplots(figsize=(4.0, 3.2))
@@ -1498,16 +1512,17 @@ def make_hit_boxplots(
                     # Color encodes both phasing and hit status: bulk points
                     # from non-hit samples (the box itself is built from all
                     # of these) are blue; a hit sample's own bulk value is
-                    # red; a hit sample's hap1/hap2 values (only ever shown
-                    # for hit samples -- see overlay above) are a lighter
-                    # red. A black outline on hit points reinforces this
-                    # further.
+                    # red (whether the hit was at bulk itself or only at a
+                    # hap -- see this function's header); a hap-hit sample's
+                    # hap1/hap2 values (only ever shown for hap-hit samples
+                    # -- see overlay above) are a lighter red. A black
+                    # outline on hit points reinforces this further.
                     is_hit = overlay["sample"].isin(hit_samples)
 
                     def _point_color(phasing, hit):
                         if phasing == "bulk":
                             return "#c0392b" if hit else "#2c7fb8"   # red / blue
-                        return "#f1948a"                              # light red (hap1/hap2, hits only)
+                        return "#f1948a"                              # light red (hap1/hap2, hap-hit samples only)
 
                     x_jitter    = np.random.normal(1, 0.04, size=len(overlay))
                     fill_colors = [_point_color(p, h) for p, h in zip(overlay["phasing"], is_hit)]
@@ -1526,6 +1541,7 @@ def make_hit_boxplots(
 
                     ax.set_title(f"{gene}: {jxn}", fontsize=9)
                     ax.set_ylabel(rescaled_col, fontsize=8)
+                    ax.set_ylim(0, 1)
                     fig.tight_layout()
                     pdf.savefig(fig, bbox_inches="tight")
                     plt.close(fig)
@@ -2153,14 +2169,18 @@ def main() -> None:
         # ---- Build outlier_map for box plots ----
         # Built from filt (outliers_filtered rows: event_type != "none", outlier_{mc} True),
         # so boxplots exactly match outliers_filtered.tsv.
+        # Leaf value is {sample: {phasings that were flagged a hit for that
+        # sample}} rather than just a set of hit sample names -- a sample can
+        # be a hit at bulk, hap1, hap2, or some combination, and which ones
+        # determines what make_hit_boxplots highlights (see its docstring).
         outlier_map: Dict[str, Dict[str, Dict[str, set]]] = {}
         for mc in computed_metrics:
             ocol = f"outlier_{mc}"
-            gene_jxn_map: Dict[str, Dict[str, set]] = defaultdict(lambda: defaultdict(set))
+            gene_jxn_map: Dict[str, Dict[str, Dict[str, set]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(set)))
             if not filt.empty and ocol in filt.columns:
                 passing = filt[filt[ocol].astype(bool)]
                 for _, row in passing.iterrows():
-                    gene_jxn_map[row["gene"]][row["junction"]].add(row["sample"])
+                    gene_jxn_map[row["gene"]][row["junction"]][row["sample"]].add(row["phasing"])
             outlier_map[mc] = gene_jxn_map
 
         out_jobs.append(_write_outliers)

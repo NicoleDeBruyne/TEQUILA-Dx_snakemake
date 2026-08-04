@@ -110,15 +110,16 @@ splice-junction padj/delta-PSI, etc.).
 `--config run=<path>`) defining the samples for that run:
 
 ```yaml
-merged_outdir: "/path/to/cohort_output"   # or pass via --config merged_outdir=<path>
+output_dir: "/path/to/output"   # or pass via --config output_dir=<path>
 
 samples:
   sample1:
     bam: "/path/to/sample1.bam"
-    outdir: "/path/to/sample1_output"
     bed: "/path/to/panel.bed"
     tissues: ["fibroblasts", "wholeblood"]   # GTEx reference tissue(s) to compare against
     sample_type: "fibroblasts"               # used for grouping in the merge_hits stage
+    # outdir: "/path/to/sample1_output"      # optional: overrides the default
+                                              # {output_dir}/samples/sample1/output for this sample
 ```
 
 Samples sharing the same `bed` panel and `sample_type` are grouped together for cross-sample
@@ -143,18 +144,41 @@ snakemake --profile profile/ --config run=/path/to/run_config.yaml merge_hits=Fa
 ```
 
 > Note: several comments in the Snakefile/config reference a `submit_snakemake.sh` wrapper
-> (which would generate the per-run YAML and inject `merged_outdir` automatically) — that script
+> (which would generate the per-run YAML and inject `output_dir` automatically) — that script
 > isn't included in this copy of the repo, so run configs currently need to be written by hand
 > as shown above.
 
 ## Output
 
-- **Per-sample** (`{outdir}/...`): normalized VCFs per caller, compiled/annotated variants,
-  phased BAMs + phasing summary, ASE results, and GTEx-based junction outliers.
-- **Per (BED panel, sample type) group / per panel** (`{merged_outdir}/...`): merged cross-sample
-  variant/ASE/junction hit tables, cohort-based junction outliers, sample-type validation plots,
-  and the final `merged_all_hits.tsv` per BED panel — the main diagnostic output, annotated with
-  OMIM phenotype and inheritance information.
+Everything lands under the single `output_dir` given in the run config:
+
+```
+{output_dir}/
+  samples/{sample}/output/...       -- per-sample stage outputs (variant_calling, phased_reads,
+                                        ase_analysis, junction_analysis)
+  samples/{sample}/logs/...         -- per-sample stage logs
+  cohort/{bed_id}/
+    output/
+      validate_sample_types/        -- sample-type validation plots (across all sample_types on this panel)
+      cohort_qc/                    -- on-target-rate / read-attribute QC plots (across all sample_types on this panel)
+      merged_all_hits.tsv           -- the final diagnostic output for this BED panel, annotated
+                                        with OMIM phenotype and inheritance information
+      sample_types/{sample_type}/
+        output/...                  -- per-group merged_variant_calling, merged_ase_analysis,
+                                        merged_junction_analysis, merged_hits, cohort_junction_analysis,
+                                        gene_quantification (the "merged_" prefix distinguishes these
+                                        from the per-sample folders of the same base name)
+        logs/...                    -- per-group logs
+    logs/...                        -- bed-panel-level logs (validate_sample_types, cohort_qc, final merge) --
+                                        a sibling of output/ above, not nested inside it
+```
+
+Every output-producing directory at every level has a sibling `logs/` directory one level up from it
+(samples/{sample}/, cohort/{bed_id}/, and cohort/{bed_id}/output/sample_types/{sample_type}/ each follow
+this same output/ + logs/ sibling pattern).
+
+A sample's `outdir` can be overridden per-sample in the run config (see Configuration above);
+its `logs/` directory always sits next to whatever that resolves to.
 
 ## License
 

@@ -21,7 +21,7 @@ rule _4A_detect_ase_outliers:
         mem_mb     = lambda wc, attempt: max(4096, attempt * 4 * 1024),
         runtime    = config["time"],
     log:
-        "{outdir}/logs/{sample}_ase_outliers.log"
+        "{outdir}/../logs/{sample}_ase_outliers.log"
     shell:
         """
         python -u {params.script} \\

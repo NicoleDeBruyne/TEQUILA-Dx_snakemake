@@ -20,7 +20,7 @@ rule _3A_build_vcf_for_phasing:
         mem_mb     = lambda wc, attempt: max(4096, attempt * 8 * 1024),
         runtime    = config["time"],
     log:
-        "{outdir}/logs/{sample}_build_vcf_for_phasing.log"
+        "{outdir}/../logs/{sample}_build_vcf_for_phasing.log"
     shell:
         """
         mkdir -p $(dirname {output.vcf_gz})
@@ -56,7 +56,7 @@ rule _3B_phase_reads:
         mem_mb     = lambda wc, threads, attempt: max(4096, attempt * threads * 1024),
         runtime    = config["time"],
     log:
-        "{outdir}/logs/{sample}_phase_reads.log"
+        "{outdir}/../logs/{sample}_phase_reads.log"
     shell:
         """
         mkdir -p $(dirname {output.ase_infile})

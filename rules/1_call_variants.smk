@@ -63,7 +63,7 @@ rule _1A_nanots:
         mem_mb  = lambda wc, threads, attempt: max(4096, attempt * threads * _bam_size_gb(wc) * 1 * 1024),
         runtime = config["time"],
     log:
-        "{outdir}/logs/{sample}_nanoTS.log"
+        "{outdir}/../logs/{sample}_nanoTS.log"
     shell:
         """
         mkdir -p {params.work_dir}
@@ -105,7 +105,7 @@ rule _1B_longcallr:
         mem_mb  = lambda wc, threads, attempt: max(4096, attempt * threads * _bam_size_gb(wc) * 2 * 1024),
         runtime = config["time"],
     log:
-        "{outdir}/logs/{sample}_longcallR.log"
+        "{outdir}/../logs/{sample}_longcallR.log"
     shell:
         """
         mkdir -p {params.work_dir}
@@ -137,14 +137,14 @@ rule _1C_clair3_rna:
         genome   = config["genome"],
         image    = config["clair3_rna_image"],
         binds    = lambda wc: _bind_dirs(_bam(wc), config["genome"], _outdir(wc), config["conda_env"]),
-        whatshap = lambda wc: f"{config['conda_env']}/bin/whatshap",
+        whatshap = lambda wc: (str(config['conda_env']) + '/bin/whatshap'),
         work_dir = "{outdir}/variant_calling/clair3_rna/work",
     threads: lambda wc: _rule_threads(wc, "clair3_rna")
     resources:
         mem_mb  = lambda wc, threads, attempt: max(4096, attempt * threads * _bam_size_gb(wc) * 1 * 1024),
         runtime = config["time"],
     log:
-        "{outdir}/logs/{sample}_clair3_rna.log"
+        "{outdir}/../logs/{sample}_clair3_rna.log"
     shell:
         """
         mkdir -p {params.work_dir}
@@ -188,7 +188,7 @@ rule _1D_deepvariant:
         mem_mb  = lambda wc, threads, attempt: max(8192, attempt * threads * _bam_size_gb(wc) * 1 * 1024),
         runtime = config["time"],
     log:
-        "{outdir}/logs/{sample}_deepvariant.log"
+        "{outdir}/../logs/{sample}_deepvariant.log"
     shell:
         """
         mkdir -p {params.work_dir}

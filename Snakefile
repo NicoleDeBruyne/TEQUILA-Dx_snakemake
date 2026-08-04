@@ -28,23 +28,60 @@ with open(config["run"]) as fh:
 SAMPLES = run_cfg["samples"]
 
 # Merge every other top-level run-config key over config.yaml's defaults.
-# samples/merged_outdir keep their own special-cased handling below.
+# samples/output_dir keep their own special-cased handling below.
 for _key, _val in run_cfg.items():
-    if _key in ("samples", "merged_outdir"):
+    if _key in ("samples", "output_dir"):
         continue
     config[_key] = _val
 
-# merged_outdir can be set via --config merged_outdir=<path> (takes
-# priority) or as a top-level key in the run config YAML.
-if not config.get("merged_outdir"):
-    config["merged_outdir"] = run_cfg.get("merged_outdir", "")
+# output_dir can be set via --config output_dir=<path> (takes priority) or
+# as a top-level key in the run config YAML. Every other path in the
+# pipeline's output layout (per-sample dirs, cohort/, logs/) is derived from
+# this single directory -- see docs/general.md for the full layout.
+if not config.get("output_dir"):
+    config["output_dir"] = run_cfg.get("output_dir", "")
 
-if not config.get("merged_outdir"):
+if not config.get("output_dir"):
     raise ValueError(
-        "merged_outdir must be set, either via --config merged_outdir=<path> or as a "
-        "top-level 'merged_outdir:' key in the run config YAML (alongside 'samples:'), "
-        "for the merge_hits stage to know where to write cross-sample merged results."
+        "output_dir must be set, either via --config output_dir=<path> or as a "
+        "top-level 'output_dir:' key in the run config YAML (alongside 'samples:'), "
+        "for the pipeline to know where to write its output layout."
     )
+
+# Each sample defaults to {output_dir}/samples/{sample}/output, but a run
+# config can override an individual sample's outdir by setting its own
+# 'outdir' key (e.g. to point at pre-existing results on a different
+# filesystem). Every per-sample rule (rules/1-5) reaches that sample's
+# sibling 'logs' directory via the plain string template
+# "{outdir}/../logs/..." rather than a computed helper function -- Snakemake
+# resolves the ".." correctly (and "mkdir -p" harmlessly creates 'outdir'
+# itself as an intermediate when doing so), but critically this has to stay
+# a plain wildcard template, not a callable log: function: Snakemake's
+# wildcard resolution breaks when output: contains a free "outdir" wildcard
+# and log: is a lambda that doesn't itself reference {outdir}.
+# Each sample defaults to {output_dir}/samples/{sample}/output, but a run
+# config can override an individual sample's outdir by setting its own
+# 'outdir' key (e.g. to point at pre-existing results on a different
+# filesystem). Every per-sample rule (rules/1-5) reaches that sample's
+# sibling 'logs' directory via the plain string template
+# "{outdir}/../logs/..." rather than a computed helper function -- Snakemake
+# resolves the ".." correctly (and "mkdir -p" harmlessly creates 'outdir'
+# itself as an intermediate when doing so), but critically this has to stay
+# a plain wildcard template, not a callable log: function: Snakemake's
+# wildcard resolution breaks when output: contains a free "outdir" wildcard
+# and log: is a lambda that doesn't itself reference {outdir}.
+#
+# NOTE: built via string concatenation ("+"), not an f-string. Snakemake's
+# own Snakefile parser corrupts f-string literals -- inserting stray
+# whitespace around the whole string and around each substituted value --
+# even in plain Python code with no rule-block wildcards involved. This is
+# a stronger/broader version of the f-string warning already noted
+# elsewhere in this file and in rules/6-9 for output:/log: templates: avoid
+# f-strings anywhere in the Snakefile/rules/*.smk, not just in path
+# templates containing literal "{wildcard}" placeholders.
+for _sample, _entry in SAMPLES.items():
+    if not _entry.get("outdir"):
+        _entry["outdir"] = config["output_dir"] + "/samples/" + _sample + "/output"
 
 # ---------------------------------------------------------------------------
 # Resolve pipeline-relative reference-data / environment paths against the
@@ -134,12 +171,12 @@ def _bed_id(bed):
 
 def _group_id(bed, sample_type):
     """Filesystem-safe identifier for a (bed, sample_type) group, e.g. 'IEI422_fibroblasts'."""
-    return f"{_bed_id(bed)}_{sample_type}"
+    return (str(_bed_id(bed)) + '_' + str(sample_type))
 
 
 def _group_id_from_ids(bed_id, sample_type):
     """Reconstruct a group_id from its already-split bed_id/sample_type wildcards."""
-    return f"{bed_id}_{sample_type}"
+    return (str(bed_id) + '_' + str(sample_type))
 
 
 def all_groups():
@@ -151,8 +188,8 @@ def all_groups():
     for s in SAMPLES:
         if "sample_type" not in SAMPLES[s]:
             raise ValueError(
-                f"Sample '{s}' is missing a 'sample_type' field in the run config, "
-                f"required for grouping samples during the merge_hits stage."
+                ("Sample '" + str(s) + "' is missing a 'sample_type' field in the run config, ")
+                + 'required for grouping samples during the merge_hits stage.'
             )
         bed = SAMPLES[s]["bed"]
         sample_type = SAMPLES[s]["sample_type"]
@@ -177,9 +214,14 @@ def group_tissues(group_id):
 
 
 def group_outdir(group_id):
-    """Shared output directory for a group's merged results, nested under its BED
-    panel: config['merged_outdir']/{bed_id}/{sample_type}."""
-    return f"{config['merged_outdir']}/{GROUP_BED_ID[group_id]}/{GROUP_SAMPLE_TYPE[group_id]}"
+    """Shared *output* directory for a group's merged results, nested under
+    its BED panel's own output/ dir and sample_type:
+    {output_dir}/cohort/{bed_id}/output/sample_types/{sample_type}/output.
+    Sibling 'logs' directory is {output_dir}/cohort/{bed_id}/output/sample_types/{sample_type}/logs
+    -- built directly in each rules/*.smk file rather than through a helper,
+    since (unlike group_outdir itself) it's only ever needed as a plain
+    string template, not computed per-group in Python."""
+    return (str(config['output_dir']) + '/cohort/' + str(GROUP_BED_ID[group_id]) + '/output/sample_types/' + str(GROUP_SAMPLE_TYPE[group_id]) + '/output')
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +257,15 @@ def _cja_thr_label(group_id):
     z = config.get("cohort_jxn_z_threshold", 3.5)
     d = config.get("cohort_jxn_z_delta_threshold", 0.1)
     return "z" + str(z) + "_delta" + str(d)
+
+
+def _cja_outliers_filtered_path(group_id):
+    """This group's cohort_junction_analysis outliers_filtered.tsv path
+    (rules/7_cohort_junction_analysis.smk's _7B) -- used by rules/6_merge_hits.smk's
+    _6D1 to pull cohort-comparison junction results into merged_hits.tsv."""
+    thr_label = _cja_thr_label(group_id)
+    return (group_outdir(group_id) + "/cohort_junction_analysis/" + group_id + "_" + thr_label
+            + "/" + group_id + "_outliers_filtered.tsv")
 
 
 def _cja_thr_flag(group_id):
@@ -265,9 +316,23 @@ def bed_path(bed_id):
     return SAMPLES[GROUPS[gid][0]]["bed"]
 
 
+def bed_samples(bed_id):
+    """Every sample using this BED panel, across all its sample_types --
+    used by rules/9_plot_cohort_info.smk, which (unlike cohort_junction_analysis
+    or merge_hits) pools across sample_type within a bed rather than
+    operating per (bed, sample_type) group."""
+    return [s for gid in BED_GROUPS[bed_id] for s in GROUPS[gid]]
+
+
 def bed_outdir(bed_id):
-    """Shared output directory for a BED panel's cross-sample-type results."""
-    return f"{config['merged_outdir']}/{bed_id}"
+    """Shared *output* directory for a BED panel's cross-sample-type results:
+    {output_dir}/cohort/{bed_id}/output. Contains validate_sample_types/,
+    cohort_qc/, sample_types/, and merged_all_hits.tsv. Sibling 'logs'
+    directory is {output_dir}/cohort/{bed_id}/logs (a sibling of this
+    output/ dir, not nested inside it) -- built directly as a plain string
+    template in each rules/*.smk file rather than through a helper, same
+    reasoning as group_outdir's own logs dir above."""
+    return (str(config['output_dir']) + '/cohort/' + str(bed_id) + '/output')
 
 
 def _quoted(items):
@@ -312,7 +377,7 @@ def flag(key):
 # and don't use this helper.)
 # ---------------------------------------------------------------------------
 def _rule_threads(wc, rule_key):
-    return int(SAMPLES[wc.sample].get(f"{rule_key}_threads", config["threads"]))
+    return int(SAMPLES[wc.sample].get((str(rule_key) + '_threads'), config["threads"]))
 
 
 # ---------------------------------------------------------------------------
@@ -333,10 +398,10 @@ def _rule_threads(wc, rule_key):
 # whatever default the rule itself passes in.
 # ---------------------------------------------------------------------------
 def _group_threads(group_id, rule_key, default):
-    return int(config.get("groups", {}).get(group_id, {}).get(f"{rule_key}_threads", default))
+    return int(config.get("groups", {}).get(group_id, {}).get((str(rule_key) + '_threads'), default))
 
 def _group_mem_gb(group_id, rule_key, default_gb):
-    return float(config.get("groups", {}).get(group_id, {}).get(f"{rule_key}_mem_gb", default_gb))
+    return float(config.get("groups", {}).get(group_id, {}).get((str(rule_key) + '_mem_gb'), default_gb))
 
 
 # ---------------------------------------------------------------------------
@@ -348,40 +413,43 @@ def all_outputs():
         od = SAMPLES[s]["outdir"]
 
         if flag("longcallr"):
-            outs.append(f"{od}/variant_calling/longcallR/{s}_longcallR_norm.vcf.gz")
+            outs.append((str(od) + '/variant_calling/longcallR/' + str(s) + '_longcallR_norm.vcf.gz'))
 
         if flag("nanots"):
-            outs.append(f"{od}/variant_calling/nanoTS/{s}_nanoTS_norm.vcf.gz")
+            outs.append((str(od) + '/variant_calling/nanoTS/' + str(s) + '_nanoTS_norm.vcf.gz'))
 
         if flag("clair3_rna"):
-            outs.append(f"{od}/variant_calling/clair3_rna/{s}_clair3_rna_norm.vcf.gz")
+            outs.append((str(od) + '/variant_calling/clair3_rna/' + str(s) + '_clair3_rna_norm.vcf.gz'))
 
         if flag("deepvariant"):
-            outs.append(f"{od}/variant_calling/deepvariant/{s}_deepvariant_norm.vcf.gz")
+            outs.append((str(od) + '/variant_calling/deepvariant/' + str(s) + '_deepvariant_norm.vcf.gz'))
 
         if flag("compile_variants"):
-            outs.append(f"{od}/variant_calling/compiled_variants/{s}_compiled_variants.tsv")
+            outs.append((str(od) + '/variant_calling/compiled_variants/' + str(s) + '_compiled_variants.tsv'))
 
         if flag("phase_reads"):
-            outs.append(f"{od}/phased_reads/{s}_phasing_summary.tsv")
+            outs.append((str(od) + '/phased_reads/' + str(s) + '_phasing_summary.tsv'))
 
         if flag("ase_analysis"):
-            outs.append(f"{od}/ase_analysis/{s}_binomial_ase_results.tsv")
+            outs.append((str(od) + '/ase_analysis/' + str(s) + '_binomial_ase_results.tsv'))
 
         if flag("junction_analysis"):
             # Requesting the chain's final output pulls the rest of the
             # junction_analysis.smk chain along with it.
             for t in sample_tissues(s):
                 outs.append(
-                    f"{od}/junction_analysis/gtex_{t}/{s}_gtex_{t}_outlier_junctions.tsv"
+                    (str(od) + '/junction_analysis/gtex_' + str(t) + '/' + str(s) + '_gtex_' + str(t) + '_outlier_junctions.tsv')
                 )
 
     if flag("merge_hits"):
         # Requesting final_merge's output pulls the whole merge_hits.smk
-        # chain along with it (see docs/rules/6_merge_hits.md).
+        # chain along with it (see docs/rules/6_merge_hits.md). Which of
+        # _6D1/_6D2 that chain actually runs is controlled by
+        # config['merge_hits_include_cohort_junctions'], not here -- see
+        # _group_sample_hits_files() in rules/6_merge_hits.smk.
         for bid in BED_GROUPS:
             bod = bed_outdir(bid)
-            outs.append(f"{bod}/merged_all_hits.tsv")
+            outs.append((str(bod) + '/merged_all_hits.tsv'))
 
     if flag("cohort_junction_analysis"):
         for gid in GROUPS:
@@ -391,11 +459,24 @@ def all_outputs():
                 + "/" + gid + "_outliers.tsv"
             )
 
+    if flag("quantify_genes"):
+        for gid in GROUPS:
+            god = group_outdir(gid)  # .../output
+            outs.append(god + "/gene_quantification/by_count/gene_count_matrix.tsv")
+            outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix.tsv")
+            outs.append(god + "/gene_quantification/by_amalgam/NOT_YET_IMPLEMENTED.txt")
+
     if flag("validate_sample_types"):
         # Requesting validate_sample_types' output pulls build_group_junction_matrix along with it.
         for bid in BED_GROUPS:
             bod = bed_outdir(bid)
-            outs.append(f"{bod}/validate_sample_types/{bid}_distance_heatmap.pdf")
+            outs.append((str(bod) + '/validate_sample_types/' + str(bid) + '_distance_heatmap.pdf'))
+
+    if flag("plot_cohort_qc"):
+        for bid in BED_GROUPS:
+            cqd = bed_outdir(bid) + "/cohort_qc"
+            outs.append((str(cqd) + '/on_target_rates/' + str(bid) + '_on_target_rates_ontarget.pdf'))
+            outs.append((str(cqd) + '/read_attributes/' + str(bid) + '_read_attributes_read_qualities_violin.pdf'))
 
     return outs
 
@@ -416,3 +497,5 @@ include: "rules/5_junction_analysis.smk"
 include: "rules/6_merge_hits.smk"
 include: "rules/7_cohort_junction_analysis.smk"
 include: "rules/8_validate_sample_types.smk"
+include: "rules/9_plot_cohort_info.smk"
+include: "rules/10_quantify_genes.smk"

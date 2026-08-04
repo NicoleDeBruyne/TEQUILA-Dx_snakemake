@@ -18,7 +18,7 @@ once GROUPS is built, and Snakemake output: paths must be static wildcard
 templates (not a value chosen per-group at parse time), the outlier output
 path below uses an extra {thr_label} wildcard rather than picking between two
 different literal path templates; _7B's own params re-derive the method from
-{bed_id}/{sample_type} directly (not by inspecting {thr_label}) to keep a
+{bed_id}/output/sample_types/{sample_type} directly (not by inspecting {thr_label}) to keep a
 single source of truth with the Snakefile's target-building in all_outputs().
 
 Split into two rules:
@@ -50,13 +50,13 @@ merge_hits or the per-sample GTEx-based junction analysis.
 # wildcard placeholder like "{bed_id}" -- an f-string's "{{bed_id}}" escape
 # (to produce a literal "{bed_id}") does not survive Snakemake's own rule
 # parsing and raises a NameError at load time.
-_merged_outdir = config["merged_outdir"]
+_cohort_outdir = config["output_dir"] + "/cohort"
 
 def _group_gene_bam_mapping_files(group_id):
-    return [f"{SAMPLES[s]['outdir']}/phased_reads/{s}_gene_bam_mapping_file.tsv" for s in GROUPS[group_id]]
+    return [(str(SAMPLES[s]['outdir']) + '/phased_reads/' + str(s) + '_gene_bam_mapping_file.tsv') for s in GROUPS[group_id]]
 
 
-_cja_manifest_path = _merged_outdir + "/{bed_id}/{sample_type}/cohort_junction_analysis/{bed_id}_{sample_type}_gene_manifest.tsv"
+_cja_manifest_path = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{bed_id}_{sample_type}_gene_manifest.tsv"
 
 
 rule _7A_cohort_junction_analysis:
@@ -66,7 +66,7 @@ rule _7A_cohort_junction_analysis:
     output:
         # Rebuilt from every sample's own gene_bam_mapping_file.tsv -- one
         # "gene\tsample\tbulk_bam\thap1_bam\thap2_bam" row per (sample, gene).
-        cohort_mapping = _merged_outdir + "/{bed_id}/{sample_type}/cohort_junction_analysis/{bed_id}_{sample_type}_gene_bam_mapping_file.tsv",
+        cohort_mapping = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{bed_id}_{sample_type}_gene_bam_mapping_file.tsv",
         # One row per gene in the BED file: gene name + path to that gene's
         # raw per-junction metrics TSV (under params.raw_outdir), or the
         # literal string "None" if the gene produced no output (including
@@ -77,9 +77,9 @@ rule _7A_cohort_junction_analysis:
         # Always written, whether the analysis ran or was skipped -- explains
         # which, and why. Check this file first if a group's outlier results
         # look unexpectedly empty.
-        note = _merged_outdir + "/{bed_id}/{sample_type}/cohort_junction_analysis/{bed_id}_{sample_type}_note.txt",
+        note = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{bed_id}_{sample_type}_note.txt",
     params:
-        raw_outdir  = lambda wc: f"{group_outdir(_group_id_from_ids(wc.bed_id, wc.sample_type))}/cohort_junction_analysis/{_group_id_from_ids(wc.bed_id, wc.sample_type)}_raw",
+        raw_outdir  = lambda wc: (str(group_outdir(_group_id_from_ids(wc.bed_id, wc.sample_type))) + '/cohort_junction_analysis/' + str(_group_id_from_ids(wc.bed_id, wc.sample_type)) + '_raw'),
         genome      = config["genome"],
         cov_thr     = config["sample_coverage_threshold"],
         phasing_thr = config["cohort_jxn_phasing_threshold"],
@@ -92,7 +92,7 @@ rule _7A_cohort_junction_analysis:
             _group_id_from_ids(wc.bed_id, wc.sample_type), "cohort_junction_analysis", threads * 4)),
         runtime    = config["time"],
     log:
-        _merged_outdir + "/{bed_id}/{sample_type}/logs/cohort_junction_analysis.log"
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/cohort_junction_analysis.log"
     shell:
         """
         mkdir -p $(dirname {output.cohort_mapping})
@@ -132,10 +132,15 @@ rule _7B_identify_cohort_junction_outliers:
         # whatever concrete path was actually requested (built by
         # all_outputs() via _cja_thr_label()); it isn't otherwise used
         # below, since params.thr_flag re-derives the method independently
-        # from {bed_id}/{sample_type} rather than parsing this wildcard.
-        outliers = _merged_outdir + "/{bed_id}/{sample_type}/cohort_junction_analysis/{bed_id}_{sample_type}_{thr_label}/{bed_id}_{sample_type}_outliers.tsv",
+        # from {bed_id}/output/sample_types/{sample_type} rather than parsing this wildcard.
+        outliers          = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{bed_id}_{sample_type}_{thr_label}/{bed_id}_{sample_type}_outliers.tsv",
+        # Also tracked (not just outliers itself) so rules/6_merge_hits.smk's
+        # _6D can depend on it directly to pull cohort-comparison junction
+        # results into merged_hits.tsv, rather than relying on an
+        # undeclared side-effect file.
+        outliers_filtered = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{bed_id}_{sample_type}_{thr_label}/{bed_id}_{sample_type}_outliers_filtered.tsv",
     params:
-        outprefix = lambda wc: f"{group_outdir(_group_id_from_ids(wc.bed_id, wc.sample_type))}/cohort_junction_analysis/{_group_id_from_ids(wc.bed_id, wc.sample_type)}",
+        outprefix = lambda wc: (str(group_outdir(_group_id_from_ids(wc.bed_id, wc.sample_type))) + '/cohort_junction_analysis/' + str(_group_id_from_ids(wc.bed_id, wc.sample_type))),
         has_ipa   = "--has-ipa" if config["genome"] else "",
         thr_flag  = lambda wc: _cja_thr_flag(_group_id_from_ids(wc.bed_id, wc.sample_type)),
         gtf       = config["annotation"],
@@ -148,7 +153,7 @@ rule _7B_identify_cohort_junction_outliers:
             _group_id_from_ids(wc.bed_id, wc.sample_type), "identify_cohort_junction_outliers", threads * 4)),
         runtime    = config["time"],
     log:
-        _merged_outdir + "/{bed_id}/{sample_type}/logs/identify_cohort_junction_outliers_{thr_label}.log"
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/identify_cohort_junction_outliers_{thr_label}.log"
     shell:
         """
         mkdir -p $(dirname {log})

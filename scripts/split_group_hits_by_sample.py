@@ -17,9 +17,11 @@ import pandas as pd
 
 VARIANT_HEADER = ['sample', 'chrom', 'pos', 'ref', 'alt', 'GT', 'gnomAD_AF',
                    'CLNSIG', 'gene', 'CADD_PHRED', 'SpliceAI',
+                   'ANNOVAR_AAChange.refGene', 'ANNOVAR_GeneDetail.refGene',
                    'num_callers', 'sample_count']
 ASE_HEADER = ['sample', 'gene', 'ratio', 'sample_count']
-JUNCTION_HEADER = ['sample', 'phasing', 'gene', 'junction', 'jxn_coverage', 'delta_PSI', 'sample_count']
+JUNCTION_HEADER = ['sample', 'phasing', 'gene', 'junction', 'jxn_coverage', 'delta_PSI',
+                    'annotation', 'event', 'sample_count']
 
 
 def parse_args():
@@ -34,6 +36,11 @@ def parse_args():
     parser.add_argument("--junction-files", nargs="*", default=[],
         help="Per-tissue merged junction hit files (output of merge_and_filter_junction_results.py, "
              "one per --tissues entry). Concatenated across tissues before splitting by sample.")
+    parser.add_argument("--cohort-junction-tsv", required=False, default=None,
+        help="Group-level cohort-comparison junction outliers (rules/7_cohort_junction_analysis.smk's "
+             "*_outliers_filtered.tsv). Raw column names differ from --junction-files (and vary by "
+             "whether that group used the beta_binomial or modified_zscore method) -- normalized to "
+             "the same schema as --junction-files here so merge_hits.py can treat them identically.")
     parser.add_argument("--samples", nargs="+", required=True, help="Sample names in this group.")
     parser.add_argument("--outdir", required=True, help="Output directory for per-sample stub files.")
     args = parser.parse_args()
@@ -59,6 +66,33 @@ def split_by_sample(df, sample_col, samples, default_header, outdir, suffix):
         print(f"  {sample}: {len(sub)} row(s) -> {out_path}")
 
 
+def normalize_cohort_junction_df(df):
+    """rules/7_cohort_junction_analysis.smk's *_outliers_filtered.tsv has a
+    much richer, differently-named column set than the GTEx-comparison
+    junction files (and its effect-size column's name/units depend on
+    whether that group used the beta_binomial or modified_zscore method --
+    delta_junction_PSI (a PSI-scale value in [-1, 1]) for the former,
+    modz_junction_PSI (an unbounded z-score) for the latter). Normalize
+    down to the same schema as JUNCTION_HEADER so merge_hits.py can
+    aggregate both with identical logic."""
+    out = pd.DataFrame()
+    out['sample'] = df['sample']
+    out['phasing'] = df['phasing']
+    out['gene'] = df['gene']
+    out['junction'] = df['junction']
+    out['jxn_coverage'] = df['junction_coverage'] if 'junction_coverage' in df.columns else pd.NA
+    if 'delta_junction_PSI' in df.columns:
+        out['delta_PSI'] = df['delta_junction_PSI']
+    elif 'modz_junction_PSI' in df.columns:
+        out['delta_PSI'] = df['modz_junction_PSI']
+    else:
+        out['delta_PSI'] = pd.NA
+    out['annotation'] = df['junction_type'] if 'junction_type' in df.columns else '.'
+    out['event'] = df['event_type'] if 'event_type' in df.columns else '.'
+    out['sample_count'] = df['n_sample_outlier_junction_PSI'] if 'n_sample_outlier_junction_PSI' in df.columns else pd.NA
+    return out
+
+
 def main():
     args = parse_args()
 
@@ -82,6 +116,23 @@ def main():
     junction_df = (pd.concat(per_tissue_dfs, ignore_index=True)
                    if per_tissue_dfs else pd.DataFrame(columns=JUNCTION_HEADER))
     split_by_sample(junction_df, "sample", args.samples, JUNCTION_HEADER, args.outdir, "junction_hits")
+
+    print("\nSplitting cohort-comparison junction hits by sample...")
+    if args.cohort_junction_tsv:
+        _required_cols = {'sample', 'phasing', 'gene', 'junction'}
+        raw_cohort_df = (pd.read_csv(args.cohort_junction_tsv, sep="\t", dtype=str)
+                          if os.path.isfile(args.cohort_junction_tsv) else pd.DataFrame())
+        if _required_cols.issubset(raw_cohort_df.columns) and not raw_cohort_df.empty:
+            cohort_junction_df = normalize_cohort_junction_df(raw_cohort_df)
+        else:
+            # Missing file, empty file, or a skipped group (rule 7 writes a
+            # near-empty outliers_filtered.tsv for groups below its
+            # min-samples threshold) -- fall through to header-only stubs
+            # below rather than treating this as an error.
+            cohort_junction_df = pd.DataFrame(columns=JUNCTION_HEADER)
+    else:
+        cohort_junction_df = pd.DataFrame(columns=JUNCTION_HEADER)
+    split_by_sample(cohort_junction_df, "sample", args.samples, JUNCTION_HEADER, args.outdir, "cohort_junction_hits")
 
     print("\nDone.")
 

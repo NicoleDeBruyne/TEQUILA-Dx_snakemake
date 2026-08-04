@@ -10,26 +10,26 @@ def _gnomad_vcf_list(base, mito_vcf):
     """Build the comma-separated gnomAD VCF list from a given base URL/path
     and mito VCF -- used for both the primary and fallback (always-remote) lists."""
     chroms = config["gnomad_chroms"]
-    vcfs   = [f"{base}/gnomad.genomes.v4.1.sites.{c}.vcf.bgz" for c in chroms]
+    vcfs   = [(str(base) + '/gnomad.genomes.v4.1.sites.' + str(c) + '.vcf.bgz') for c in chroms]
     vcfs.append(mito_vcf)
     return ",".join(vcfs)
 
 def _clnsig_args(wc):
-    return " ".join(f'"{s}"' for s in config["clnsig_filter"])
+    return " ".join(('"' + str(s) + '"') for s in config["clnsig_filter"])
 
 def _cadd_clnsig_args(wc):
-    return " ".join(f'"{s}"' for s in config["cadd_clnsig_filter"])
+    return " ".join(('"' + str(s) + '"') for s in config["cadd_clnsig_filter"])
 
 def _spliceai_clnsig_args(wc):
-    return " ".join(f'"{s}"' for s in config["spliceai_clnsig_filter"])
+    return " ".join(('"' + str(s) + '"') for s in config["spliceai_clnsig_filter"])
 
 def _final_dp_flag(wc):
     v = config.get("final_dp_threshold", "")
-    return f"--final-DP-threshold {v}" if str(v).strip() != "" else ""
+    return ('--final-DP-threshold ' + str(v)) if str(v).strip() != "" else ""
 
 def _final_af_flag(wc):
     v = config.get("final_af_threshold", "")
-    return f"--final-AF-threshold {v}" if str(v).strip() != "" else ""
+    return ('--final-AF-threshold ' + str(v)) if str(v).strip() != "" else ""
 
 
 rule _2A_compile_variants:
@@ -86,7 +86,7 @@ rule _2A_compile_variants:
         mem_mb     = lambda wc, threads, attempt: max(4096, attempt * threads * 16 * 1024),
         runtime    = config["time"],
     log:
-        "{outdir}/logs/{sample}_compile_variants.log"
+        "{outdir}/../logs/{sample}_compile_variants.log"
     shell:
         """
         mkdir -p $(dirname {params.outprefix})

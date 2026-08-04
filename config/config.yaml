@@ -10,7 +10,9 @@
 
 # ---------------------------------------------------------------------------
 # Run manifest (injected at runtime by submit_snakemake.sh)
-# Each sample entry provides: bam, outdir, bed, tissues, sample_type
+# Each sample entry provides: bam, bed, tissues, sample_type, and optionally
+# outdir (overrides the default {output_dir}/samples/{sample}/output for
+# that one sample -- see the top-level 'output_dir' key below)
 # ("sample_type" is used only by the merge_hits stage, to group samples
 #  sharing the same BED panel and sample type, e.g. "fibroblasts", "PBMC")
 # ---------------------------------------------------------------------------
@@ -40,7 +42,18 @@ ase_analysis:               true
 junction_analysis:          true
 cohort_junction_analysis:   true
 merge_hits:                 true
+merge_hits_include_cohort_junctions: true   # True (default): merged_all_hits.tsv is built from
+                                             # the fully-informed per-sample merge (_6D2), which
+                                             # waits for cohort_junction_analysis (rule 7) to
+                                             # finish. False: build it from the faster _6D1 merge
+                                             # instead, which skips rule 7 entirely (no
+                                             # cohort_bulk_jxns/cohort_outlier_junction columns
+                                             # etc. in the output). _6D1 and _6D2 are mutually
+                                             # exclusive -- only whichever this selects ever runs;
+                                             # see rules/6_merge_hits.smk's module docstring.
 validate_sample_types:      true
+plot_cohort_qc:              true
+quantify_genes:              true
 
 # ---------------------------------------------------------------------------
 # Shared conda environments. conda_env is used by every rule except
@@ -271,11 +284,22 @@ cohort_jxn_zscore_n_threshold:   10   # modified_zscore only
 cohort_jxn_min_reads:          20   # a junction needs >= this many reads in >=1 bulk sample to be tested at all
 
 # ---------------------------------------------------------------------------
-# Cross-sample merge stage (rules/6_merge_hits.smk)
+# Top-level output directory (rules/6_merge_hits.smk, rules/7-9)
 # ---------------------------------------------------------------------------
-merged_outdir: ""   # top-level directory for cross-sample merged results; one
-                     # subdirectory per (bed, sample_type) group is created beneath it
-omim_file: "resources/omim_data/OMIM.tsv"
+output_dir: ""   # single top-level output directory for the whole run. Normally set
+                 # in the run config YAML (alongside 'samples:') or via
+                 # --config output_dir=<path>; see docs/general.md for the full
+                 # layout beneath it:
+                 #   {output_dir}/samples/{sample}/output/...   -- per-sample stage outputs
+                 #   {output_dir}/samples/{sample}/logs/...     -- per-sample stage logs
+                 #   {output_dir}/cohort/{bed_id}/output/validate_sample_types/, cohort_qc/, merged_all_hits.tsv  -- per-BED-panel outputs
+                 #   {output_dir}/cohort/{bed_id}/logs/...      -- per-BED-panel logs (sibling of the output/ above)
+                 #   {output_dir}/cohort/{bed_id}/output/sample_types/{sample_type}/output/...  -- per-group merge/cohort_junction_analysis/gene_quantification
+                 #                                                  outputs (variant/ase/junction_analysis prefixed "merged_" here to distinguish from the per-sample folders of the same name)
+                 #   {output_dir}/cohort/{bed_id}/output/sample_types/{sample_type}/logs/...    -- per-group logs
+omim_file: "resources/omim_data/OMIM.tsv"   # optional -- set to "" to skip OMIM annotation;
+                                             # phenotypes/inheritance_patterns columns in
+                                             # merged_all_hits.tsv are filled with "." instead
 
 merge_num_callers_threshold_snv:       2
 merge_num_callers_threshold_indel:     2
@@ -309,6 +333,24 @@ sample_type_colors:
   lymphocytes: "#57AA3E"
   PBMCs: "#4C8FCA"
   wholeblood: "#B271AB"
+
+# ---------------------------------------------------------------------------
+# Cohort-wide QC plots (rules/9_plot_cohort_info.smk)
+# On-target/mapping rates and read length/quality distributions across every
+# sample in the run, computed directly from each sample's BAM (+ its own BED
+# panel for on/off-target classification).
+# ---------------------------------------------------------------------------
+cohort_qc_title: "Cohort QC"   # shared plot title for both _9A and _9B; set per-run if desired
+
+# ---------------------------------------------------------------------------
+# Relative gene expression quantification (rules/10_quantify_genes.smk)
+# Approximate per-gene relative expression across each (bed, sample_type)
+# group, from read count (_10A) or max coverage (_10B) over each gene's BED
+# region -- no external quantification tool. See the module docstring in
+# rules/10_quantify_genes.smk for the CPTM normalization used.
+# ---------------------------------------------------------------------------
+gene_quant_title: null   # overrides the default "{bed_id} {sample_type} relative gene
+                          # expression (...)" title for both _10A and _10B if set
 
 # ---------------------------------------------------------------------------
 # Resource defaults (override per rule if needed)
