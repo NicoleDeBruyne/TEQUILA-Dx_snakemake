@@ -345,12 +345,13 @@ cohort_qc_title: "Cohort QC"   # shared plot title for both _9A and _9B; set per
 # ---------------------------------------------------------------------------
 # Relative gene expression quantification (rules/10_quantify_genes.smk)
 # Approximate per-gene relative expression across each (bed, sample_type)
-# group, from read count (_10A) or max coverage (_10B) over each gene's BED
-# region -- no external quantification tool. See the module docstring in
-# rules/10_quantify_genes.smk for the CPTM normalization used.
+# group, from read count (_10A), max coverage (_10B), or splice-site-sharing
+# read assignment against the full GTF gene set (_10D) -- no external
+# quantification tool. See the module docstring in rules/10_quantify_genes.smk
+# for the CPTM normalization used.
 # ---------------------------------------------------------------------------
 gene_quant_title: null   # overrides the default "{bed_id} {sample_type} relative gene
-                          # expression (...)" title for both _10A and _10B if set
+                          # expression (...)" title for _10A, _10B, and _10D if set
 
 # ---------------------------------------------------------------------------
 # Resource defaults (override per rule if needed)

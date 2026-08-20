@@ -10,13 +10,13 @@ Split into two independent rules:
                                  (fraction of mapped reads falling in that
                                  sample's own BED panel), via
                                  scripts/plot_on_target_rates.py.
-  2. _9B_plot_read_attributes -- per-sample read length and quality
-                                 distributions, split by on-target /
-                                 off-target / unmapped status, via
-                                 scripts/plot_read_attributes.py. Computed
-                                 directly from each BAM's primary alignments
-                                 (no FASTQ input required -- see the script's
-                                 docstring for the approximation this makes).
+  2. _9B_plot_read_attributes -- per-sample read length distributions,
+                                 split by on-target / off-target / unmapped
+                                 status, via scripts/plot_read_attributes.py.
+                                 Computed directly from each BAM's primary
+                                 alignments (no FASTQ input required -- see
+                                 the script's docstring for the approximation
+                                 this makes).
 
 Both rules build their own "name, bam, bed[, group]" mapping file from
 bed_samples(wc.bed_id) inline in the shell command (mirroring
@@ -85,9 +85,7 @@ rule _9B_plot_read_attributes:
         read_attributes    = _cohort_outdir + "/{bed_id}/output/cohort_qc/read_attributes/{bed_id}_read_attributes_read_attributes.tsv",
         summary            = _cohort_outdir + "/{bed_id}/output/cohort_qc/read_attributes/{bed_id}_read_attributes_summary.tsv",
         length_boxplot     = _cohort_outdir + "/{bed_id}/output/cohort_qc/read_attributes/{bed_id}_read_attributes_read_lengths_boxplot.pdf",
-        quality_boxplot    = _cohort_outdir + "/{bed_id}/output/cohort_qc/read_attributes/{bed_id}_read_attributes_read_qualities_boxplot.pdf",
         length_violin      = _cohort_outdir + "/{bed_id}/output/cohort_qc/read_attributes/{bed_id}_read_attributes_read_lengths_violin.pdf",
-        quality_violin     = _cohort_outdir + "/{bed_id}/output/cohort_qc/read_attributes/{bed_id}_read_attributes_read_qualities_violin.pdf",
     params:
         names     = lambda wc: _quoted(bed_samples(wc.bed_id)),
         bams      = lambda wc: _quoted([SAMPLES[s]["bam"] for s in bed_samples(wc.bed_id)]),
@@ -98,10 +96,10 @@ rule _9B_plot_read_attributes:
     threads: lambda wc: _group_threads(wc.bed_id, "plot_read_attributes", config["threads"])
     resources:
         # Reads through every alignment in every BAM (twice, when a bed is
-        # given: once for on-target IDs, once for length/quality) -- scale
-        # with cohort size like _9A, with a higher floor since this rule is
-        # the more memory-hungry of the two (holds every read's length +
-        # quality in memory per worker before down-sampling to 100k/group).
+        # given: once for on-target IDs, once for length) -- scale with
+        # cohort size like _9A, with a higher floor since this rule is the
+        # more memory-hungry of the two (holds every read's length in
+        # memory per worker before down-sampling to 100k/group).
         mem_mb  = lambda wc, attempt: attempt * 2048 * max(8, len(bed_samples(wc.bed_id))),
         runtime = config["time"],
     log:

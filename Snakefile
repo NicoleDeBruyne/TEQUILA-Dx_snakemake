@@ -465,6 +465,7 @@ def all_outputs():
             outs.append(god + "/gene_quantification/by_count/gene_count_matrix.tsv")
             outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/NOT_YET_IMPLEMENTED.txt")
+            outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix.tsv")
 
     if flag("validate_sample_types"):
         # Requesting validate_sample_types' output pulls build_group_junction_matrix along with it.
@@ -476,7 +477,7 @@ def all_outputs():
         for bid in BED_GROUPS:
             cqd = bed_outdir(bid) + "/cohort_qc"
             outs.append((str(cqd) + '/on_target_rates/' + str(bid) + '_on_target_rates_ontarget.pdf'))
-            outs.append((str(cqd) + '/read_attributes/' + str(bid) + '_read_attributes_read_qualities_violin.pdf'))
+            outs.append((str(cqd) + '/read_attributes/' + str(bid) + '_read_attributes_read_lengths_violin.pdf'))
 
     return outs
 
