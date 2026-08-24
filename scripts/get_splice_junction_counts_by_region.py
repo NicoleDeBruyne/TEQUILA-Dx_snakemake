@@ -5,7 +5,7 @@
 
 # Extracts splice junctions from a BAM file mapping to specified regions of interest.
 
-import os, argparse, warnings, pysam
+import os, argparse, warnings, pysam, traceback
 import pandas as pd
 from pandas.errors import PerformanceWarning
 import concurrent.futures
@@ -201,6 +201,7 @@ def main():
                     results.append(res)
             except Exception as e:
                 print(f"Error encountered: {e}")
+                traceback.print_exc()
 
     combined_df = pd.concat(results, ignore_index=True)
     combined_df.to_csv(args.outfile, sep='\t', index=False)

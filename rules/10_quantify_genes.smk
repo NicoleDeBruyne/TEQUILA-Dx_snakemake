@@ -149,6 +149,16 @@ rule _10C_run_amalgam:
         bed  = lambda wc: bed_path(wc.bed_id),
     output:
         marker = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/NOT_YET_IMPLEMENTED.txt",
+    threads: 1
+    resources:
+        # This is a no-op placeholder (just writes a marker file) -- give
+        # it a small fixed footprint rather than falling through to
+        # Snakemake's size-based default, which would otherwise derive
+        # mem_mb/disk_mb from the full cohort BAM list in `input.bams`
+        # (potentially >1TB) and get the sbatch submission itself
+        # rejected by SLURM.
+        mem_mb  = 1024,
+        runtime = 10,
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_amalgam_quantification.log"
     shell:

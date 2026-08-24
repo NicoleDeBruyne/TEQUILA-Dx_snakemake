@@ -262,7 +262,8 @@ def _cja_thr_label(group_id):
 def _cja_outliers_filtered_path(group_id):
     """This group's cohort_junction_analysis outliers_filtered.tsv path
     (rules/7_cohort_junction_analysis.smk's _7B) -- used by rules/6_merge_hits.smk's
-    _6D1 to pull cohort-comparison junction results into merged_hits.tsv."""
+    _6D2 (and opportunistically by _6D1) to pull cohort-comparison junction
+    results into all_hits.tsv."""
     thr_label = _cja_thr_label(group_id)
     return (group_outdir(group_id) + "/cohort_junction_analysis/" + group_id + "_" + thr_label
             + "/" + group_id + "_outliers_filtered.tsv")
@@ -425,7 +426,12 @@ def all_outputs():
             outs.append((str(od) + '/variant_calling/deepvariant/' + str(s) + '_deepvariant_norm.vcf.gz'))
 
         if flag("compile_variants"):
-            outs.append((str(od) + '/variant_calling/compiled_variants/' + str(s) + '_compiled_variants.tsv'))
+            # Request the chain's final output (_2B_filter_variants), not
+            # just _2A's intermediate _compiled_variants.tsv, so this flag
+            # still pulls in the whole rules/2_compile_variants.smk chain
+            # as a unit (matching junction_analysis's pattern below) --
+            # needed since _2A/_2B became separate rules.
+            outs.append((str(od) + '/variant_calling/compiled_variants/' + str(s) + '_filtered_variants.tsv'))
 
         if flag("phase_reads"):
             outs.append((str(od) + '/phased_reads/' + str(s) + '_phasing_summary.tsv'))
@@ -442,14 +448,28 @@ def all_outputs():
                 )
 
     if flag("merge_hits"):
-        # Requesting final_merge's output pulls the whole merge_hits.smk
-        # chain along with it (see docs/rules/6_merge_hits.md). Which of
-        # _6D1/_6D2 that chain actually runs is controlled by
-        # config['merge_hits_include_cohort_junctions'], not here -- see
-        # _group_sample_hits_files() in rules/6_merge_hits.smk.
+        # Requesting _6G's output pulls in _6A-_6D/_6F (everything _6G
+        # actually depends on, including merged_all_hits.tsv). It does NOT
+        # pull in _6E_plot_group_hits: that rule's four PDFs are a dead-end
+        # branch off all_hits.tsv -- nothing downstream (_6F/_6G) consumes
+        # them, so they must be requested explicitly here or Snakemake
+        # never builds them. Which of _6D1/_6D2 the _6G branch actually
+        # runs is controlled by config['merge_hits_include_cohort_junctions'],
+        # not here -- see rules/6_merge_hits.smk's module docstring.
         for bid in BED_GROUPS:
             bod = bed_outdir(bid)
-            outs.append((str(bod) + '/merged_all_hits.tsv'))
+            outs.append((str(bod) + '/hits_upset_plot.pdf'))
+        for gid in GROUPS:
+            god = group_outdir(gid)
+            # One representative file per category is enough to pull the
+            # whole rule in -- Snakemake builds every declared output of a
+            # targeted rule in one invocation, not just the one requested
+            # (same pattern as elsewhere in this pipeline, e.g. _2A's
+            # tsv+filtered_tsv). Picked _boxplot.pdf as that representative;
+            # _barplot.pdf for the same category is produced alongside it.
+            for fname in ('genes_with_pathogenic_variant_boxplot.pdf', 'genes_with_ASE_boxplot.pdf',
+                          'genes_with_outlier_junction_boxplot.pdf', 'genes_with_RNA_dysregulation_boxplot.pdf'):
+                outs.append((str(god) + '/merged_hits/' + fname))
 
     if flag("cohort_junction_analysis"):
         for gid in GROUPS:

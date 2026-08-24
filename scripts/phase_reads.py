@@ -12,6 +12,7 @@ import numpy as np
 import shutil
 import math
 import concurrent.futures
+import traceback
 
 def parse_args():
     """Parses command-line arguments."""
@@ -515,6 +516,7 @@ def main():
                     summary_rows.append(row)
             except Exception as e:
                 print(f"Error encountered while phasing {gene}: {e}")
+                traceback.print_exc()
     else:
         row = phase_reads(args.bam, args.name, args.region, args.vcf,
                     args.min_distance_from_read_end, args.terminal_variant_proportion,

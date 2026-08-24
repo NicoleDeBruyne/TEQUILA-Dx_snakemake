@@ -1,7 +1,15 @@
 """
 rules/2_compile_variants.smk
 Merges longcallR / NanoTS / Clair3-RNA / DeepVariant VCFs, annotates with
-ANNOVAR, gnomAD, ClinVar, CADD, and SpliceAI.
+ANNOVAR, gnomAD, ClinVar, CADD, and SpliceAI (_2A_compile_variants), then
+applies final filter thresholds (_2B_filter_variants).
+
+Split into two rules so that changing a final filter threshold (gnomAD AF,
+CLNSIG, CADD, SpliceAI, DP, AF -- see filter_variants.py) only reruns the
+cheap _2B_filter_variants step (a pandas filter over an already-annotated
+tsv) and everything downstream, without re-running the expensive annotation
+in _2A (ANNOVAR, gnomAD, ClinVar, CADD, SpliceAI).
+
 See docs/rules/2_compile_variants.md for the CADD/SpliceAI fallback tiers,
 the dedicated conda env, and the CADD_wrapper.sh PATH-isolation details.
 """
@@ -41,7 +49,6 @@ rule _2A_compile_variants:
         bed        = lambda wc: SAMPLES[wc.sample]["bed"],
     output:
         tsv          = "{outdir}/variant_calling/compiled_variants/{sample}_compiled_variants.tsv",
-        filtered_tsv = "{outdir}/variant_calling/compiled_variants/{sample}_filtered_variants.tsv",
     params:
         genome      = config["genome"],
         annotation  = config["annotation"],
@@ -68,16 +75,10 @@ rule _2A_compile_variants:
         # store_true flag in compile_variants.py -- either the flag itself
         # or nothing, hence the lambda instead of a plain config[...] lookup.
         spliceai_force_prescored = lambda wc: "--SpliceAI-force-prescored-lookup" if config["spliceai_force_prescored_lookup"] else "",
-        clnsig      = _clnsig_args,
-        gnomad_af   = config["gnomad_af_threshold"],
         cadd_gnomad_af = config["cadd_gnomad_af_threshold"],
         cadd_clnsig    = _cadd_clnsig_args,
         spliceai_gnomad_af = config["spliceai_gnomad_af_threshold"],
         spliceai_clnsig    = _spliceai_clnsig_args,
-        cadd_thr    = config["cadd_threshold"],
-        spliceai_thr= config["spliceai_threshold"],
-        final_dp_flag = _final_dp_flag,
-        final_af_flag = _final_af_flag,
         outprefix   = "{outdir}/variant_calling/compiled_variants/{sample}",
         script      = workflow.basedir + "/scripts/compile_variants.py",
         conda_env_compile_variants = config["conda_env_compile_variants"],
@@ -132,12 +133,52 @@ rule _2A_compile_variants:
             {params.spliceai_force_prescored} \\
             --SpliceAI-gnomadAF-threshold {params.spliceai_gnomad_af} \\
             --SpliceAI-CLNSIG-filter {params.spliceai_clnsig} \\
+            --threads {threads} \\
+        2>&1 | tee {log}
+        """
+
+
+# ---------------------------------------------------------------------------
+# 2B. Apply final filter thresholds to _2A's already-annotated tsv. Cheap --
+#    a pandas filter over an existing file, no VCFs/BED/ANNOVAR/gnomAD/
+#    ClinVar/CADD/SpliceAI resources touched -- so tuning gnomad_af_threshold/
+#    clnsig_filter/cadd_threshold/spliceai_threshold/final_dp_threshold/
+#    final_af_threshold only reruns this rule and everything downstream, not
+#    _2A's expensive annotation.
+# ---------------------------------------------------------------------------
+rule _2B_filter_variants:
+    input:
+        tsv = "{outdir}/variant_calling/compiled_variants/{sample}_compiled_variants.tsv",
+    output:
+        filtered_tsv = "{outdir}/variant_calling/compiled_variants/{sample}_filtered_variants.tsv",
+    params:
+        clnsig       = _clnsig_args,
+        gnomad_af    = config["gnomad_af_threshold"],
+        cadd_thr     = config["cadd_threshold"],
+        spliceai_thr = config["spliceai_threshold"],
+        final_dp_flag = _final_dp_flag,
+        final_af_flag = _final_af_flag,
+        script       = workflow.basedir + "/scripts/filter_variants.py",
+        conda_env_compile_variants = config["conda_env_compile_variants"],
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: max(2048, attempt * 4 * 1024),
+        runtime = config["time"],
+    log:
+        "{outdir}/../logs/{sample}_filter_variants.log"
+    shell:
+        """
+        # Same dedicated env as _2A (just needs pandas) -- see that rule's
+        # comment for why this isn't the main conda_env.
+        export PATH="{params.conda_env_compile_variants}/bin:$PATH"
+        python -u {params.script} \\
+            --compiled-tsv {input.tsv} \\
+            --outfile {output.filtered_tsv} \\
             --final-gnomadAF-threshold {params.gnomad_af} \\
             --final-CLNSIG-filter {params.clnsig} \\
             --final-CADD-phred-threshold {params.cadd_thr} \\
             --final-SpliceAI-threshold {params.spliceai_thr} \\
             {params.final_dp_flag} \\
             {params.final_af_flag} \\
-            --threads {threads} \\
         2>&1 | tee {log}
         """

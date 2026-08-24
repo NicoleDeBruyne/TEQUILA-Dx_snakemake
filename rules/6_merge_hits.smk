@@ -5,20 +5,36 @@ See docs/rules/6_merge_hits.md for the full stage list, dependency order, and
 the {bed_id}/output/sample_types/{sample_type} wildcard convention used throughout
 this file.
 
-Per-sample merge is split into two mutually-exclusive rules:
+Per-group merge (builds every sample's ranked hits AND concatenates them
+into that group's all_hits.tsv, in one job) is split into two mutually-
+exclusive rules:
   _6D1  -- doesn't depend on cohort_junction_analysis (rule 7) at all, so it
           can run as soon as variant/ASE/junction results are ready.
   _6D2 -- the fully-informed version: does depend on rule 7, and picks up
           cohort-comparison junction results once they're available.
 
 config['merge_hits_include_cohort_junctions'] (default True) controls which
-one _6E (and therefore everything chained after it -- _6F/_6G/
-merged_all_hits.tsv) actually consumes -- see _group_sample_hits_files()
-below, the single place that decision is made. Only the selected branch is
-ever requested, so only it ever runs; the two are never both computed in
-the same run. Flip the config value and rerun snakemake to switch which one
-merged_all_hits.tsv is built from (this also determines whether that run
-waits on rule 7 or not).
+one produces all_hits.tsv (and therefore everything chained after it --
+_6E/_6F/merged_all_hits.tsv) -- see the `subdir`/output path picked in each
+rule below. Only the selected branch is ever requested, so only it ever
+runs; the two are never both computed in the same run. Flip the config
+value and rerun snakemake to switch which one all_hits.tsv is built from
+(this also determines whether that run waits on rule 7 or not).
+
+_6D1/_6D2 build every sample's ranked hit table directly from the group's
+already-merged variant/ASE/junction/cohort-junction tables (via
+scripts/merge_group_hits.py, using scripts/merge_hits.py as a library) and
+write the group's all_hits.tsv in the same job -- one job per group, not
+one job per sample plus a separate concat step. (Older versions of this
+pipeline split this into a per-sample split+merge rule and a separate
+_6E concat rule; that's been folded in here since the per-sample split
+served no purpose once _6A/_6B/_6C already merge across the whole group --
+see git history / conversation notes if you need the old per-sample
+version for reference.)
+
+_6G pools every all_hits.tsv across sample_types (via _6F's
+merged_all_hits.tsv) into an UpSet-style category-combination plot -- see
+that rule's docstring.
 """
 
 from math import ceil
@@ -35,18 +51,6 @@ _variant_tsv    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/
 _ase_tsv        = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_ase_analysis/outlier_ase.tsv"
 _junction_final = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_junction_analysis/gtex_{tissue}/outlier_junctions_gtex_{tissue}_final.tsv"
 _all_hits_tsv   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/all_hits.tsv"
-
-def _group_sample_hits_files(group_id):
-    """Every sample's per-sample hits.tsv for a group, from whichever of
-    _6D1/_6D2 config['merge_hits_include_cohort_junctions'] selects (see
-    that key's doc comment in config.yaml). _6D1 and _6D2 are mutually
-    exclusive by construction: this is the *only* place that decides which
-    one's output _6E (and therefore everything chained after it --
-    _6F/_6G/merged_all_hits.tsv) actually consumes, so only that one branch
-    ever gets pulled into the DAG for a given run."""
-    god = group_outdir(group_id)
-    subdir = "by_sample" if config.get("merge_hits_include_cohort_junctions", True) else "by_sample_preliminary"
-    return [(str(god) + "/merged_hits/" + subdir + "/" + str(s) + "_hits.tsv") for s in GROUPS[group_id]]
 
 def _group_variant_files(group_id):
     return [(str(SAMPLES[s]['outdir']) + '/variant_calling/compiled_variants/' + str(s) + '_filtered_variants.tsv') for s in GROUPS[group_id]]
@@ -222,28 +226,25 @@ rule _6C_merge_group_junctions:
 
 
 # ---------------------------------------------------------------------------
-# 6D1. Split this sample's rows out of the group-level merged variant/ASE/
-#    junction files, then merge them into one candidate-hits table -- one
-#    job per sample. Combined into one rule (rather than a separate
-#    group-level "split" rule) because classic Snakemake output: must be
-#    statically resolvable from wildcards, not a runtime-computed list of
-#    per-sample paths. Each sample's split step re-reads the group's
-#    already-small, already-filtered merged files, which is cheap.
+# 6D1. Build every sample's ranked candidate-hits table for a group,
+#    directly from the group's already-merged variant/ASE/junction tables
+#    (scripts/merge_group_hits.py, using scripts/merge_hits.py as a
+#    library), and write this group's all_hits.tsv -- one job per group.
 #
 # PRELIMINARY / fast path: deliberately does NOT depend on
 # cohort_junction_analysis (rules/7_cohort_junction_analysis.smk), which can
-# take a while. cohort-junction-tsv is still passed to the scripts below as
-# a params (not input) path: if that file already happens to exist on disk
+# take a while. --cohort-junction-tsv is still passed to the script as a
+# params (not input) path: if that file already happens to exist on disk
 # (e.g. a previous run already completed cohort_junction_analysis for this
-# group), it's picked up opportunistically; if not, merge_hits.py's existing
-# graceful "no cohort data" fallback applies (same as its --omim handling).
-# Writes to merged_hits/by_sample_preliminary/, NOT the canonical
-# merged_hits/by_sample/ path _6D2 writes to -- see _6D2 below.
+# group), it's picked up opportunistically; if not, merge_group_hits.py's
+# existing graceful "no cohort data" fallback applies (same as its --omim
+# handling).
+# Writes to merged_hits/all_hits_preliminary.tsv, NOT the canonical
+# merged_hits/all_hits.tsv path _6D2 writes to -- see _6D2 below.
 # Only runs at all when config['merge_hits_include_cohort_junctions'] is
-# False, since that's what determines which of _6D1/_6D2 _6E requests -- see
-# _group_sample_hits_files() near the top of this file.
+# False -- see _6D2's docstring for how that's decided.
 # ---------------------------------------------------------------------------
-rule _6D1_merge_sample_hits_preliminary:
+rule _6D1_merge_group_hits_preliminary:
     input:
         variant_tsv    = _variant_tsv,
         ase_tsv        = _ase_tsv,
@@ -252,63 +253,53 @@ rule _6D1_merge_sample_hits_preliminary:
             for t in group_tissues(_group_id_from_ids(wc.bed_id, wc.sample_type))
         ],
     output:
-        # {sample} is an extra wildcard purely so this stays a static,
-        # Snakemake-legal output pattern; only ever requested for valid
-        # (bed_id, sample_type, sample) combinations per GROUPS.
-        tsv = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/by_sample_preliminary/{sample}_hits.tsv",
+        all_hits = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/all_hits_preliminary.tsv",
     params:
+        samples      = lambda wc: GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)],
         tissues      = lambda wc: group_tissues(_group_id_from_ids(wc.bed_id, wc.sample_type)),
-        stub_dir     = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/by_sample_preliminary",
         # Not a Snakemake input: see the rule docstring above -- used only if
         # it already happens to exist when this rule actually runs.
         cohort_junction_tsv = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.bed_id, wc.sample_type)),
         # Empty string when omim_file isn't configured, so the --omim flag
-        # is simply omitted from the shell command below (merge_hits.py
+        # is simply omitted from the shell command below (merge_group_hits.py
         # treats a missing --omim as "skip phenotype/inheritance annotation"
         # rather than requiring it).
         omim_flag    = ("--omim " + config["omim_file"]) if config.get("omim_file") else "",
-        split_script = workflow.basedir + "/scripts/split_group_hits_by_sample.py",
-        merge_script = workflow.basedir + "/scripts/merge_hits.py",
+        script       = workflow.basedir + "/scripts/merge_group_hits.py",
     threads: 1
     resources:
         mem_mb  = lambda wc, attempt: max(4096, attempt * 4 * 1024),
         runtime = config["time"],
     log:
-        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/{sample}_merge_hits_preliminary.log"
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_hits_preliminary.log"
     shell:
         """
-        mkdir -p {params.stub_dir} $(dirname {log})
-        python -u {params.split_script} \\
+        mkdir -p $(dirname {output.all_hits}) $(dirname {log})
+        python -u {params.script} \\
+            --outfile     {output.all_hits} \\
             --variant-tsv {input.variant_tsv} \\
             --ase-tsv     {input.ase_tsv} \\
             --tissues     {params.tissues} \\
             --junction-files {input.junction_files} \\
             --cohort-junction-tsv {params.cohort_junction_tsv} \\
-            --samples     {wildcards.sample} \\
-            --outdir      {params.stub_dir} \\
-        2>&1 | tee {log}
-        python -u {params.merge_script} \\
-            --outfile      {output.tsv} \\
-            --sample-name  {wildcards.sample} \\
-            --variant-hits {params.stub_dir}/{wildcards.sample}_variant_hits.tsv \\
-            --ase-hits     {params.stub_dir}/{wildcards.sample}_ase_hits.tsv \\
-            --junction-hits {params.stub_dir}/{wildcards.sample}_junction_hits.tsv \\
-            --cohort-junction-hits {params.stub_dir}/{wildcards.sample}_cohort_junction_hits.tsv \\
+            --samples     {params.samples} \\
             {params.omim_flag} \\
-        2>&1 | tee -a {log}
+        2>&1 | tee {log}
         """
 
 
 # ---------------------------------------------------------------------------
-# 6D2. The fully-informed version of the same merge: identical to _6D1 above,
-#    except cohort_junction_tsv IS a real input here, so Snakemake waits for
-#    cohort_junction_analysis to finish and reruns this rule (and everything
-#    downstream: _6E/_6F/_6G) whenever its output changes.
+# 6D2. The fully-informed version of the same group-level merge: identical
+#    to _6D1 above, except cohort_junction_tsv IS a real input here, so
+#    Snakemake waits for cohort_junction_analysis to finish and reruns this
+#    rule (and everything downstream: _6E/_6F) whenever its output changes.
 #    Only runs at all when config['merge_hits_include_cohort_junctions'] is
-#    True (the default) -- see _group_sample_hits_files() near the top of
-#    this file, and _6D1's comment above.
+#    True (the default). This produces the canonical all_hits.tsv path
+#    (_all_hits_tsv) that _6E/_6F consume; _6D1's all_hits_preliminary.tsv
+#    is a dead end otherwise -- flip merge_hits_include_cohort_junctions to
+#    False if you want a run built from _6D1 instead.
 # ---------------------------------------------------------------------------
-rule _6D2_merge_sample_hits_with_cohort_junctions:
+rule _6D2_merge_group_hits_with_cohort_junctions:
     input:
         variant_tsv    = _variant_tsv,
         ase_tsv        = _ase_tsv,
@@ -318,80 +309,59 @@ rule _6D2_merge_sample_hits_with_cohort_junctions:
         ],
         cohort_junction_tsv = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.bed_id, wc.sample_type)),
     output:
-        tsv = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/by_sample/{sample}_hits.tsv",
+        all_hits = _all_hits_tsv,
     params:
+        samples      = lambda wc: GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)],
         tissues      = lambda wc: group_tissues(_group_id_from_ids(wc.bed_id, wc.sample_type)),
-        stub_dir     = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/by_sample",
         omim_flag    = ("--omim " + config["omim_file"]) if config.get("omim_file") else "",
-        split_script = workflow.basedir + "/scripts/split_group_hits_by_sample.py",
-        merge_script = workflow.basedir + "/scripts/merge_hits.py",
+        script       = workflow.basedir + "/scripts/merge_group_hits.py",
     threads: 1
     resources:
         mem_mb  = lambda wc, attempt: max(4096, attempt * 4 * 1024),
         runtime = config["time"],
     log:
-        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/{sample}_merge_hits.log"
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_hits.log"
     shell:
         """
-        mkdir -p {params.stub_dir} $(dirname {log})
-        python -u {params.split_script} \\
+        mkdir -p $(dirname {output.all_hits}) $(dirname {log})
+        python -u {params.script} \\
+            --outfile     {output.all_hits} \\
             --variant-tsv {input.variant_tsv} \\
             --ase-tsv     {input.ase_tsv} \\
             --tissues     {params.tissues} \\
             --junction-files {input.junction_files} \\
             --cohort-junction-tsv {input.cohort_junction_tsv} \\
-            --samples     {wildcards.sample} \\
-            --outdir      {params.stub_dir} \\
-        2>&1 | tee {log}
-        python -u {params.merge_script} \\
-            --outfile      {output.tsv} \\
-            --sample-name  {wildcards.sample} \\
-            --variant-hits {params.stub_dir}/{wildcards.sample}_variant_hits.tsv \\
-            --ase-hits     {params.stub_dir}/{wildcards.sample}_ase_hits.tsv \\
-            --junction-hits {params.stub_dir}/{wildcards.sample}_junction_hits.tsv \\
-            --cohort-junction-hits {params.stub_dir}/{wildcards.sample}_cohort_junction_hits.tsv \\
+            --samples     {params.samples} \\
             {params.omim_flag} \\
-        2>&1 | tee -a {log}
+        2>&1 | tee {log}
         """
 
 
 # ---------------------------------------------------------------------------
-# 6E. Concatenate every sample's hits.tsv into one group-level all_hits.tsv.
-#    Reads from whichever of _6D1/_6D2 _group_sample_hits_files() selects --
-#    see that function's docstring above. This is the point where the two
-#    branches become mutually exclusive: only the selected one is ever
-#    requested, so only it ever runs.
+# 6E. Plot candidate hits for a group (calls plot_candidate_hits.py directly).
+#    (Formerly _6F -- shifted down a letter when the old per-sample _6D1/
+#    _6D2 + separate _6E concat rule were folded into single group-level
+#    _6D1/_6D2 rules above, to keep letters matching execution order.)
 # ---------------------------------------------------------------------------
-rule _6E_concat_group_hits:
-    input:
-        sample_hits = lambda wc: _group_sample_hits_files(_group_id_from_ids(wc.bed_id, wc.sample_type)),
-    output:
-        all_hits = _all_hits_tsv,
-    threads: 1
-    resources:
-        mem_mb  = lambda wc, attempt: max(4096, attempt * 1024 * 2),
-        runtime = 60,
-    log:
-        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/concat_group_hits.log"
-    shell:
-        """
-        mkdir -p $(dirname {output.all_hits}) $(dirname {log})
-        awk 'FNR==1 && NR!=1 {{next}} {{print}}' {input.sample_hits} > {output.all_hits} 2> {log}
-        echo "Finished concat to {output.all_hits}." >> {log}
-        """
-
-
-# ---------------------------------------------------------------------------
-# 6F. Plot candidate hits for a group (calls plot_candidate_hits.py directly).
-# ---------------------------------------------------------------------------
-rule _6F_plot_group_hits:
+rule _6E_plot_group_hits:
     input:
         all_hits = _all_hits_tsv,
     output:
-        pathogenic  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_pathogenic_variant.pdf",
-        ase         = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_ASE.pdf",
-        junction    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_outlier_junction.pdf",
-        dysreg      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_RNA_dysregulation.pdf",
+        # plot_candidate_hits.py's plot() writes two files per category
+        # (a stacked barplot and a boxplot-with-dots), never a single file
+        # at the bare category name -- these must match its actual
+        # filenames exactly or Snakemake reports the rule as failed even
+        # when the script ran fine (each is f"{prefix}_barplot{ext}" /
+        # f"{prefix}_boxplot{ext}" off the *args* passed below, i.e. off
+        # the bare "genes_with_X.pdf" names, not off these output paths).
+        pathogenic_bar  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_pathogenic_variant_barplot.pdf",
+        pathogenic_box  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_pathogenic_variant_boxplot.pdf",
+        ase_bar         = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_ASE_barplot.pdf",
+        ase_box         = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_ASE_boxplot.pdf",
+        junction_bar    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_outlier_junction_barplot.pdf",
+        junction_box    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_outlier_junction_boxplot.pdf",
+        dysreg_bar      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_RNA_dysregulation_barplot.pdf",
+        dysreg_box      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/genes_with_RNA_dysregulation_boxplot.pdf",
     params:
         outdir = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits",
         script = workflow.basedir + "/scripts/plot_candidate_hits.py",
@@ -411,9 +381,10 @@ rule _6F_plot_group_hits:
 
 
 # ---------------------------------------------------------------------------
-# 6G. Final merge across all sample types sharing a BED panel (unchanged).
+# 6F. Final merge across all sample types sharing a BED panel (unchanged).
+#    (Formerly _6G -- shifted down a letter, see _6E's comment above.)
 # ---------------------------------------------------------------------------
-rule _6G_final_merge:
+rule _6F_final_merge:
     input:
         all_hits = lambda wc: [(str(group_outdir(gid)) + '/merged_hits/all_hits.tsv') for gid in BED_GROUPS[wc.bed_id]],
     output:
@@ -429,4 +400,46 @@ rule _6G_final_merge:
         mkdir -p $(dirname {log})
         awk 'FNR==1 && NR!=1 {{next}} {{print}}' {input.all_hits} > {output.merged} 2> {log}
         echo "Finished final merge to {output.merged}." >> {log}
+        """
+
+
+# ---------------------------------------------------------------------------
+# 6G. UpSet-style boxplot of merged_all_hits.tsv's four hit categories
+#    (variant, ASE, outlier_junction, cohort_outlier_junction): for every
+#    non-empty combination of those categories, a boxplot of "how many
+#    genes did this sample have in exactly this combination", one dot per
+#    sample colored by sample_type, plus the standard UpSet
+#    combination-membership matrix underneath. Pools across every
+#    sample_type sharing this BED panel, same scope as merged_all_hits.tsv
+#    itself (bed_samples(), not group-scoped -- see rules/9_plot_cohort_info.smk
+#    for the same pooling pattern).
+# ---------------------------------------------------------------------------
+rule _6G_plot_hits_upset:
+    input:
+        all_hits = _cohort_outdir + "/{bed_id}/output/merged_all_hits.tsv",
+    output:
+        pdf = _cohort_outdir + "/{bed_id}/output/hits_upset_plot.pdf",
+        tsv = _cohort_outdir + "/{bed_id}/output/hits_upset_counts.tsv",
+    params:
+        samples      = lambda wc: bed_samples(wc.bed_id),
+        sample_types = lambda wc: [SAMPLES[s]["sample_type"] for s in bed_samples(wc.bed_id)],
+        outdir       = _cohort_outdir + "/{bed_id}/output",
+        title        = lambda wc: f"{wc.bed_id}: Candidate Gene Hit Categories by Sample",
+        script       = workflow.basedir + "/scripts/plot_hits_upset.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: max(4096, attempt * 1024 * 2),
+        runtime = 60,
+    log:
+        _cohort_outdir + "/{bed_id}/logs/{bed_id}_hits_upset.log"
+    shell:
+        """
+        mkdir -p {params.outdir} $(dirname {log})
+        python -u {params.script} \\
+            --infile      {input.all_hits} \\
+            --samples     {params.samples} \\
+            --sample-types {params.sample_types} \\
+            --outdir      {params.outdir} \\
+            --title       "{params.title}" \\
+        2>&1 | tee {log}
         """

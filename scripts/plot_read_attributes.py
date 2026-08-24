@@ -17,6 +17,7 @@ closely.
 """
 
 import argparse
+import traceback
 import bisect
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -186,6 +187,7 @@ def main():
                 print(f"Finished {name}")
             except Exception as e:
                 print(f"\u274c Error in {name}: {e}")
+                traceback.print_exc()
 
     print("Merging attribute info...")
     df_all = pd.concat(dfs, ignore_index=True)

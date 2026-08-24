@@ -5,6 +5,7 @@
 # Optimized: 2025
 
 import argparse
+import traceback
 import re
 import pandas as pd
 import numpy as np
@@ -22,7 +23,11 @@ def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="Compile variants from multiple VCF files and add annotations "
-                    "(gnomAD, ClinVar, Annovar, CADD, SpliceAI) into a single .tsv file. "
+                    "(gnomAD, ClinVar, Annovar, CADD, SpliceAI) into a single .tsv file "
+                    "({outprefix}_compiled_variants.tsv). This script does NOT apply final "
+                    "filtering thresholds (gnomAD AF, CLNSIG, CADD, SpliceAI, DP, AF) -- see "
+                    "filter_variants.py for that, which operates on this script's output "
+                    "so re-filtering doesn't require re-annotating. "
                     "Note that contigs in all VCF and BED files should be formatted as "
                     "'chr1', 'chr2', ..., 'chrX', 'chrY', 'chrM'. "
                     "Also note that insertions should be formatted as A>ATC (rather than ->TC), "
@@ -157,25 +162,12 @@ def parse_args():
              "compute time when the prescored files are known to already cover your variant set. "
              "Has no effect if neither prescored VCF is provided -- falls through to '.' the "
              "same as an unconfigured, failed live run would.")
-    parser.add_argument("--final-gnomadAF-threshold", type=float,
-        help="Only keep variants with gnomAD allele frequency <= threshold.")
-    parser.add_argument("--final-CLNSIG-filter", nargs="+",
-        help="Remove variants with specified CLNSIG values (ex: Benign, Likely_benign, Benign/Likely_benign).")
-    parser.add_argument("--final-CADD-phred-threshold", type=int,
-        help="Only keep variants with CADD phred score >= threshold (or SpliceAI score < threshold, "
-             "if --final-SpliceAI-threshold is set).")
-    parser.add_argument("--final-SpliceAI-threshold", type=float,
-        help="Only keep variants with SpliceAI score >= threshold (or CADD phred score < threshold, "
-             "if --final-CADD-phred-threshold is set).")
-    parser.add_argument("--final-DP-threshold", type=int,
-        help="Only keep variants with depth (DP) >= threshold.")
-    parser.add_argument("--final-AF-threshold", type=float,
-        help="Only keep variants with allele frequency (AF/VAF) >= threshold.")
-    parser.add_argument('--keep-CLNSIG', nargs="+",
-        default=['Pathogenic', 'Likely_pathogenic', 'Pathogenic/Likely_pathogenic'],
-        help='Keep variants with these CLNSIG values in the final output regardless of all other '
-             'filters. Default keeps all pathogenic variants: Pathogenic, Likely_pathogenic, '
-             'Pathogenic/Likely_pathogenic')
+    # NOTE: the --final-*/--keep-CLNSIG "final filter" arguments used to
+    # live here, but that step has been split out into the separate
+    # filter_variants.py script (operating on this script's
+    # {outprefix}_compiled_variants.tsv output) so that changing a final
+    # filter threshold doesn't require re-running annotation (ANNOVAR,
+    # gnomAD, ClinVar, CADD, SpliceAI). See filter_variants.py.
     parser.add_argument("--threads", type=int, default=1,
         help="Number of threads to use (for running CADD and SpliceAI).")
     return parser.parse_args()
@@ -545,6 +537,7 @@ def extract_gnomAD_AF(df, gnomad_vcf, outprefix, bed_file, threads, cache_dir, g
         _attempt(gnomad_vcf)
     except Exception as e:
         print(f'\nWARNING: gnomAD annotation failed ({e}).')
+        traceback.print_exc()
         if gnomad_vcf_fallback and gnomad_vcf_fallback.strip() != gnomad_vcf.strip():
             print(f'  Retrying against fallback source: {gnomad_vcf_fallback}\n')
             try:
@@ -552,6 +545,7 @@ def extract_gnomAD_AF(df, gnomad_vcf, outprefix, bed_file, threads, cache_dir, g
             except Exception as e2:
                 print(f'\nWARNING: gnomAD fallback also failed ({e2}). '
                       f'Filling gnomAD_AF with "fail" for all variants and continuing.\n')
+                traceback.print_exc()
                 df['gnomAD_AF'] = 'fail'
         else:
             print(f'  No (different) fallback source available. '
@@ -632,6 +626,7 @@ def extract_CLNSIG(df, clinvar_vcf, outprefix, bed_file, threads, cache_dir, cli
         _attempt(clinvar_vcf)
     except Exception as e:
         print(f'\nWARNING: ClinVar annotation failed ({e}).')
+        traceback.print_exc()
         if clinvar_vcf_fallback and clinvar_vcf_fallback.strip() != clinvar_vcf.strip():
             print(f'  Retrying against fallback source: {clinvar_vcf_fallback}\n')
             try:
@@ -639,6 +634,7 @@ def extract_CLNSIG(df, clinvar_vcf, outprefix, bed_file, threads, cache_dir, cli
             except Exception as e2:
                 print(f'\nWARNING: ClinVar fallback also failed ({e2}). '
                       f'Filling CLNSIG with "fail" for all variants and continuing.\n')
+                traceback.print_exc()
                 df['CLNSIG'] = 'fail'
         else:
             print(f'  No (different) fallback source available. '
@@ -770,6 +766,7 @@ def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
     except Exception as e:
         print(f'\nWARNING: ANNOVAR annotation failed ({e}). '
               f'Filling {", ".join(ANNOVAR_COLUMNS)} with "fail" for all variants and continuing.\n')
+        traceback.print_exc()
         for col in ANNOVAR_COLUMNS:
             df[col] = 'fail'
 
@@ -978,6 +975,7 @@ def _run_CADD_local(df, outprefix, CADD_script, CADD_data_dir, include_CADD_anno
                 print(f'Chunk {futures[future]} processed successfully.')
             except Exception as e:
                 print(f'Error processing chunk {futures[future]}: {e}')
+                traceback.print_exc()
 
     if not results:
         raise RuntimeError('No chunks completed successfully.')
@@ -1182,6 +1180,7 @@ def run_CADD(df, outprefix, cache_dir, CADD_script, CADD_data_dir,
             used_local_run = True
         except Exception as e:
             print(f'\nWARNING: local CADD scoring failed ({e}).')
+            traceback.print_exc()
     else:
         print(f'\nNo local CADD install configured (--CADD-script not set, or "remote" was '
               f'requested in config.yaml).')
@@ -1197,6 +1196,7 @@ def run_CADD(df, outprefix, cache_dir, CADD_script, CADD_data_dir,
                 used_local_prescored = True
             except Exception as e:
                 print(f'\nWARNING: local CADD pre-scored lookup failed ({e}).')
+                traceback.print_exc()
         else:
             print(f'  No local pre-scored CADD files configured either '
                   f'(--CADD-local-prescored-snv/--CADD-local-prescored-indel).')
@@ -1209,6 +1209,7 @@ def run_CADD(df, outprefix, cache_dir, CADD_script, CADD_data_dir,
             except Exception as e:
                 print(f'\nWARNING: remote CADD pre-scored lookup failed ({e}). '
                       f'Filling CADD_PHRED with "fail" for all variants and continuing.\n')
+                traceback.print_exc()
                 df['CADD_PHRED'] = 'fail'
         else:
             print(f'  No --CADD-prescored-url configured either -- '
@@ -1426,6 +1427,7 @@ def _run_SpliceAI_live(df, outprefix, genome, gtf, SpliceAI_annotation, mask, th
                 print(f'Chunk {futures[future]} processed successfully.')
             except Exception as e:
                 print(f'Error processing chunk {futures[future]}: {e}')
+                traceback.print_exc()
 
     if not results:
         raise RuntimeError('No chunks completed successfully.')
@@ -1471,6 +1473,7 @@ def run_SpliceAI(df, outprefix, genome, gtf, SpliceAI_annotation, snv_vcf, indel
             used_live = True
         except Exception as e:
             print(f'\nWARNING: local SpliceAI run failed ({e}).')
+            traceback.print_exc()
     else:
         print(f'\nGenome FASTA file not provided -- skipping live SpliceAI run.')
 
@@ -1484,6 +1487,7 @@ def run_SpliceAI(df, outprefix, genome, gtf, SpliceAI_annotation, snv_vcf, indel
             except Exception as e:
                 print(f'\nWARNING: SpliceAI prescored lookup failed ({e}). '
                       f'Filling SpliceAI with "fail" for all variants and continuing.\n')
+                traceback.print_exc()
                 df['SpliceAI'] = 'fail'
         else:
             print(f'  No --SpliceAI-prescored-snv-vcf/--SpliceAI-prescored-indel-vcf '
@@ -1494,105 +1498,6 @@ def run_SpliceAI(df, outprefix, genome, gtf, SpliceAI_annotation, snv_vcf, indel
     df.to_csv(outprefix + '_compiled_variants.tsv', sep='\t', index=False)
     return df
 
-
-def filter_variants(input_df, args):
-    """Filter variants based on user-defined criteria."""
-    filtered_df = input_df.copy()
-
-    if args.final_gnomadAF_threshold:
-        if 'gnomAD_AF' not in filtered_df.columns:
-            print(f"\nWARNING: gnomAD_AF column not found in DataFrame. Skipping filter.")
-        else:
-            gnomad_num = pd.to_numeric(filtered_df['gnomAD_AF'], errors='coerce')
-            filtered_df = filtered_df[
-                (gnomad_num <= args.final_gnomadAF_threshold) | filtered_df['gnomAD_AF'].isin(['.', 'fail'])
-            ]
-
-    if args.final_CLNSIG_filter:
-        if 'CLNSIG' not in filtered_df.columns:
-            print(f"\nWARNING: CLNSIG column not found in DataFrame. Skipping filter.")
-        else:
-            filtered_df = filtered_df[~filtered_df['CLNSIG'].isin(args.final_CLNSIG_filter)]
-
-    if args.final_CADD_phred_threshold or args.final_SpliceAI_threshold:
-        cadd_filtered_df = pd.DataFrame(columns=filtered_df.columns)
-        spliceai_filtered_df = pd.DataFrame(columns=filtered_df.columns)
-
-        if args.final_CADD_phred_threshold:
-            if 'CADD_PHRED' not in filtered_df.columns:
-                print(f"\nWARNING: CADD_PHRED column not found in DataFrame. Skipping CADD phred filter.")
-            else:
-                cadd_num = pd.to_numeric(filtered_df['CADD_PHRED'], errors='coerce')
-                cadd_filtered_df = filtered_df[
-                    (cadd_num >= args.final_CADD_phred_threshold) | filtered_df['CADD_PHRED'].isin(['.', 'fail'])
-                ]
-
-        if args.final_SpliceAI_threshold:
-            if 'SpliceAI' not in filtered_df.columns:
-                print(f"\nWARNING: SpliceAI column not found in DataFrame. Skipping SpliceAI filter.")
-            else:
-                thr = args.final_SpliceAI_threshold
-                def _spliceai_pass(x):
-                    if x in ('.', 'fail', '', None):
-                        return True
-                    return any(
-                        pd.to_numeric(s, errors='coerce') >= thr
-                        for s in str(x).split('|')[2:6]
-                    )
-                spliceai_filtered_df = filtered_df[filtered_df['SpliceAI'].apply(_spliceai_pass)]
-
-        filtered_df = pd.concat([cadd_filtered_df, spliceai_filtered_df],
-                                 ignore_index=True).drop_duplicates()
-
-    if args.final_DP_threshold:
-        if 'format' not in filtered_df.columns or 'value' not in filtered_df.columns:
-            print(f"\nWARNING: format or value column not found in DataFrame. Skipping filter.")
-        else:
-            # Vectorised DP extraction
-            def _dp_ok(row):
-                fmt = row['format'].split(':')
-                if 'DP' not in fmt:
-                    return True
-                val = row['value'].split(':')[fmt.index('DP')]
-                dp = pd.to_numeric(val, errors='coerce')
-                return pd.isna(dp) or dp >= args.final_DP_threshold
-            filtered_df = filtered_df[filtered_df.apply(_dp_ok, axis=1)]
-
-    if args.final_AF_threshold:
-        if 'format' not in filtered_df.columns or 'value' not in filtered_df.columns:
-            print(f"\nWARNING: format or value column not found in DataFrame. Skipping filter.")
-        else:
-            def _af_ok(row):
-                fmt = row['format'].split(':')
-                vals = row['value'].split(':')
-                for tag in ('AF', 'VAF'):
-                    if tag in fmt:
-                        v = pd.to_numeric(vals[fmt.index(tag)], errors='coerce')
-                        if not (pd.isna(v) or v >= args.final_AF_threshold):
-                            return False
-                return True
-            filtered_df = filtered_df[filtered_df.apply(_af_ok, axis=1)]
-
-    # Ensure variants with keep-CLNSIG values are preserved regardless of other filters
-    def extract_CLNSIG_from_CLNSIGCONF(CLNSIG):
-        if pd.isna(CLNSIG):
-            return []
-        if CLNSIG.startswith("Conflicting_classifications_of_pathogenicity:"):
-            return [t.strip() for t in [x.split("(")[0] for x in CLNSIG.split(":", 1)[1].split("|")] if t.strip()]
-        return [CLNSIG]
-
-    if args.keep_CLNSIG:
-        if 'CLNSIG' not in filtered_df.columns:
-            print(f"\nWARNING: CLNSIG column not found in DataFrame. Skipping filter.")
-        else:
-            keep_set = set(args.keep_CLNSIG)
-            keep_mask = input_df['CLNSIG'].apply(
-                lambda x: any(term in keep_set for term in extract_CLNSIG_from_CLNSIGCONF(x))
-            )
-            keep_df = input_df[keep_mask].copy()
-            filtered_df = pd.concat([filtered_df, keep_df]).drop_duplicates()
-
-    return filtered_df
 
 
 def main():
@@ -1722,12 +1627,11 @@ def main():
         print(f'\nERROR: Results file not found. Please check the output directory for errors.')
         return
 
-    if (args.final_gnomadAF_threshold or args.final_CLNSIG_filter or
-            args.final_CADD_phred_threshold or args.final_DP_threshold or args.final_AF_threshold):
-        print(f"\nFiltering variants...")
-        filtered_df = filter_variants(df, args)
-        filtered_df.to_csv(args.outprefix + '_filtered_variants.tsv', sep='\t', index=False)
-        print(f"Filtered results written to: {args.outprefix + '_filtered_variants.tsv'}")
+    # Final threshold/CLNSIG filtering is a separate step now -- see
+    # filter_variants.py, which reads this script's
+    # {outprefix}_compiled_variants.tsv output. Splitting it out means
+    # changing a final filter threshold only requires re-running that
+    # cheap filter step, not the (slow, expensive) annotation above.
 
 
 if __name__ == '__main__':

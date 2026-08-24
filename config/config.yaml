@@ -42,8 +42,8 @@ ase_analysis:               true
 junction_analysis:          true
 cohort_junction_analysis:   true
 merge_hits:                 true
-merge_hits_include_cohort_junctions: true   # True (default): merged_all_hits.tsv is built from
-                                             # the fully-informed per-sample merge (_6D2), which
+merge_hits_include_cohort_junctions: true   # True (default): all_hits.tsv is built from the
+                                             # fully-informed group-level merge (_6D2), which
                                              # waits for cohort_junction_analysis (rule 7) to
                                              # finish. False: build it from the faster _6D1 merge
                                              # instead, which skips rule 7 entirely (no
@@ -173,7 +173,7 @@ cadd_clnsig_filter:
   - "Benign"
   - "Likely_benign"
   - "Benign/Likely_benign"
-cadd_threshold:         15   # final CADD PHRED filter
+cadd_threshold:         15   # final CADD PHRED filter (applied by filter_variants.py)
 
 # Pre-filter threshold for which variants SpliceAI actually gets run on.
 # Independent of gnomad_af_threshold/clnsig_filter below, defaulted to
@@ -183,16 +183,17 @@ spliceai_clnsig_filter:
   - "Benign"
   - "Likely_benign"
   - "Benign/Likely_benign"
-spliceai_threshold:     0.2   # final SpliceAI score filter
+spliceai_threshold:     0.2   # final SpliceAI score filter (applied by filter_variants.py)
 
-# compile_variants.py's final overall variant filter.
+# filter_variants.py's final overall variant filter (formerly part of
+# compile_variants.py, split out -- see rules/2_compile_variants.smk).
 gnomad_af_threshold:    0.01
 clnsig_filter:
   - "Benign"
   - "Likely_benign"
   - "Benign/Likely_benign"
 
-# compile_variants.py's final-stage depth/allele-frequency filters. Empty
+# filter_variants.py's final-stage depth/allele-frequency filters. Empty
 # string ("") means "don't apply this filter" -- set a number to enable it.
 final_dp_threshold: ""
 final_af_threshold: ""
@@ -292,7 +293,7 @@ output_dir: ""   # single top-level output directory for the whole run. Normally
                  # layout beneath it:
                  #   {output_dir}/samples/{sample}/output/...   -- per-sample stage outputs
                  #   {output_dir}/samples/{sample}/logs/...     -- per-sample stage logs
-                 #   {output_dir}/cohort/{bed_id}/output/validate_sample_types/, cohort_qc/, merged_all_hits.tsv  -- per-BED-panel outputs
+                 #   {output_dir}/cohort/{bed_id}/output/validate_sample_types/, cohort_qc/, merged_all_hits.tsv, hits_upset_plot.pdf, hits_upset_counts.tsv  -- per-BED-panel outputs
                  #   {output_dir}/cohort/{bed_id}/logs/...      -- per-BED-panel logs (sibling of the output/ above)
                  #   {output_dir}/cohort/{bed_id}/output/sample_types/{sample_type}/output/...  -- per-group merge/cohort_junction_analysis/gene_quantification
                  #                                                  outputs (variant/ase/junction_analysis prefixed "merged_" here to distinguish from the per-sample folders of the same name)
@@ -308,13 +309,14 @@ merge_min_dp_indel:                   20
 merge_variant_sample_fraction:         0.05   # a variant present in > this fraction of a group's samples is dropped
 
 merge_min_haplotype_ratio:             0.1
-merge_delta_haplotype_ratio_threshold: 0.2
+merge_delta_haplotype_ratio_threshold: 0.2   # ASE is the one exception to the 0.1 delta convention below -- kept at 0.2
 merge_ase_padj_threshold:              0.001
 merge_ase_sample_fraction:             0.05   # a gene with ASE in > this fraction of a group's samples is dropped
 
 merge_jxn_coverage_threshold:         50
 merge_jxn_padj_threshold:              0.001
-merge_delta_psi_threshold:             0.2
+merge_delta_psi_threshold:             0.1   # matches delta_psi_threshold/cohort_jxn_z_delta_threshold above -- 0.1 is the
+                                              # pipeline-wide delta default (ASE is the sole exception, kept at 0.2 above)
 merge_jxn_sample_fraction:              0.01  # a junction that's an outlier in > this fraction of a group's samples is dropped
 
 # ---------------------------------------------------------------------------

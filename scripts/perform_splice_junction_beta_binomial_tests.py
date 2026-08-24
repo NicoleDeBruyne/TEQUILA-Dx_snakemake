@@ -5,7 +5,7 @@
 # Adapted from Robert Wang (Xing Lab)
 # Optimized: 2025
 
-import os, argparse, warnings
+import os, argparse, warnings, traceback
 import pandas as pd
 import numpy as np
 from collections import defaultdict
@@ -154,23 +154,46 @@ def calculate_PSI(df, PSI_rescale_factor, col_prefix=''):
         )
     except Exception as e:
         print(f"Error calculating PSI: {e}")
+        traceback.print_exc()
 
 
 def fit_beta_dist(x, tol, n_threshold):
-    """Fit a beta distribution on values in x."""
+    """Fit a beta distribution on values in x, and separately compute the
+    empirical p1/p99 percentiles of x -- independent of the fit/n_threshold,
+    same philosophy as identify_cohort_junction_outliers.py's cohort-level
+    p1/p99 ("purely empirical... independent of whichever distribution was
+    fit"). p1/p99 are what delta_PSI is computed from below (distance
+    outside [p1, p99], 0 if inside), not the fitted mean -- even though the
+    mean (expected_PSI) is still computed and reported here."""
     x = pd.to_numeric(x, errors='coerce')
     x = x[~np.isnan(x)]
+    n = len(x)
 
-    if len(x) < n_threshold:
-        return (len(x), "low_n", "low_n", "low_n")
+    if n == 0:
+        p1_value, p99_value = "low_n", "low_n"
+    else:
+        # Same conservative-bound convention as
+        # identify_cohort_junction_outliers.py: n<=10 uses the raw min/max;
+        # above that, ceil(n*0.01) as the percentile index (e.g. n=107:
+        # ceil(107*0.01)=2 -> 3rd value from each end, excluding the
+        # bottom/top 2).
+        sorted_x = np.sort(x)
+        if n <= 10:
+            p1_value, p99_value = sorted_x[0], sorted_x[-1]
+        else:
+            k = ceil(n * 0.01)
+            p1_value, p99_value = sorted_x[k], sorted_x[n - 1 - k]
+
+    if n < n_threshold:
+        return (n, "low_n", "low_n", "low_n", p1_value, p99_value)
     if x.var() < tol:
-        return (len(x), x.mean() / tol, (1 - x.mean()) / tol, x.mean())
+        return (n, x.mean() / tol, (1 - x.mean()) / tol, x.mean(), p1_value, p99_value)
     try:
         alpha_value, beta_value = beta.fit(x, floc=0, fscale=1)[0:2]
         expected_PSI = alpha_value / (alpha_value + beta_value)
-        return (len(x), alpha_value, beta_value, expected_PSI)
+        return (n, alpha_value, beta_value, expected_PSI, p1_value, p99_value)
     except Exception:
-        return (len(x), "error", "error", "error")
+        return (n, "error", "error", "error", p1_value, p99_value)
 
 
 def beta_binomial_test(x, n, alpha_value, beta_value):
@@ -323,13 +346,13 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
         ############################## STEP 5: FIT BETA DISTRIBUTION ON GTEx DATA ##############################
 
         report_file.write(f"Fitting beta distributions on PSI values from GTEx samples...\n")
-        gtex_df_rescaled_PSI[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI']] = \
+        gtex_df_rescaled_PSI[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI', 'p1_PSI', 'p99_PSI']] = \
             gtex_df_rescaled_PSI.apply(
                 lambda row: pd.Series(fit_beta_dist(np.array(row), tol=PSI_rescale_factor, n_threshold=gtex_n_threshold)),
                 axis=1
             )
         final_df = bulk_df_full.merge(
-            gtex_df_rescaled_PSI[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI']],
+            gtex_df_rescaled_PSI[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI', 'p1_PSI', 'p99_PSI']],
             left_index=True, right_index=True
         )
 
@@ -340,10 +363,10 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
             hap2_coverage = hap2_df_full['jxn_coverage'].reindex(final_df.index, fill_value=0)
             coverage_mask = (hap1_coverage + hap2_coverage) > (phasing_threshold * final_df['jxn_coverage'])
             hap1_df_filtered = hap1_df_full[coverage_mask.reindex(hap1_df_full.index, fill_value=False)].merge(
-                final_df[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI']],
+                final_df[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI', 'p1_PSI', 'p99_PSI']],
                 left_index=True, right_index=True)
             hap2_df_filtered = hap2_df_full[coverage_mask.reindex(hap2_df_full.index, fill_value=False)].merge(
-                final_df[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI']],
+                final_df[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI', 'p1_PSI', 'p99_PSI']],
                 left_index=True, right_index=True)
             final_df = pd.concat([final_df, hap1_df_filtered, hap2_df_filtered])
             num_hap = len(final_df[final_df['phasing'].isin(['hap1', 'hap2'])])
@@ -363,11 +386,23 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
         ]
 
         psi_num = pd.to_numeric(final_df['rescaled_sample_PSI'], errors='coerce')
-        exp_num = pd.to_numeric(final_df['expected_PSI'], errors='coerce')
-        final_df['delta_PSI'] = np.where(
-            np.isnan(psi_num) | np.isnan(exp_num), "n/a",
-            psi_num - exp_num
+        p1_num  = pd.to_numeric(final_df['p1_PSI'], errors='coerce')
+        p99_num = pd.to_numeric(final_df['p99_PSI'], errors='coerce')
+        delta_num = np.where(
+            psi_num > p99_num, psi_num - p99_num,
+            np.where(psi_num < p1_num, psi_num - p1_num, 0.0)
         )
+        delta_PSI = pd.Series(delta_num, index=final_df.index).astype(object)
+        delta_PSI[np.isnan(psi_num) | np.isnan(p1_num) | np.isnan(p99_num)] = "n/a"
+        # Mirror identify_cohort_junction_outliers.py's sentinel priority: a
+        # low-n/error fit means this junction's GTEx reference distribution
+        # (and therefore its significance test) isn't trustworthy, even
+        # though p1/p99 alone might still have been computable from a small
+        # number of GTEx samples -- suppress delta the same way rather than
+        # reporting a number next to an untested p_value.
+        delta_PSI[final_df['expected_PSI'] == 'low_n'] = 'low_n'
+        delta_PSI[final_df['expected_PSI'] == 'error'] = 'error'
+        final_df['delta_PSI'] = delta_PSI
 
         ############################## STEP 6: ADD FLAGS ##############################
 
@@ -409,7 +444,7 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
         final_df = final_df[['sample', 'phasing', 'region', 'gene', 'gene_alignment_count', 'junction',
                               'jxn_alignment_count', 'ss1_coverage', 'ss2_coverage', 'jxn_coverage',
                               'sample_PSI', 'rescaled_sample_PSI', 'num_gtex_samples_with_good_coverage',
-                              'alpha', 'beta', 'expected_PSI', 'delta_PSI', 'p_value', 'flag', 'annotation']]
+                              'alpha', 'beta', 'expected_PSI', 'p1_PSI', 'p99_PSI', 'delta_PSI', 'p_value', 'flag', 'annotation']]
 
         report_file.write(f"Region {region} processed successfully in {time.time() - start_time:.2f} seconds.\n\n")
 
@@ -505,6 +540,7 @@ def main():
                 results.append(res)
         except Exception as e:
             print(f"Error encountered: {e}")
+            traceback.print_exc()
 
     df = pd.concat(results, ignore_index=True)
 
