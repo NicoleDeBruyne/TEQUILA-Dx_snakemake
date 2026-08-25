@@ -66,7 +66,20 @@ def normalize_cohort_junction_df(df):
     (delta_{metric}, a ratio-scale value in [-1, 1]) or modified_zscore
     (modz_{metric}, an unbounded z-score). Normalize down to one delta
     column per metric -- whichever of delta_{metric}/modz_{metric} is
-    present -- matching merge_hits.load_cohort_junction_df's expected schema."""
+    present -- matching merge_hits.load_cohort_junction_df's expected schema.
+
+    A row exists in outliers_filtered.tsv if ANY of the six metrics was a
+    significant outlier for that junction, but the row still carries a raw
+    delta_{metric}/modz_{metric} value for every metric regardless of
+    whether that particular metric was the one that triggered -- e.g. a
+    junction flagged only via junction_full_IR_ratio (event_type="full_IR")
+    still has a real-looking delta_junction_PSI value sitting right next to
+    it, even though junction_PSI was never actually significant here.
+    event_type (identify_cohort_junction_outliers.py's sig_df construction)
+    is comma-joined across every metric that DID trigger for that junction,
+    so a metric's delta value is only kept if event_type contains one of
+    that metric's own event strings; otherwise it's blanked to NaN even
+    though the row itself is present due to a different metric."""
     out = pd.DataFrame()
     out['sample'] = df['sample']
     out['phasing'] = df['phasing']
@@ -74,6 +87,16 @@ def normalize_cohort_junction_df(df):
     out['junction'] = df['junction']
     out['jxn_coverage'] = df['junction_coverage'] if 'junction_coverage' in df.columns else pd.NA
 
+    # Mirrors identify_cohort_junction_outliers.py's _METRIC_EVENTS exactly
+    # -- which event-type strings each metric can produce.
+    _METRIC_EVENTS = {
+        'junction_PSI_approx':    {'alt_5ss_approx', 'alt_3ss_approx', 'exon_skipping_approx', 'exon_inclusion_approx'},
+        'junction_PSI':           {'alt_5ss', 'alt_3ss', 'exon_skipping', 'exon_inclusion'},
+        '5ss_IR_ratio':           {'5ss_IR'},
+        '3ss_IR_ratio':           {'3ss_IR'},
+        'junction_full_IR_ratio': {'full_IR'},
+        'junction_IPA_ratio':     {'IPA'},
+    }
     _METRIC_TO_OUTCOL = {
         'junction_PSI':           'delta_PSI',
         'junction_PSI_approx':    'delta_PSI_approx',
@@ -82,13 +105,20 @@ def normalize_cohort_junction_df(df):
         'junction_full_IR_ratio': 'delta_full_IR',
         'junction_IPA_ratio':     'delta_IPA',
     }
+
+    event_type = df['event_type'] if 'event_type' in df.columns else pd.Series([''] * len(df), index=df.index)
+    fired_events = event_type.fillna('').apply(lambda s: set(str(s).split(',')) if s else set())
+
     for metric, outcol in _METRIC_TO_OUTCOL.items():
         if f'delta_{metric}' in df.columns:
-            out[outcol] = df[f'delta_{metric}']
+            raw = df[f'delta_{metric}']
         elif f'modz_{metric}' in df.columns:
-            out[outcol] = df[f'modz_{metric}']
+            raw = df[f'modz_{metric}']
         else:
             out[outcol] = pd.NA
+            continue
+        is_outlier_for_metric = fired_events.apply(lambda evs, m=metric: bool(evs & _METRIC_EVENTS[m]))
+        out[outcol] = raw.where(is_outlier_for_metric, other=pd.NA)
 
     out['annotation'] = df['junction_type'] if 'junction_type' in df.columns else '.'
     out['event'] = df['event_type'] if 'event_type' in df.columns else '.'

@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument('--gtex-coverage-threshold', type=int, default=20)
     parser.add_argument('--PSI-rescale-factor', type=float, default=1e-3)
     parser.add_argument('--gtex-n-threshold', type=int, default=100)
-    parser.add_argument('--phasing-threshold', default=0.8)
+    parser.add_argument('--phasing-threshold', type=float, default=0.8)
     parser.add_argument('--junction-to-gene-coverage-ratio', default=0, type=float)
     parser.add_argument('--annotation-file', type=str)
     parser.add_argument('--threads', type=int, default=1)
@@ -359,9 +359,18 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
         ############################## STEP 6: RUN BETA-BINOMIAL TESTS ##############################
 
         if haplotype_specific:
-            hap1_coverage = hap1_df_full['jxn_coverage'].reindex(final_df.index, fill_value=0)
-            hap2_coverage = hap2_df_full['jxn_coverage'].reindex(final_df.index, fill_value=0)
-            coverage_mask = (hap1_coverage + hap2_coverage) > (phasing_threshold * final_df['jxn_coverage'])
+            # jxn_coverage should already be int (calculate_PSI converts it
+            # in place), but coerce defensively here too -- same as the
+            # jxn_num/cov_num coercion done a few lines below for the
+            # beta-binomial test itself. Without this, a jxn_coverage that's
+            # still string-typed for some reason hits pandas' numeric-Series
+            # * float path and raises deep inside numpy (a confusing
+            # "string multiply ufunc" TypeError with no obvious connection
+            # to this line, rather than a clear coercion failure).
+            hap1_coverage = pd.to_numeric(hap1_df_full['jxn_coverage'], errors='coerce').reindex(final_df.index, fill_value=0)
+            hap2_coverage = pd.to_numeric(hap2_df_full['jxn_coverage'], errors='coerce').reindex(final_df.index, fill_value=0)
+            bulk_coverage_num = pd.to_numeric(final_df['jxn_coverage'], errors='coerce')
+            coverage_mask = (hap1_coverage + hap2_coverage) > (phasing_threshold * bulk_coverage_num)
             hap1_df_filtered = hap1_df_full[coverage_mask.reindex(hap1_df_full.index, fill_value=False)].merge(
                 final_df[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI', 'p1_PSI', 'p99_PSI']],
                 left_index=True, right_index=True)
@@ -474,7 +483,7 @@ def main():
 
     jxn_info_df = pd.read_csv(args.jxn_info_file, sep='\t', keep_default_na=False, header=0,
                                dtype={'sample': str, 'phasing': str, 'region': str, 'gene': str,
-                                      'region_alignment_count': int, 'junction': str,
+                                      'gene_alignment_count': int, 'junction': str,
                                       'jxn_alignment_count': int})
 
     print(f"\nReading GTEx file {args.gtexfile}...")

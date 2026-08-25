@@ -8,7 +8,14 @@ rule _4A_detect_ase_outliers:
     input:
         infile = "{outdir}/phased_reads/{sample}_phasing_summary.tsv",
     output:
-        tsv = "{outdir}/ase_analysis/{sample}_binomial_ase_results.tsv",
+        tsv      = "{outdir}/ase_analysis/{sample}_binomial_ase_results.tsv",
+        # detect_ase_outliers.py also writes this (args.outprefix +
+        # "_ase_outliers.tsv") -- kept as a standalone per-sample
+        # diagnostic, same as _5C_identify_junction_outliers's output
+        # below, even though nothing in rule 6/7 consumes it (see
+        # merge_and_filter_ase_results.py/merge_and_filter_junction_results.py,
+        # which both re-filter from the raw per-sample results directly).
+        outliers = "{outdir}/ase_analysis/{sample}_binomial_ase_outliers.tsv",
     params:
         sample_cov_thr = config["sample_coverage_threshold"],
         padj_thr       = config["padj_threshold"],

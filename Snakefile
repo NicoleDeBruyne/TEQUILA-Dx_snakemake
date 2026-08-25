@@ -251,9 +251,12 @@ def _cja_method_for_group(group_id):
 def _cja_thr_label(group_id):
     """Output-subdirectory label for this group's cohort_junction_analysis
     outlier threshold, e.g. 'padj0.05_delta0.1' or 'z3.5_delta0.1' -- see
-    _cja_method_for_group()."""
+    _cja_method_for_group(). Uses cohort_jxn_beta_padj_threshold, NOT the
+    shared padj_threshold (that key is exclusively ASE/GTEx-junction's
+    per-sample threshold -- see config.yaml's comment on padj_threshold for
+    why these were split apart)."""
     if _cja_method_for_group(group_id) == "beta_binomial":
-        return "padj" + str(config["padj_threshold"]) + "_delta" + str(config["delta_psi_threshold"])
+        return "padj" + str(config["cohort_jxn_beta_padj_threshold"]) + "_delta" + str(config["delta_psi_threshold"])
     z = config.get("cohort_jxn_z_threshold", 3.5)
     d = config.get("cohort_jxn_z_delta_threshold", 0.1)
     return "z" + str(z) + "_delta" + str(d)
@@ -272,9 +275,10 @@ def _cja_outliers_filtered_path(group_id):
 def _cja_thr_flag(group_id):
     """--bb-thresholds/--z-thresholds CLI flag for this group's
     identify_cohort_junction_outliers.py invocation -- see
-    _cja_method_for_group()."""
+    _cja_method_for_group(). Uses cohort_jxn_beta_padj_threshold -- see
+    _cja_thr_label()'s comment."""
     if _cja_method_for_group(group_id) == "beta_binomial":
-        return "--bb-thresholds " + str(config["padj_threshold"]) + ":" + str(config["delta_psi_threshold"])
+        return "--bb-thresholds " + str(config["cohort_jxn_beta_padj_threshold"]) + ":" + str(config["delta_psi_threshold"])
     z = config.get("cohort_jxn_z_threshold", 3.5)
     d = config.get("cohort_jxn_z_delta_threshold", 0.1)
     return "--z-thresholds " + str(z) + ":" + str(d)

@@ -426,10 +426,32 @@ def main():
             print(f"WARNING: Input file {input_file} is empty.")
             continue
         samples.add(df['sample'].iloc[0])
+        # delta_PSI can hold non-numeric sentinels ("n/a", "low_n", "error" --
+        # see perform_splice_junction_beta_binomial_tests.py's fit_beta_dist)
+        # whenever the underlying GTEx reference distribution couldn't be
+        # fit/evaluated for that junction. Any single such value makes
+        # pandas infer the whole column as object dtype, and calling
+        # .abs() directly on that raises TypeError -- coerce first. A
+        # sentinel becomes NaN here, which correctly fails the >= threshold
+        # comparison below (an untestable junction shouldn't pass a
+        # "significant delta" filter), same as every other sentinel
+        # comparison elsewhere in this pipeline.
+        delta_num = pd.to_numeric(df['delta_PSI'], errors='coerce')
         mask = (df['jxn_coverage'] >= args.jxn_coverage_threshold) & \
             (df['padj'] <= args.padj_threshold) & \
-            (df['delta_PSI'].abs() >= args.delta_PSI_threshold)
-        df = df.loc[mask]
+            (delta_num.abs() >= args.delta_PSI_threshold)
+        df = df.loc[mask].copy()
+        # Actually replace the column with the coerced numeric version, not
+        # just use delta_num for the mask above -- pandas infers a column's
+        # dtype from the WHOLE file when reading it, so if even one row
+        # anywhere in this file had a non-numeric sentinel, every row's
+        # delta_PSI (including these numerically-valid, filter-passing
+        # ones) is stored as a Python str, not a float, even after
+        # filtering down to just this subset. Every downstream comparison
+        # against delta_PSI (define_events()'s j0['delta_PSI'] < 0, the
+        # stage 2/4 filters below) assumes a real number and will raise
+        # the same TypeError this masking-only version still left in place.
+        df['delta_PSI'] = delta_num.loc[mask]
         if df.empty:
             continue
         df.insert(0, "input_file", input_file)
