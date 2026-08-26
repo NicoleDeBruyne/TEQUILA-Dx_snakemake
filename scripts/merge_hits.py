@@ -62,11 +62,87 @@ def parse_args():
     return parser.parse_args()
 
 
+# Caller priority for phase resolution, highest-trust first. Only these
+# three callers ever phase (see rules/1_call_variants.smk: nanoTS has a
+# model_phased option, clair3_rna runs --enable_phasing_model via
+# whatshap, longcallR does native joint calling+phasing) -- deepvariant
+# never phases and is intentionally absent here, so a deepvariant-only
+# call for a variant simply can't contribute phase evidence.
+_CALLER_PHASE_PRIORITY = ('nanoTS', 'clair3_rna', 'longcallR')
+
+
+def _caller_from_name(name):
+    """compile_variants.py's --vcf-file-names are '{sample}_{caller}'
+    (e.g. 'IDT-160_PID843_nanoTS') -- match against the known caller
+    tokens rather than splitting on '_', since sample names themselves
+    may contain underscores."""
+    for caller in _CALLER_PHASE_PRIORITY + ('deepvariant',):
+        if name.endswith('_' + caller):
+            return caller
+    return None
+
+
+def resolve_phase(variant_a, variant_b):
+    """Determine the trans/cis/unclear relationship between two variants
+    in the same gene, using each caller's raw (unmodified) GT + PS.
+
+    variant_a, variant_b: each a dict/Series-like with '_caller', '_raw_GT',
+    'PS' for one (caller, variant) row. Callers are checked in priority
+    order (nanoTS > clair3_rna > longcallR, see _CALLER_PHASE_PRIORITY) --
+    the first caller that phased BOTH variants against the SAME PS wins;
+    no fallback to a lower-priority caller once a higher one has already
+    given an answer, even if that answer conflicts with what a
+    lower-priority caller would have said.
+
+    A caller's phasing for a variant is only trusted if GT is phased
+    ('|' present) AND PS is present and not '.' -- PS is meaningless on
+    an unphased GT, and comparing '.' PS values would be a false match.
+    PS is only comparable within the same caller (see compile_variants.py's
+    process_vcf); this function only ever compares same-caller PS pairs
+    by construction, since it iterates one caller at a time.
+
+    Returns: 'trans', 'cis', or 'unclear'.
+    """
+    def _phased_calls(variant, caller):
+        """All (raw_GT, PS) pairs for `variant` reported by `caller`,
+        restricted to genuinely phased, non-'.' PS entries. A variant can
+        have >1 row from the same caller only in unusual multi-record
+        VCF situations; in the normal case this is 0 or 1 entries."""
+        rows = variant if isinstance(variant, list) else [variant]
+        out = []
+        for row in rows:
+            if row.get('_caller') != caller:
+                continue
+            gt = row.get('_raw_GT', '.')
+            ps = row.get('PS', '.')
+            if '|' in str(gt) and ps not in (None, '.', ''):
+                out.append((gt, ps))
+        return out
+
+    for caller in _CALLER_PHASE_PRIORITY:
+        calls_a = _phased_calls(variant_a, caller)
+        calls_b = _phased_calls(variant_b, caller)
+        for gt_a, ps_a in calls_a:
+            for gt_b, ps_b in calls_b:
+                if ps_a != ps_b:
+                    continue
+                # Same phase set from the same caller -- allele order is
+                # directly comparable. hap-1-allele is the first GT digit.
+                hap1_a = gt_a.split('|')[0]
+                hap1_b = gt_b.split('|')[0]
+                return 'cis' if hap1_a == hap1_b else 'trans'
+        # This caller phased neither variant (or phased them into
+        # different/unrelated phase sets) -- fall through to the next
+        # caller in priority order rather than deciding 'unclear' yet.
+
+    return 'unclear'
+
+
 def load_variant_df(path):
     """Read + preprocess a variant-hits tsv (single-sample or group-level --
     same schema either way, just more rows for the latter)."""
     variant_df = pd.read_csv(path, sep='\t', usecols=[
-        'sample', 'chrom', 'pos', 'ref', 'alt', 'GT', 'gnomAD_AF', 'CLNSIG', 'gene', 'CADD_PHRED', 'SpliceAI',
+        'sample', 'chrom', 'pos', 'ref', 'alt', 'name', 'GT', 'PS', 'gnomAD_AF', 'CLNSIG', 'gene', 'CADD_PHRED', 'SpliceAI',
         'num_callers', 'sample_count', 'ANNOVAR_AAChange.refGene', 'ANNOVAR_GeneDetail.refGene',
     ]).drop_duplicates()
     variant_df = variant_df.rename(columns={'sample_count': 'variant_nsamples'})
@@ -76,6 +152,15 @@ def load_variant_df(path):
     # is grouped into each of those genes' hit rows individually.
     variant_df['gene'] = variant_df['gene'].str.split(',')
     variant_df = variant_df.explode('gene')
+    # Raw, phase-preserving copy -- 'name' is "{sample}_{caller}" (see
+    # compile_variants.py's --vcf-file-names), so this identifies which
+    # caller reported this specific GT/PS pair. resolve_phase() below
+    # needs the untouched '|' separator and caller identity to determine
+    # trans/cis; keep this BEFORE the cosmetic canonicalization that
+    # follows, which is for the human-readable variant_GT display column
+    # only and would otherwise destroy phase information.
+    variant_df['_caller'] = variant_df['name'].apply(_caller_from_name)
+    variant_df['_raw_GT'] = variant_df['GT']
     variant_df['GT'] = variant_df['GT'].str.replace('|', '/', regex=False).str.replace('1/0', '0/1', regex=False)
     variant_df['variant_ID'] = variant_df.apply(lambda x: f"{x.chrom}-{x.pos}-{x.ref}-{x.alt}", axis=1).drop_duplicates()
     # ANNOVAR only ever populates one of these two per variant (AAChange.refGene
@@ -312,61 +397,219 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     hit_df = hit_df.astype(object)
     hit_df.fillna(".", inplace=True)
 
-    # Rank hits by a points-based score:
-    #   - variant:           2 points if pathogenic_variant, else 1 point if
-    #                        variant, else 0 (these are NOT additive --
-    #                        pathogenic_variant implies variant, but the
-    #                        category caps at 2, it isn't 1 + 2 = 3)
-    #   - ASE:               2 points if True, else 0
-    #   - outlier_junction:  2 points if Strong/Moderate, 1 if Weak, else 0
-    #   - cohort_outlier_junction: same 2/1/0 scale as outlier_junction
-    def _variant_points(row):
-        if row['pathogenic_variant']:
-            return 2
-        if row['variant']:
-            return 1
-        return 0
+    # ------------------------------------------------------------------
+    # Tier assignment (replaces the old points-based 'score').
+    #
+    # Tiers are assigned by the decision tree below, branching first on
+    # the gene's inheritance pattern (bucket 1/2/3), then walking down a
+    # fixed, ordered list of conditions per bucket -- the first condition
+    # that matches wins; lower-priority conditions are never reached once
+    # a higher one has already matched. Lower tier number = higher
+    # priority / more likely to be diagnostic.
+    #
+    # Bucket 1 -- AD or XLD only (inheritance_patterns has AD/XLD, no AR/XLR):
+    #   1: any pathogenic variant present
+    #   2: ASE, or a Strong junction outlier (GTEx- or cohort-comparison)
+    #   3: a Moderate junction outlier (not currently reachable -- see
+    #      inspect_row()'s dominant-gene Strong condition, which subsumes
+    #      the Moderate condition entirely for dominant genes; kept as an
+    #      explicit branch rather than silently dropped, in case that
+    #      ever changes)
+    #   4: a Weak junction outlier
+    #   5: at least one VUS present (nothing else above matched)
+    #
+    # Bucket 2 -- AD/AR or XLD/XLR combined (has both a dominant AND a
+    # recessive marker in inheritance_patterns):
+    #   1: 2 pathogenic variants in trans, or 1 homozygous pathogenic variant
+    #   2: any other pathogenic variant present
+    #   3: ASE or Strong junction
+    #   4: Moderate junction (same reachability caveat as bucket 1)
+    #   5: Weak junction
+    #   6: at least one VUS present
+    #
+    # Bucket 3 -- anything else (no dominant marker at all: pure AR/XLR,
+    # unknown, or no inheritance_patterns data):
+    #   1: 2 pathogenic variants in trans, or 1 homozygous pathogenic variant
+    #   2: (1 pathogenic + 1 VUS in trans) or (2 pathogenic, unclear phasing)
+    #   3-5: (1 pathogenic alone) or (2 VUS in trans) or (1 homozygous VUS)
+    #        -- 3 if ASE/Strong, 4 if Moderate, 5 if Weak, else base tier 5... 
+    #        wait: base case here is tier 2 if none of ASE/moderate/weak,
+    #        see _assign_tier's bucket-3 branch below for the exact tiers
+    #   4-6: 2 VUS, unclear phasing -- 3 if ASE/Strong, 4 if Moderate, 5 if
+    #        Weak, else tier 6
+    #   4-7: anything else with at least one VUS or orthogonal evidence --
+    #        4 if ASE/Strong, 5 if Moderate, 6 if Weak, else 7 if >=1 VUS
+    #
+    # See _assign_tier() for the exact tier numbers per branch -- the
+    # prose above is a summary, the code is authoritative.
+    def _clean_inheritance(s):
+        return str(s).strip().strip('"') if pd.notna(s) else ''
 
-    def _junction_points(tier):
-        if tier in ('Strong', 'Moderate'):
+    def _inheritance_bucket(inheritance_patterns):
+        s = _clean_inheritance(inheritance_patterns)
+        has_dominant = ('AD' in s) or ('XLD' in s)
+        has_recessive = ('AR' in s) or ('XLR' in s)
+        if has_dominant and has_recessive:
             return 2
-        if tier == 'Weak':
+        elif has_dominant:
             return 1
-        return 0
+        else:
+            return 3
 
-    hit_df['score'] = (
-        hit_df.apply(_variant_points, axis=1)
-        + hit_df['ASE'].apply(lambda x: 2 if x is True else 0)
-        + hit_df['outlier_junction'].apply(_junction_points)
-        + hit_df['cohort_outlier_junction'].apply(_junction_points)
+    def _classify_gene_variants(gene_variant_rows):
+        """gene_variant_rows: raw (pre-aggregation) variant_df rows for
+        ONE gene -- one row per (caller, physical variant). Groups those
+        rows by variant_ID (chrom-pos-ref-alt) to get one entry per
+        distinct physical variant, classifies each as pathogenic/VUS and
+        homozygous/het, then checks every pathogenic/VUS pair for
+        trans/cis/unclear phasing via resolve_phase() (which itself
+        applies the nanoTS > clair3_rna > longcallR caller-priority
+        chain). Checking every pair (not just the two highest-scoring
+        variants individually) is what lets e.g. a phased pathogenic+VUS
+        pair beat two pathogenic variants that turned out to be in cis."""
+        empty = dict(
+            n_pathogenic_variants=0, has_pathogenic=False, has_vus=False,
+            has_homozygous_pathogenic=False, has_homozygous_vus=False,
+            has_2_pathogenic_trans=False, has_2_pathogenic_unclear=False,
+            has_1_pathogenic_1_vus_trans=False,
+            has_2_vus_trans=False, has_2_vus_unclear=False,
+        )
+        if gene_variant_rows.empty:
+            return empty
+
+        variants = {}
+        for variant_id, sub in gene_variant_rows.groupby('variant_ID'):
+            is_pathogenic = sub['CLNSIG'].astype(str).str.contains(r'Pathogenic|Likely_pathogenic', regex=True).any()
+            is_homozygous = (sub['GT'] == '1/1').any()
+            variants[variant_id] = dict(
+                is_pathogenic=is_pathogenic,
+                is_homozygous=is_homozygous,
+                rows=sub[['_caller', '_raw_GT', 'PS']].to_dict('records'),
+            )
+
+        path_ids = [v for v, d in variants.items() if d['is_pathogenic']]
+        vus_ids = [v for v, d in variants.items() if not d['is_pathogenic']]
+
+        has_2_pathogenic_trans = False
+        has_2_pathogenic_unclear = False
+        for i in range(len(path_ids)):
+            for j in range(i + 1, len(path_ids)):
+                phase = resolve_phase(variants[path_ids[i]]['rows'], variants[path_ids[j]]['rows'])
+                has_2_pathogenic_trans |= (phase == 'trans')
+                has_2_pathogenic_unclear |= (phase == 'unclear')
+
+        has_1_pathogenic_1_vus_trans = False
+        for p in path_ids:
+            for v in vus_ids:
+                if resolve_phase(variants[p]['rows'], variants[v]['rows']) == 'trans':
+                    has_1_pathogenic_1_vus_trans = True
+
+        has_2_vus_trans = False
+        has_2_vus_unclear = False
+        for i in range(len(vus_ids)):
+            for j in range(i + 1, len(vus_ids)):
+                phase = resolve_phase(variants[vus_ids[i]]['rows'], variants[vus_ids[j]]['rows'])
+                has_2_vus_trans |= (phase == 'trans')
+                has_2_vus_unclear |= (phase == 'unclear')
+
+        return dict(
+            n_pathogenic_variants=len(path_ids),
+            has_pathogenic=len(path_ids) > 0,
+            has_vus=len(vus_ids) > 0,
+            has_homozygous_pathogenic=any(variants[v]['is_homozygous'] for v in path_ids),
+            has_homozygous_vus=any(variants[v]['is_homozygous'] for v in vus_ids),
+            has_2_pathogenic_trans=has_2_pathogenic_trans,
+            has_2_pathogenic_unclear=has_2_pathogenic_unclear,
+            has_1_pathogenic_1_vus_trans=has_1_pathogenic_1_vus_trans,
+            has_2_vus_trans=has_2_vus_trans,
+            has_2_vus_unclear=has_2_vus_unclear,
+        )
+
+    variant_class_by_gene = {
+        gene: _classify_gene_variants(sub)
+        for gene, sub in variant_df.groupby('gene')
+    }
+    _empty_variant_class = dict(
+        n_pathogenic_variants=0, has_pathogenic=False, has_vus=False,
+        has_homozygous_pathogenic=False, has_homozygous_vus=False,
+        has_2_pathogenic_trans=False, has_2_pathogenic_unclear=False,
+        has_1_pathogenic_1_vus_trans=False,
+        has_2_vus_trans=False, has_2_vus_unclear=False,
     )
 
-    # Tiebreak chain (applied only when two genes have the same score),
-    # in priority order:
-    #   1. pathogenic_variant (True first)
-    #   2. ASE (True first)
-    #   3. Strong outlier_junction OR Strong cohort_outlier_junction (True first)
-    #   4. max magnitude of bulk deltaPSI (outlier_junction) or bulk
-    #      cohort deltaPSI/deltaPSIapprox/delta5ssIR/delta3ssIR/deltaFullIR/
-    #      deltaIPA (cohort_outlier_junction) -- whichever is larger,
-    #      descending
-    #   5. max CADD score across the gene's variant(s), descending
-    #   6. gene name, alphabetically
-    def _cadd_max(row):
-        vals = []
-        for v in re.split('[,;]', str(row.get('variant_CADD_PHRED'))):
-            v = v.strip()
-            if not v:
-                continue
-            try:
-                vals.append(float(v))
-            except ValueError:
-                continue
-        return max(vals) if vals else -1
+    def _assign_tier(row):
+        vc = variant_class_by_gene.get(row['gene'], _empty_variant_class)
+        ase = row['ASE'] is True
+        strong = (row['outlier_junction'] == 'Strong') or (row['cohort_outlier_junction'] == 'Strong')
+        moderate = (row['outlier_junction'] == 'Moderate') or (row['cohort_outlier_junction'] == 'Moderate')
+        weak = (row['outlier_junction'] == 'Weak') or (row['cohort_outlier_junction'] == 'Weak')
+        ase_or_strong = ase or strong
+        bucket = _inheritance_bucket(row['inheritance_patterns'])
 
-    hit_df['_tb_strong'] = (
-        (hit_df['outlier_junction'] == 'Strong') | (hit_df['cohort_outlier_junction'] == 'Strong')
+        if bucket == 1:  # AD or XLD only
+            if vc['has_pathogenic']:
+                return 1
+            if ase_or_strong:
+                return 2
+            if moderate:
+                return 3
+            if weak:
+                return 4
+            if vc['has_vus']:
+                return 5
+            return None
+
+        if bucket == 2:  # AD/AR or XLD/XLR combined
+            if vc['has_2_pathogenic_trans'] or vc['has_homozygous_pathogenic']:
+                return 1
+            if vc['has_pathogenic']:
+                return 2
+            if ase_or_strong:
+                return 3
+            if moderate:
+                return 4
+            if weak:
+                return 5
+            if vc['has_vus']:
+                return 6
+            return None
+
+        # bucket == 3: anything else (AR/XLR, unknown, or no inheritance data)
+        if vc['has_2_pathogenic_trans'] or vc['has_homozygous_pathogenic']:
+            return 1
+        if vc['has_1_pathogenic_1_vus_trans'] or vc['has_2_pathogenic_unclear']:
+            return 2
+        if vc['has_pathogenic'] or vc['has_2_vus_trans'] or vc['has_homozygous_vus']:
+            if ase_or_strong:
+                return 2
+            if moderate:
+                return 3
+            if weak:
+                return 4
+            return 5
+        if vc['has_2_vus_unclear']:
+            if ase_or_strong:
+                return 3
+            if moderate:
+                return 4
+            if weak:
+                return 5
+            return 6
+        if ase_or_strong:
+            return 4
+        if moderate:
+            return 5
+        if weak:
+            return 6
+        if vc['has_vus']:
+            return 7
+        return None
+
+    hit_df['tier'] = hit_df.apply(_assign_tier, axis=1)
+    hit_df['_tb_n_pathogenic'] = hit_df['gene'].map(
+        lambda g: variant_class_by_gene.get(g, _empty_variant_class)['n_pathogenic_variants']
     )
+
     def _max_bulk_delta(row):
         a = max_deltas(row, '')[0]
         b = max_deltas(row, 'cohort_')[0]
@@ -374,21 +617,25 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         return max(vals) if vals else -1
 
     hit_df['_tb_max_bulk_delta'] = hit_df.apply(_max_bulk_delta, axis=1)
-    hit_df['_tb_max_cadd'] = hit_df.apply(_cadd_max, axis=1)
 
+    # Tiebreak chain (applied only when two genes have the same tier),
+    # in priority order: # pathogenic variants (descending), presence of
+    # ASE (True first), max junction delta magnitude (descending, across
+    # both GTEx- and cohort-comparison junctions), then gene name
+    # alphabetically as a final stable tiebreak.
     hit_df.sort_values(
-        by=['score', 'pathogenic_variant', 'ASE', '_tb_strong', '_tb_max_bulk_delta', '_tb_max_cadd', 'gene'],
-        ascending=[False, False, False, False, False, False, True],
+        by=['tier', '_tb_n_pathogenic', 'ASE', '_tb_max_bulk_delta', 'gene'],
+        ascending=[True, False, False, False, True],
         na_position='last',
         inplace=True
     )
-    hit_df.drop(columns=['_tb_strong', '_tb_max_bulk_delta', '_tb_max_cadd'], inplace=True)
+    hit_df.drop(columns=['_tb_n_pathogenic', '_tb_max_bulk_delta'], inplace=True)
     hit_df['ranking'] = np.arange(1, len(hit_df) + 1)
 
     # Reorder
     hit_df['sample'] = sample_name
     hit_df = hit_df[[
-        'sample', 'gene', 'phenotypes', 'inheritance_patterns', 'ranking', 'score', 'variant', 'pathogenic_variant', 'ASE', 'outlier_junction', 'cohort_outlier_junction',
+        'sample', 'gene', 'phenotypes', 'inheritance_patterns', 'ranking', 'tier', 'variant', 'pathogenic_variant', 'ASE', 'outlier_junction', 'cohort_outlier_junction',
         'variant_ID', 'variant_GT', 'variant_gnomAD_AF',  'variant_CLNSIG', 'variant_CADD_PHRED', 'variant_SpliceAI', 'variant_consequence', 'variant_num_callers', 'variant_nsamples',
         'ASE_ratio', 'ASE_nsamples', 
         'bulk_jxns', 'bulk_jxn_coverage', 'bulk_deltaPSI', 'bulk_jxn_annotation', 'bulk_jxn_event', 'bulk_jxn_nsamples',

@@ -619,11 +619,13 @@ log "ANNOVAR (requires free registration -- cannot be auto-downloaded)"
 ##############################################################################
 (
     ANNOVAR_DIR="$RESOURCES_DIR/annovar"
-    if [ -d "$ANNOVAR_DIR" ] && [ -n "$(ls -A "$ANNOVAR_DIR" 2>/dev/null)" ]; then
+    ANNOVAR_REFGENE_TXT="$ANNOVAR_DIR/humandb/hg38_refGene.txt"
+    ANNOVAR_REFGENE_MRNA="$ANNOVAR_DIR/humandb/hg38_refGeneMrna.fa"
+    if [ -s "$ANNOVAR_REFGENE_TXT" ] && [ -s "$ANNOVAR_REFGENE_MRNA" ]; then
         skip "$ANNOVAR_DIR"
     else
         cat <<EOF
-  MISSING: $ANNOVAR_DIR
+  MISSING: $ANNOVAR_REFGENE_TXT (or $ANNOVAR_REFGENE_MRNA)
 
   ANNOVAR requires a free academic registration before download:
     1. Register at https://www.openbioinformatics.org/annovar/annovar_download_form.php
@@ -631,8 +633,13 @@ log "ANNOVAR (requires free registration -- cannot be auto-downloaded)"
     3. Extract it so that its contents land directly in:
          $ANNOVAR_DIR
        (i.e. $ANNOVAR_DIR/annotate_variation.pl etc., not a nested subfolder)
-    4. Download the annotation databases this pipeline uses (refGene, etc.)
-       via ANNOVAR's own annotate_variation.pl -downdb -webfrom annovar ...
+    4. Download the refGene annotation database this pipeline uses (NOT
+       refGeneWithVer -- table_annovar.pl is called with -protocol refGene
+       specifically, and the two are different databases):
+         cd $ANNOVAR_DIR
+         perl annotate_variation.pl -downdb -webfrom annovar -buildver hg38 refGene humandb/
+       This should produce humandb/hg38_refGene.txt and
+       humandb/hg38_refGeneMrna.fa (not *WithVer*).
 EOF
     fi
 ) || error "ANNOVAR check failed"

@@ -439,7 +439,14 @@ def process_vcf(vcf_file, vcf_file_name, bed_file, genome):
         gt = format_dict.get('GT', '.')
         dp = format_dict.get('DP', '.')
         af = format_dict.get('VAF') or format_dict.get('AF') or '.'
-        vcf_data[(vcf_file_name, chrom, pos, ref, alt)] = [qual, filt, info, form, genotype, gt, dp, af]
+        # PS (phase set): only meaningful when GT is phased (contains '|').
+        # Two variants share real phase information only when they come
+        # from the SAME caller AND have the same non-'.' PS value -- PS is
+        # local to one sample/contig/caller's phasing run, never
+        # comparable across callers even if the integer happens to match.
+        # See merge_hits.py's resolve_phase() for how this gets used.
+        ps = format_dict.get('PS', '.')
+        vcf_data[(vcf_file_name, chrom, pos, ref, alt)] = [qual, filt, info, form, genotype, gt, dp, af, ps]
 
     print(f'\nFinished processing {len(vcf_data)} variants from {vcf_file}.')
     return vcf_data
@@ -1548,7 +1555,7 @@ def main():
     print(f'\nProcessed {total_variants} total variants ({unique_variants} unique variants) '
           f'from {len(args.vcf_files)} VCF files.\n')
 
-    column_names = ['name', 'chrom', 'pos', 'ref', 'alt', 'qual', 'filter', 'info', 'format', 'value', 'GT', 'DP', 'VAF']
+    column_names = ['name', 'chrom', 'pos', 'ref', 'alt', 'qual', 'filter', 'info', 'format', 'value', 'GT', 'DP', 'VAF', 'PS']
     df = pd.DataFrame([(k[0], k[1], k[2], k[3], k[4], *v) for k, v in data.items()], columns=column_names)
     df.insert(0, 'sample', args.sample_name)
     df.to_csv(os.path.join(work_prefix + '_compiled_variants.tsv'), sep='\t', index=False)
