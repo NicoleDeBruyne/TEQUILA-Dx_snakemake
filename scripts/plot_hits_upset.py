@@ -1,29 +1,40 @@
 #!/usr/bin/env python3
 
 # scripts/plot_hits_upset.py
-# UpSet-style breakdown of merged_all_hits.tsv's four hit categories --
-# variant, ASE, outlier_junction (GTEx comparison), cohort_outlier_junction
-# (cohort comparison) -- across a BED panel's whole cohort (all sample_types
-# pooled, same scope as merged_all_hits.tsv itself).
+# UpSet-style breakdown of merged_all_hits.tsv's three hit categories --
+# variant, ASE, junction (a hit in EITHER the GTEx comparison or the
+# cohort comparison counts as one 'junction' hit) -- across a BED panel's
+# whole cohort (all sample_types pooled, same scope as merged_all_hits.tsv
+# itself).
 #
 # Unlike a standard UpSet plot (one bar per category combination, height =
 # total element count), this shows the *distribution across samples* for
-# each combination: a boxplot of "how many genes did this sample have in
-# this exact combination of categories", with one dot per sample (colored
-# by sample_type) overlaid on each box. The combination-membership matrix
-# is drawn as a second panel below the boxplot, in the usual UpSet style.
+# each combination: a swarm plot of "how many genes did this sample have in
+# this exact combination of categories", one non-overlapping dot per sample
+# (colored by sample_type). Each combination gets its own group of
+# side-by-side sub-swarms, one per sample_type, rather than mixing every
+# sample_type into a single swarm -- alternating background shading marks
+# each combination's group. A swarm plot (rather than a boxplot) is used
+# because gene counts are small non-negative integers -- quartiles computed
+# over a handful of discrete values are not a meaningful summary, and a
+# swarm shows the actual per-sample counts (including exact ties) instead
+# of implying a continuous distribution that isn't there. The
+# combination-membership matrix is drawn as a second panel below the swarm,
+# centered under each combination's group, in the usual UpSet style.
 
 import argparse
 import os
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from matplotlib import rcParams
 
 rcParams['pdf.fonttype'] = 42
 
-CATEGORIES = ['variant', 'ASE', 'junction_outlier', 'cohort_junction_outlier']
+CATEGORIES = ['variant', 'ASE', 'junction']
 
 # Same palette + assignment scheme as scripts/plot_on_target_rates.py's
 # per-sample_type bar coloring: unique sample_types in order of first
@@ -41,8 +52,8 @@ _SAMPLE_TYPE_COLORS = [
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Plot an UpSet-style boxplot of per-sample gene counts across every non-empty "
-                    "combination of variant/ASE/outlier_junction/cohort_outlier_junction hit categories.")
+        description="Plot an UpSet-style swarm plot of per-sample gene counts across every non-empty "
+                    "combination of variant/ASE/junction hit categories.")
     parser.add_argument("--infile", required=True, help="Path to merged_all_hits.tsv.")
     parser.add_argument("--samples", nargs="+", required=True,
         help="Every sample in this BED panel's cohort (same order as --sample-types), so samples with "
@@ -89,25 +100,26 @@ def main():
     # ('.', e.g. when cohort junction data wasn't available for this run).
     df['_variant_hit'] = df['variant'].astype(bool)
     df['_ase_hit'] = df['ASE'].astype(bool)
-    df['_junction_hit'] = ~df['outlier_junction'].isin(['None', '.'])
-    df['_cohort_junction_hit'] = ~df['cohort_outlier_junction'].isin(['None', '.'])
+    df['_junction_hit'] = (
+        ~df['outlier_junction'].isin(['None', '.'])
+        | ~df['cohort_outlier_junction'].isin(['None', '.'])
+    )
 
     hit_cols = {
         'variant': '_variant_hit',
         'ASE': '_ase_hit',
-        'junction_outlier': '_junction_hit',
-        'cohort_junction_outlier': '_cohort_junction_hit',
+        'junction': '_junction_hit',
     }
 
     def row_combo(row):
         return tuple(cat for cat in CATEGORIES if row[hit_cols[cat]])
 
     df['_combo'] = df.apply(row_combo, axis=1)
-    # Drop genes with no hit in any of the four categories -- standard
+    # Drop genes with no hit in any of the three categories -- standard
     # UpSet convention of only showing non-empty intersections. A gene
     # only appears in merged_all_hits.tsv at all if it matched via at
-    # least one of variant/ASE/junction/cohort_junction, so this should
-    # only ever drop a small number of rows, if any.
+    # least one of variant/ASE/junction, so this should only ever drop a
+    # small number of rows, if any.
     df = df[df['_combo'].apply(len) > 0]
 
     # Per-sample, per-combo gene counts, reindexed over every sample in
@@ -144,30 +156,74 @@ def main():
     long_df.to_csv(f"{args.outdir}/hits_upset_counts.tsv", sep='\t', index=False)
     print(f"Saved counts tsv to {args.outdir}/hits_upset_counts.tsv")
 
-    # ---------- Figure: boxplot+dots on top, combination matrix below ----------
+    # ---------- Figure: swarm plot on top, combination matrix below ----------
     n_combos = len(combo_order)
-    width = min(30, 3 + 0.6 * n_combos)
+    sample_types_unique = list(dict.fromkeys(args.sample_types))
+    n_st = len(sample_types_unique)
+    st_index = {st: i for i, st in enumerate(sample_types_unique)}
+
+    # Long-format frame: one row per (sample, combo).
+    swarm_df = counts.reset_index().melt(id_vars='sample', var_name='_combo', value_name='gene_count')
+    swarm_df['sample_type'] = swarm_df['sample'].map(sample_type_by_sample)
+
+    # Each combo gets its own sub-swarm per sample_type (rather than one
+    # swarm per combo mixing every sample_type together) -- one column of
+    # points per (combo, sample_type), grouped side-by-side under that
+    # combo. Swarm plots pack same-valued points side-by-side within a
+    # column at a fixed marker size -- given enough ties (e.g. many
+    # samples with 0 genes), a too-narrow column silently drops points
+    # rather than overlapping them. Scale marker size and per-sub-column
+    # width to the worst-case tie count (the largest number of samples
+    # sharing one exact (combo, sample_type, gene_count) value) so every
+    # point has room, instead of assuming a fixed width regardless of
+    # cohort size.
+    tie_counts = swarm_df.groupby(['_combo', 'sample_type', 'gene_count'])['sample'].transform('count')
+    max_tie = int(tie_counts.max())
+    swarm_size = 3
+    per_subcol_width = max(0.9, 0.07 * max_tie)
+    group_gap = 0.5  # inches between adjacent combos' groups
+    group_width = n_st * per_subcol_width
+    group_spacing = group_width + group_gap
+
+    # Sub-swarm x-offsets within a combo's group, one per sample_type
+    # (same order as the legend/color map), centered on the group.
+    offsets = (np.arange(n_st) - (n_st - 1) / 2) * per_subcol_width
+    offset_by_st = {st: offsets[st_index[st]] for st in sample_types_unique}
+
+    group_center = {combo: i * group_spacing for i, combo in enumerate(combo_order)}
+    swarm_df['x'] = swarm_df['_combo'].apply(lambda c: group_center[c]) + swarm_df['sample_type'].map(offset_by_st)
+
+    margin = 0.6
+    total_span = (n_combos - 1) * group_spacing + group_width + 2 * margin
+    width = min(80, max(6, total_span))
+
     fig, (ax_box, ax_matrix) = plt.subplots(
         2, 1, figsize=(width, 8), sharex=True,
         gridspec_kw={'height_ratios': [3, 1]},
     )
 
-    positions = np.arange(1, n_combos + 1)
-    box_data = [counts[combo].values for combo in combo_order]
-    ax_box.boxplot(
-        box_data, positions=positions, widths=0.5,
-        patch_artist=True, boxprops=dict(facecolor='none', color='black'),
-        medianprops=dict(color='black'), whiskerprops=dict(color='black'),
-        capprops=dict(color='black'), flierprops=dict(marker=''),
-    )
+    # Faint alternating background bands, one per combo group, so
+    # neighboring combos' sub-swarms read as visually distinct clusters
+    # even though there's no per-sub-column text label.
+    for i, combo in enumerate(combo_order):
+        if i % 2 == 1:
+            band_lo = group_center[combo] - group_width / 2 - group_gap / 4
+            band_hi = group_center[combo] + group_width / 2 + group_gap / 4
+            ax_box.axvspan(band_lo, band_hi, color='#F0F0F0', zorder=0)
+            ax_matrix.axvspan(band_lo, band_hi, color='#F0F0F0', zorder=0)
 
-    rng = np.random.default_rng(0)
-    for pos, combo in zip(positions, combo_order):
-        vals = counts[combo].values
-        jitter = rng.normal(pos, 0.06, size=len(vals))
-        dot_colors = [color_map[sample_type_by_sample[s]] for s in counts.index]
-        ax_box.scatter(jitter, vals, c=dot_colors, s=30, alpha=0.8, zorder=3, edgecolors='none')
+    with warnings.catch_warnings():
+        # We've already sized each sub-column to fit its worst-case tie
+        # count above -- suppress seaborn's "points cannot be placed"
+        # warning rather than let it surface as pipeline log noise on
+        # every run.
+        warnings.filterwarnings("ignore", message=".*cannot be placed.*")
+        sns.swarmplot(
+            data=swarm_df, x='x', y='gene_count', hue='sample_type',
+            palette=color_map, ax=ax_box, size=swarm_size, native_scale=True, legend=False,
+        )
 
+    ax_box.set_xlabel('')
     ax_box.set_ylabel("Gene count")
     ax_box.set_title(args.title)
     ax_box.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
@@ -175,32 +231,37 @@ def main():
     # Legend: one entry per sample_type, in the same color-assignment order.
     handles = [
         plt.Line2D([0], [0], marker='o', linestyle='', color=color_map[st], label=st, markersize=7)
-        for st in dict.fromkeys(args.sample_types)
+        for st in sample_types_unique
     ]
     ax_box.legend(handles=handles, title="sample_type", bbox_to_anchor=(1.02, 1), loc="upper left")
 
     # Combination matrix (standard UpSet style): one row per category, one
-    # column per combo, filled dot if that category is in the combo, faint
-    # open dot otherwise, with a connecting line through the filled dots.
+    # column per combo (at that combo's group center, spanning all its
+    # sample_type sub-swarms above), filled dot if that category is in
+    # the combo, faint open dot otherwise, with a connecting line through
+    # the filled dots.
     n_cats = len(CATEGORIES)
     cat_y = {cat: n_cats - i for i, cat in enumerate(CATEGORIES)}
-    for pos, combo in zip(positions, combo_order):
+    for combo in combo_order:
+        pos = group_center[combo]
         in_combo_y = [cat_y[cat] for cat in CATEGORIES if cat in combo]
         if len(in_combo_y) > 1:
-            ax_matrix.plot([pos, pos], [min(in_combo_y), max(in_combo_y)], color='black', lw=1.5, zorder=1)
+            ax_matrix.plot([pos, pos], [min(in_combo_y), max(in_combo_y)], color='black', lw=1.5, zorder=2)
         for cat in CATEGORIES:
             filled = cat in combo
             ax_matrix.scatter(
                 [pos], [cat_y[cat]],
-                s=80, zorder=2,
+                s=80, zorder=3,
                 color='black' if filled else '#DDDDDD',
             )
     ax_matrix.set_yticks(list(cat_y.values()))
     ax_matrix.set_yticklabels(list(cat_y.keys()))
     ax_matrix.set_ylim(0.5, n_cats + 0.5)
-    ax_matrix.set_xticks(positions)
+    ax_matrix.set_xticks([group_center[c] for c in combo_order])
     ax_matrix.set_xticklabels([])
-    ax_matrix.set_xlim(0.5, n_combos + 0.5)
+    xlim_lo = group_center[combo_order[0]] - group_width / 2 - margin
+    xlim_hi = group_center[combo_order[-1]] + group_width / 2 + margin
+    ax_matrix.set_xlim(xlim_lo, xlim_hi)
     for spine in ('top', 'right', 'bottom'):
         ax_matrix.spines[spine].set_visible(False)
 

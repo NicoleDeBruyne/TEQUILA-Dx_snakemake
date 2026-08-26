@@ -78,14 +78,20 @@ def normalize_cohort_junction_df(df):
     event_type (identify_cohort_junction_outliers.py's sig_df construction)
     is comma-joined across every metric that DID trigger for that junction,
     so a metric's delta value is only kept if event_type contains one of
-    that metric's own event strings; otherwise it's blanked to NaN even
-    though the row itself is present due to a different metric."""
+    that metric's own event strings; otherwise it's blanked to '' (empty
+    string, not NaN/pd.NA -- build_phased_junction_df below joins these
+    into a single semicolon/comma-separated string per gene, and pd.NA
+    stringifies to the literal text '<NA>' rather than disappearing, which
+    would leak into the final merged_all_hits.tsv instead of being caught
+    by merge_hits.build_hit_table's trailing fillna('.'). An empty string
+    join segment is already handled correctly by max_deltas' parse_vals,
+    same as a genuinely blank/missing entry)."""
     out = pd.DataFrame()
     out['sample'] = df['sample']
     out['phasing'] = df['phasing']
     out['gene'] = df['gene']
     out['junction'] = df['junction']
-    out['jxn_coverage'] = df['junction_coverage'] if 'junction_coverage' in df.columns else pd.NA
+    out['jxn_coverage'] = df['junction_coverage'] if 'junction_coverage' in df.columns else ''
 
     # Mirrors identify_cohort_junction_outliers.py's _METRIC_EVENTS exactly
     # -- which event-type strings each metric can produce.
@@ -115,14 +121,14 @@ def normalize_cohort_junction_df(df):
         elif f'modz_{metric}' in df.columns:
             raw = df[f'modz_{metric}']
         else:
-            out[outcol] = pd.NA
+            out[outcol] = ''
             continue
         is_outlier_for_metric = fired_events.apply(lambda evs, m=metric: bool(evs & _METRIC_EVENTS[m]))
-        out[outcol] = raw.where(is_outlier_for_metric, other=pd.NA)
+        out[outcol] = raw.where(is_outlier_for_metric, other='')
 
     out['annotation'] = df['junction_type'] if 'junction_type' in df.columns else '.'
     out['event'] = df['event_type'] if 'event_type' in df.columns else '.'
-    out['sample_count'] = df['n_sample_outlier_junction_PSI'] if 'n_sample_outlier_junction_PSI' in df.columns else pd.NA
+    out['sample_count'] = df['n_sample_outlier_junction_PSI'] if 'n_sample_outlier_junction_PSI' in df.columns else ''
     return out
 
 

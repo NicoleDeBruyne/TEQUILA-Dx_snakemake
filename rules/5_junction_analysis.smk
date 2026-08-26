@@ -49,7 +49,7 @@ def _gtex_file(tissue):
     return (str(config['gtex_data_dir']) + '/gtex_' + str(tissue) + '_jxn_counts.txt')
 
 def _gtex_mem(wc, threads, attempt):
-    return max(4096, attempt * threads * (5 if wc.tissue == "brain" else 2) * 1024)
+    return max(4096, attempt * threads * (6 if wc.tissue == "brain" else 2) * 1024)
 
 
 rule _5B_perform_binomial_tests:
