@@ -48,7 +48,13 @@ def parse_args():
              "cohort_* columns are filled with '.' (merge_hits.build_hit_table's existing fallback).")
     parser.add_argument("--samples", nargs="+", required=True, help="Every sample name in this group.")
     parser.add_argument("--omim", required=False, default=None,
-        help="Path to OMIM data. If omitted, phenotypes/inheritance_patterns are filled with '.'.")
+        help="Path to OMIM data. If omitted, phenotypes/inheritance_patterns/haploinsufficient are filled with '.'/False.")
+    parser.add_argument("--gene-expression-matrix", required=False, default=None,
+        help="Group-level targeted-panel CPTM matrix (rule _10D's <outprefix>_matrix.tsv, from "
+             "quantify_gene_by_assignment.py) -- one row per gene, one column per sample in this "
+             "(bed_id, sample_type) group. If omitted/missing, relative_gene_expression/"
+             "cohort_relative_gene_expression/n_cohort are filled with '.' (merge_hits.build_hit_table's "
+             "existing fallback convention for optional inputs).")
     args = parser.parse_args()
     if len(args.tissues) != len(args.junction_files):
         parser.error("--tissues and --junction-files must have the same number of entries")
@@ -168,6 +174,13 @@ def main():
 
     omim_df = merge_hits.load_omim_df(args.omim) if args.omim else None
 
+    gene_expression_df = None
+    if args.gene_expression_matrix and os.path.isfile(args.gene_expression_matrix):
+        gene_expression_df = merge_hits.load_gene_expression_df(args.gene_expression_matrix)
+    # else: falls through to merge_hits.build_hit_table's existing "no
+    # gene expression data" fallback (same pattern as omim_df/
+    # cohort_junction_tsv being optional above).
+
     hit_dfs = []
     for sample in args.samples:
         sample_variant_df = variant_df[variant_df['sample'].astype(str) == str(sample)]
@@ -179,7 +192,7 @@ def main():
         )
         hit_df = merge_hits.build_hit_table(
             sample_variant_df, sample_ase_df, sample_junction_df, sample_cohort_junction_df,
-            sample, omim_df,
+            sample, omim_df, gene_expression_df,
         )
         hit_dfs.append(hit_df)
         print(f"  {sample}: {len(hit_df)} gene(s)")

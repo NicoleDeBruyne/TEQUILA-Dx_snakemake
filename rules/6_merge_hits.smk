@@ -308,12 +308,19 @@ rule _6D2_merge_group_hits_with_cohort_junctions:
             for t in group_tissues(_group_id_from_ids(wc.bed_id, wc.sample_type))
         ],
         cohort_junction_tsv = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.bed_id, wc.sample_type)),
+        gene_expression_matrix = lambda wc: (
+            _cohort_outdir + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
+            + "/output/gene_quantification/by_assignment/gene_assignment_matrix.tsv"
+        ) if config.get("quantify_genes") else [],
     output:
         all_hits = _all_hits_tsv,
     params:
         samples      = lambda wc: GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)],
         tissues      = lambda wc: group_tissues(_group_id_from_ids(wc.bed_id, wc.sample_type)),
         omim_flag    = ("--omim " + config["omim_file"]) if config.get("omim_file") else "",
+        gene_expression_flag = lambda wc, input: (
+            "--gene-expression-matrix " + str(input.gene_expression_matrix)
+        ) if config.get("quantify_genes") else "",
         script       = workflow.basedir + "/scripts/merge_group_hits.py",
     threads: 1
     resources:
@@ -333,6 +340,7 @@ rule _6D2_merge_group_hits_with_cohort_junctions:
             --cohort-junction-tsv {input.cohort_junction_tsv} \\
             --samples     {params.samples} \\
             {params.omim_flag} \\
+            {params.gene_expression_flag} \\
         2>&1 | tee {log}
         """
 

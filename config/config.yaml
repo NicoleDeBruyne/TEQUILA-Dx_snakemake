@@ -28,22 +28,14 @@ validate_sample_types:      true
 plot_cohort_qc:              true
 quantify_genes:              true
 
-# ---------------------------------------------------------------------------
-# Conda env
-# ---------------------------------------------------------------------------
+# conda_env is used by every rule except compile_variants, 
+# which uses conda_env_compile_variants instead.
 conda_env:        "envs/conda_env"
 conda_env_compile_variants: "envs/conda_env_compile_variants"
 
-# ---------------------------------------------------------------------------
-# Genome and annotation
-# ---------------------------------------------------------------------------
+# Relative paths below resolve against the pipeline directory
 genome:     "resources/gencode_data/GRCh38.primary_assembly.genome.fa"
 annotation: "resources/gencode_data/gencode.v44.primary_assembly.annotation.gtf"
-
-# ---------------------------------------------------------------------------
-# Top-level output directory
-# ---------------------------------------------------------------------------
-output_dir: ""
 
 # ---------------------------------------------------------------------------
 # Variant callers (rules/1_call_variants.smk)
@@ -57,13 +49,14 @@ deepvariant_image: "docker://google/deepvariant:1.6.1"
 
 # ---------------------------------------------------------------------------
 # Variant compilation / annotation (rules/2_compile_variants.smk)
-# ---------------------------------------------------------------------------
 # Merges the four callers' VCFs, annotates with gnomAD/ClinVar/ANNOVAR/CADD/SpliceAI. 
 # gnomad_base/clinvar_vcf default to local copies (downloaded by setup_resources.sh);
 # set to "remote" to use the public URLs instead.
+# ---------------------------------------------------------------------------
 gnomad_base:         "resources/gnomad_data"
 clinvar_vcf:         "resources/clinvar_data/clinvar.vcf.gz"
 annovar_dir:         "resources/annovar"
+amalgam_dir:         "resources/amalgam"
 cadd_script:       "resources/CADD-scripts-1.7.1/CADD_wrapper.sh"   # CADD_wrapper.sh, not CADD.sh -- see docs/setup.md
 cadd_data_dir:       "resources/CADD-scripts-1.7.1/data"
 # Local pre-scored fallback files -- either can be left empty to skip that variant type at this tier.
@@ -141,7 +134,7 @@ min_dist_from_read_end_variant_phasing: 20   # min distance (bp) from a read's e
 # Allele-specific expression (rules/4_ase_analysis.smk)
 # ---------------------------------------------------------------------------
 sample_coverage_threshold: 20
-padj_threshold:         0.01  # also used by splice junction outlier analysis (vs. GTEx)
+padj_threshold:         0.01
 haplotype_ratio_threshold: 0.2
 ase_phasing_threshold:  0.5   # min fraction of max coverage phased to haplotypes for an ASE call to be trusted
 
@@ -174,8 +167,10 @@ cohort_jxn_zscore_n_threshold:   10
 cohort_jxn_min_reads:          20   # a junction needs >= this many reads in >=1 bulk sample to be tested at all
 
 # ---------------------------------------------------------------------------
-# Merging (rules/6_merge_hits.smk, rules/7-9)
+# Top-level output directory (rules/6_merge_hits.smk, rules/7-9)
+# Normally set in the run config YAML or via --config output_dir=<path>.
 # ---------------------------------------------------------------------------
+output_dir: ""
 omim_file: "resources/omim_data/OMIM.tsv"
 
 merge_num_callers_threshold_snv:       2

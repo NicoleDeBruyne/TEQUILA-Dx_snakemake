@@ -56,8 +56,8 @@ def parse_args():
     parser.add_argument('--cohort-junction-hits', required=False, default=None, type=str, help='Path to cohort-comparison junction hit results (rules/7_cohort_junction_analysis.smk), \
                                                                             same schema as --junction-hits but the sample compared against the rest of its cohort rather than GTEx. \
                                                                             If omitted, the cohort_* junction columns are filled with "." rather than annotated.')
-    parser.add_argument('--omim', required=False, default=None, type=str, help='Path to OMIM data. At a minimum, file should contain columns: approved_gene_symbol, phenotypes, inheritance_patterns. \
-                                                                                  If omitted, the phenotypes/inheritance_patterns columns are filled with "." rather than annotated.')
+    parser.add_argument('--omim', required=False, default=None, type=str, help='Path to OMIM data. At a minimum, file should contain columns: approved_gene_symbol, phenotypes, inheritance_patterns, haploinsufficient (TRUE/FALSE/empty; empty treated as FALSE). \
+                                                                                  If omitted, phenotypes/inheritance_patterns are filled with "." and haploinsufficient is treated as False.')
     
     return parser.parse_args()
 
@@ -200,8 +200,16 @@ def load_cohort_junction_df(path):
 
 
 def load_omim_df(path):
-    omim_df = pd.read_csv(path, sep='\t', usecols=['approved_gene_symbol', 'phenotypes', 'inheritance_patterns'])
-    return omim_df.rename(columns={'approved_gene_symbol': 'gene'})
+    omim_df = pd.read_csv(path, sep='\t', usecols=[
+        'approved_gene_symbol', 'phenotypes', 'inheritance_patterns', 'haploinsufficient',
+    ])
+    omim_df = omim_df.rename(columns={'approved_gene_symbol': 'gene'})
+    # TRUE/FALSE (any case) or empty/missing -- empty is treated the same
+    # as FALSE (see setup.sh's OMIM section for the full column spec).
+    omim_df['haploinsufficient'] = (
+        omim_df['haploinsufficient'].astype(str).str.strip().str.upper() == 'TRUE'
+    )
+    return omim_df
 
 
 def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
@@ -237,7 +245,17 @@ def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
     return merged.drop_duplicates()
 
 
-def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_name, omim_df=None):
+def load_gene_expression_df(path):
+    """Read the CPTM matrix from rule _10D (quantify_gene_by_assignment.py's
+    <outprefix>_matrix.tsv) -- one row per targeted-panel gene, one column
+    per sample in that (bed_id, sample_type) cohort. Since this matrix is
+    already scoped to exactly one (panel, sample_type) group, every
+    sample column in it IS the cohort for percentile/n_cohort purposes --
+    no separate cohort-membership lookup needed."""
+    return pd.read_csv(path, sep='\t', index_col=0)
+
+
+def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_name, omim_df=None, gene_expression_df=None):
     """Build one sample's ranked candidate-hits table. All four input
     DataFrames are assumed already loaded (via load_*() above) and already
     filtered down to this sample only -- this function itself is agnostic
@@ -305,11 +323,17 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
                 hit_df['cohort_' + phasing + '_' + suffix] = '.'
     if omim_df is not None:
         hit_df = pd.merge(hit_df, omim_df, on='gene', how='left')
+        # Genes not present in the OMIM table get NaN from the left merge --
+        # treat missing haploinsufficiency data the same as FALSE, same
+        # convention as an explicitly empty cell (see setup.sh's OMIM
+        # column spec).
+        hit_df['haploinsufficient'] = hit_df['haploinsufficient'].fillna(False)
     else:
         # No OMIM data provided -- keep the same output schema, just
         # unannotated, rather than dropping these columns entirely.
         hit_df['phenotypes'] = '.'
         hit_df['inheritance_patterns'] = '.'
+        hit_df['haploinsufficient'] = False
     hit_df = hit_df.drop_duplicates()
 
     # Create boolean columns to indicate whether there is a candidate variant or allele-specific expression
@@ -540,18 +564,31 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     def _assign_tier(row):
         vc = variant_class_by_gene.get(row['gene'], _empty_variant_class)
         ase = row['ASE'] is True
+        haploinsufficient = row['haploinsufficient'] is True
         strong = (row['outlier_junction'] == 'Strong') or (row['cohort_outlier_junction'] == 'Strong')
         moderate = (row['outlier_junction'] == 'Moderate') or (row['cohort_outlier_junction'] == 'Moderate')
         weak = (row['outlier_junction'] == 'Weak') or (row['cohort_outlier_junction'] == 'Weak')
         ase_or_strong = ase or strong
         bucket = _inheritance_bucket(row['inheritance_patterns'])
 
+        # For AD/XLD genes specifically, ASE means something different
+        # depending on whether the gene is known to be haploinsufficient:
+        # for a haploinsufficient gene, one fully-silenced allele (ASE) is
+        # itself near-diagnostic, on par with a Strong junction outlier.
+        # For a non-haploinsufficient gene, the same ASE call is weaker
+        # evidence (the gene tolerates one silenced allele), so it's
+        # ranked down with Moderate junction instead. Strong/Moderate
+        # junction themselves are unconditional either way -- only ASE's
+        # weight depends on haploinsufficient.
+        ase_hapi_or_strong = (ase and haploinsufficient) or strong
+        ase_not_hapi_or_moderate = (ase and not haploinsufficient) or moderate
+
         if bucket == 1:  # AD or XLD only
             if vc['has_pathogenic']:
                 return 1
-            if ase_or_strong:
+            if ase_hapi_or_strong:
                 return 2
-            if moderate:
+            if ase_not_hapi_or_moderate:
                 return 3
             if weak:
                 return 4
@@ -564,9 +601,9 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
                 return 1
             if vc['has_pathogenic']:
                 return 2
-            if ase_or_strong:
+            if ase_hapi_or_strong:
                 return 3
-            if moderate:
+            if ase_not_hapi_or_moderate:
                 return 4
             if weak:
                 return 5
@@ -632,10 +669,46 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     hit_df.drop(columns=['_tb_n_pathogenic', '_tb_max_bulk_delta'], inplace=True)
     hit_df['ranking'] = np.arange(1, len(hit_df) + 1)
 
+    # Gene expression (rule _10D's targeted-panel CPTM matrix, one row per
+    # gene / one column per sample in this exact (bed_id, sample_type)
+    # cohort -- see load_gene_expression_df()). relative_gene_expression is
+    # this sample's own CPTM value for the gene; cohort_relative_gene_expression
+    # is that gene's (1st, 50th, 99th) percentile across every sample in the
+    # matrix (i.e. the whole cohort, since the matrix is already scoped to
+    # this one group); n_cohort is the total sample count backing those
+    # percentiles (same for every gene/row -- the matrix's column count).
+    if gene_expression_df is not None:
+        n_cohort = gene_expression_df.shape[1]
+
+        def _relative_expression(gene):
+            if gene in gene_expression_df.index and sample_name in gene_expression_df.columns:
+                return gene_expression_df.loc[gene, sample_name]
+            return '.'
+
+        def _cohort_relative_expression(gene):
+            if gene not in gene_expression_df.index:
+                return '.'
+            vals = gene_expression_df.loc[gene].astype(float).values
+            p1, p50, p99 = np.percentile(vals, [1, 50, 99])
+            return f"({p1:.2f}, {p50:.2f}, {p99:.2f})"
+
+        hit_df['relative_gene_expression'] = hit_df['gene'].apply(_relative_expression)
+        hit_df['cohort_relative_gene_expression'] = hit_df['gene'].apply(_cohort_relative_expression)
+        hit_df['n_cohort'] = n_cohort
+    else:
+        # No gene-expression matrix provided -- keep the same output
+        # schema, just unannotated (same fallback convention as
+        # omim_df/cohort_junction_df being omitted elsewhere in this
+        # function).
+        hit_df['relative_gene_expression'] = '.'
+        hit_df['cohort_relative_gene_expression'] = '.'
+        hit_df['n_cohort'] = '.'
+
     # Reorder
     hit_df['sample'] = sample_name
     hit_df = hit_df[[
-        'sample', 'gene', 'phenotypes', 'inheritance_patterns', 'ranking', 'tier', 'variant', 'pathogenic_variant', 'ASE', 'outlier_junction', 'cohort_outlier_junction',
+        'sample', 'gene', 'phenotypes', 'inheritance_patterns', 'haploinsufficient', 'ranking', 'tier', 'variant', 'pathogenic_variant', 'ASE', 'outlier_junction', 'cohort_outlier_junction',
+        'relative_gene_expression', 'cohort_relative_gene_expression', 'n_cohort',
         'variant_ID', 'variant_GT', 'variant_gnomAD_AF',  'variant_CLNSIG', 'variant_CADD_PHRED', 'variant_SpliceAI', 'variant_consequence', 'variant_num_callers', 'variant_nsamples',
         'ASE_ratio', 'ASE_nsamples', 
         'bulk_jxns', 'bulk_jxn_coverage', 'bulk_deltaPSI', 'bulk_jxn_annotation', 'bulk_jxn_event', 'bulk_jxn_nsamples',

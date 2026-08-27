@@ -14,13 +14,25 @@ Four rules:
                                          per-base pileup depth in each
                                          gene's BED region), via the same
                                          script with --metric coverage.
-  3. _10C_run_amalgam                 -- placeholder for a future
-                                         independent quantification tool
-                                         (e.g. featureCounts/Salmon-based).
-                                         Currently a no-op: writes a marker
-                                         file explaining nothing has run yet,
-                                         so downstream rules/all_outputs()
-                                         have a real, trackable target.
+  3. _10C1-_10C6 (AMALGAM)             -- isoform discovery/quantification
+                                         via AMALGAM (github.com/RNA-ROB/amalgam),
+                                         run as its own dedicated 6-rule
+                                         sub-pipeline: per-sample StringTie
+                                         assembly (_10C1), group-level
+                                         GffCompare merge against the
+                                         reference annotation (_10C2),
+                                         AMALGAM's own transcript filtering
+                                         (_10C3) and (optional, currently
+                                         unused downstream -- see _10C4's
+                                         docstring) ORF annotation (_10C4),
+                                         per-sample transcript quantification
+                                         against the group's filtered
+                                         transcriptome (_10C5), and a final
+                                         cohort-wide matrix aggregation
+                                         (_10C6). See setup.sh's AMALGAM
+                                         section for how the tool itself and
+                                         its dedicated conda env get
+                                         installed.
   4. _10D_plot_relative_gene_by_assignment -- splice-site-sharing-based
                                          proxy: assigns each alignment to
                                          whichever GTF gene (genome-wide, not
@@ -137,35 +149,267 @@ rule _10B_plot_relative_gene_coverage:
         """
 
 
-rule _10C_run_amalgam:
-    # Placeholder for a future independent-tool-based quantification
-    # (e.g. featureCounts/Salmon). Intentionally a no-op for now -- writes a
-    # marker file explaining that, rather than actually quantifying
-    # anything, so the rule has a real trackable output and downstream
-    # rules/all_outputs() can depend on it without special-casing "not
-    # implemented yet".
+# ---------------------------------------------------------------------------
+# AMALGAM sub-pipeline helpers (_10C1-_10C6). AMALGAM's own tool + assets +
+# dedicated conda env live under config["amalgam_dir"] (see setup.sh's
+# AMALGAM section) -- referenced as-is throughout, same convention already
+# used for config["annovar_dir"] elsewhere in this pipeline.
+# ---------------------------------------------------------------------------
+def _amalgam_sample_group_id(sample):
+    """Which (bed_id, sample_type) group a sample belongs to -- needed
+    because StringTie (_10C1) and transcript quantification (_10C5) are
+    per-sample steps, but depend on / feed into the group-level merged
+    transcriptome (_10C2-_10C4) the same way _10A/_10B/_10D's group-level
+    matrices work."""
+    s = SAMPLES[sample]
+    return _group_id(s["bed"], s["sample_type"])
+
+
+def _amalgam_stringtie_gtf(sample):
+    return SAMPLES[sample]["outdir"] + "/gene_quantification_amalgam/" + sample + "_stringtie.gtf"
+
+
+def _amalgam_group_dir(bed_id, sample_type):
+    return _cohort_outdir + "/" + str(bed_id) + "/output/sample_types/" + str(sample_type) + "/output/gene_quantification/by_amalgam"
+
+
+def _amalgam_group_filtered_gtf_gz(wc_or_sample):
+    """Accepts either a rule's wildcards (bed_id/sample_type already
+    present) or a sample name (resolved via _amalgam_sample_group_id) --
+    used both by _10C5 (per-sample, needs to resolve its own group) and
+    directly by group-level rules."""
+    if hasattr(wc_or_sample, 'bed_id'):
+        bed_id, sample_type = wc_or_sample.bed_id, wc_or_sample.sample_type
+    else:
+        s = SAMPLES[wc_or_sample]
+        bed_id, sample_type = _bed_id(s["bed"]), s["sample_type"]
+    return _amalgam_group_dir(bed_id, sample_type) + "/filtered.gtf.gz"
+
+
+rule _10C1_amalgam_stringtie:
+    # Step 1 of AMALGAM's own pipeline (see its README): de-novo
+    # transcriptome assembly per sample, short-read mode/default settings.
+    # Per-sample (not per-group) since StringTie only ever looks at one
+    # BAM at a time -- output lives under the sample's own directory,
+    # same convention as every other per-sample rule (e.g. rule 4's ASE
+    # output), not under the group's cohort/ directory.
     input:
-        bams = lambda wc: [SAMPLES[s]["bam"] for s in GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]],
-        bed  = lambda wc: bed_path(wc.bed_id),
+        bam = lambda wc: SAMPLES[wc.sample]["bam"],
     output:
-        marker = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/NOT_YET_IMPLEMENTED.txt",
+        gtf = "{outdir}/gene_quantification_amalgam/{sample}_stringtie.gtf",
+    params:
+        amalgam_env = config["amalgam_dir"] + "/conda_env",
     threads: 1
     resources:
-        # This is a no-op placeholder (just writes a marker file) -- give
-        # it a small fixed footprint rather than falling through to
-        # Snakemake's size-based default, which would otherwise derive
-        # mem_mb/disk_mb from the full cohort BAM list in `input.bams`
-        # (potentially >1TB) and get the sbatch submission itself
-        # rejected by SLURM.
-        mem_mb  = 1024,
-        runtime = 10,
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
+        runtime = config["time"],
     log:
-        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_amalgam_quantification.log"
+        "{outdir}/../logs/{sample}_amalgam_stringtie.log"
     shell:
         """
-        mkdir -p $(dirname {output.marker}) $(dirname {log})
-        echo "_10C_run_amalgam is a placeholder and does not run any quantification yet." > {output.marker}
-        echo "_10C_run_amalgam: no-op placeholder, nothing to do" 2>&1 | tee {log}
+        mkdir -p $(dirname {output.gtf}) $(dirname {log})
+        (
+            export PATH="{params.amalgam_env}/bin:$PATH"
+            stringtie -o {output.gtf} {input.bam}
+            echo -e "\\nFinished running StringTie on {wildcards.sample}."
+        ) 2>&1 | tee {log}
+        """
+
+
+rule _10C2_amalgam_merge_gtfs:
+    # Step 2: GffCompare merges every sample's StringTie GTF in this
+    # group with the reference annotation into one combined transcript
+    # set. The reference annotation MUST be first in the input list (see
+    # AMALGAM's README) -- gtf_list.tsv is built in that order below.
+    input:
+        annotation  = config["annotation"],
+        sample_gtfs = lambda wc: [
+            _amalgam_stringtie_gtf(s) for s in GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]
+        ],
+    output:
+        combined_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/merged.combined.gtf",
+        tracking      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/merged.tracking",
+    params:
+        amalgam_env = config["amalgam_dir"] + "/conda_env",
+        outprefix   = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/merged",
+        gtf_list    = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/gtf_list.tsv",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 32,
+        runtime = config["time"],
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_merge_gtfs.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.combined_gtf}) $(dirname {log})
+        (
+            export PATH="{params.amalgam_env}/bin:$PATH"
+            echo "{input.annotation}" > {params.gtf_list}
+            for f in {input.sample_gtfs}; do echo "$f" >> {params.gtf_list}; done
+            gffcompare -i {params.gtf_list} -T -o {params.outprefix}
+            echo "Finished merging GTFs."
+        ) 2>&1 | tee {log}
+        """
+
+
+rule _10C3_amalgam_build_transcriptome:
+    # Step 3: Build_Transcriptome.py identifies high-confidence,
+    # full-length transcripts from the GffCompare merge, using AMALGAM's
+    # bundled RefTSS/PolyASite reference BED files (config["amalgam_dir"]/
+    # assets/, cloned alongside the tool itself -- see setup.sh). Keeps
+    # BOTH the uncompressed filtered.gtf (needed as-is by _10C4 below,
+    # matching AMALGAM's own README) and the sorted/bgzip/tabix-indexed
+    # filtered.gtf.gz (needed by _10C5) as real tracked outputs.
+    input:
+        combined_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/merged.combined.gtf",
+        tracking      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/merged.tracking",
+        annotation    = config["annotation"],
+        genome        = config["genome"],
+    output:
+        filtered_gtf    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/filtered.gtf",
+        filtered_gtf_gz = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/filtered.gtf.gz",
+        filtered_tbi    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/filtered.gtf.gz.tbi",
+    params:
+        amalgam_env    = config["amalgam_dir"] + "/conda_env",
+        main_env       = workflow.basedir + "/envs/conda_env",  # bgzip/tabix (htslib) -- not part of AMALGAM's own env
+        amalgam_dir    = config["amalgam_dir"],
+        merge_prefix   = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/merged",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,  # AMALGAM's README: ~4.5GB observed
+        runtime = config["time"],
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_build_transcriptome.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.filtered_gtf}) $(dirname {log})
+        (
+            export PATH="{params.amalgam_env}/bin:{params.main_env}/bin:$PATH"
+            python -u {params.amalgam_dir}/scripts/Build_Transcriptome.py \\
+                -i {params.merge_prefix} \\
+                -g {input.annotation} \\
+                -f {input.genome} \\
+                -x {params.amalgam_dir}/assets/human.refTSS_v4.1.hg38.bed.gz \\
+                -y {params.amalgam_dir}/assets/atlas.clusters.2.0.GRCh38.bed.gz \\
+                -o {output.filtered_gtf}
+            echo "Finished filtering GTF."
+            sort -k1,1V -k4,4g -k5,5g {output.filtered_gtf} | bgzip > {output.filtered_gtf_gz}
+            tabix -p gff {output.filtered_gtf_gz}
+            echo "Finished sorting and indexing GTF."
+        ) 2>&1 | tee {log}
+        """
+
+
+rule _10C4_amalgam_annotate_orf:
+    # Step 4 (OPTIONAL per AMALGAM's own README): Annotate_ORF.py adds
+    # open-reading-frame annotations to the filtered transcriptome.
+    # NOTE: this step's output is currently NOT consumed by anything
+    # downstream -- _10C5 (transcript quantification) runs against
+    # _10C3's filtered.gtf.gz, not this rule's annotated.gtf.gz, matching
+    # exactly how the group's own AMALGAM submission script was written
+    # (Quantify_Transcripts.py -g pointed at step3's output, not step4's).
+    # Kept as a real rule (rather than dropped) since the group's script
+    # ran it unconditionally, but flagging here in case that was meant to
+    # feed step 5 and didn't due to an oversight in the original script.
+    input:
+        filtered_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/filtered.gtf",
+        annotation   = config["annotation"],
+        genome       = config["genome"],
+    output:
+        annotated_gtf    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotated.gtf",
+        annotated_gtf_gz = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotated.gtf.gz",
+        annotated_tbi    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotated.gtf.gz.tbi",
+    params:
+        amalgam_env = config["amalgam_dir"] + "/conda_env",
+        main_env    = workflow.basedir + "/envs/conda_env",
+        amalgam_dir = config["amalgam_dir"],
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,  # AMALGAM's README: ~8GB observed
+        runtime = config["time"],
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_annotate_orf.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.annotated_gtf}) $(dirname {log})
+        (
+            export PATH="{params.amalgam_env}/bin:{params.main_env}/bin:$PATH"
+            python -u {params.amalgam_dir}/scripts/Annotate_ORF.py \\
+                -i {input.filtered_gtf} \\
+                -a {input.annotation} \\
+                -f {input.genome} \\
+                -o {output.annotated_gtf}
+            sort -k1,1V -k4,4g -k5,5g {output.annotated_gtf} | bgzip > {output.annotated_gtf_gz}
+            tabix -p gff {output.annotated_gtf_gz}
+        ) 2>&1 | tee {log}
+        """
+
+
+rule _10C5_amalgam_quantify_transcripts:
+    # Step 5: Quantify_Transcripts.py, per sample, against the GROUP's
+    # filtered transcriptome from _10C3 (every sample in a group shares
+    # the same transcriptome; only the BAM being quantified differs).
+    input:
+        bam    = lambda wc: SAMPLES[wc.sample]["bam"],
+        gtf_gz = lambda wc: _amalgam_group_filtered_gtf_gz(wc.sample),
+        tbi    = lambda wc: _amalgam_group_filtered_gtf_gz(wc.sample) + ".tbi",
+    output:
+        tsv = "{outdir}/gene_quantification_amalgam/{sample}_transcript_quantification.tsv",
+    params:
+        amalgam_env = config["amalgam_dir"] + "/conda_env",
+        amalgam_dir = config["amalgam_dir"],
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,  # AMALGAM's README: ~3.5GB observed
+        runtime = config["time"],
+    log:
+        "{outdir}/../logs/{sample}_amalgam_quantify_transcripts.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        (
+            export PATH="{params.amalgam_env}/bin:$PATH"
+            python -u {params.amalgam_dir}/scripts/Quantify_Transcripts.py \\
+                -i {input.bam} \\
+                -g {input.gtf_gz} \\
+                -o {output.tsv}
+        ) 2>&1 | tee {log}
+        """
+
+
+rule _10C6_amalgam_aggregate_matrices:
+    # Step 6 (not part of AMALGAM itself -- the group's own aggregation
+    # step from its submission script): combine every sample's
+    # transcript-level quantification in this group into cohort-wide
+    # transcript and gene matrices. Extracted into its own script
+    # (scripts/aggregate_amalgam_matrices.py) rather than kept as inline
+    # Python, matching this repo's convention elsewhere.
+    input:
+        tsvs = lambda wc: [
+            SAMPLES[s]["outdir"] + "/gene_quantification_amalgam/" + s + "_transcript_quantification.tsv"
+            for s in GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]
+        ],
+    output:
+        transcript_matrix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_transcript_matrix.tsv",
+        gene_matrix        = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_gene_matrix.tsv",
+    params:
+        samples   = lambda wc: GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)],
+        outprefix = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/gene_amalgam",
+        script    = workflow.basedir + "/scripts/aggregate_amalgam_matrices.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: max(4096, attempt * 4 * 1024),
+        runtime = config["time"],
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_aggregate_matrices.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.gene_matrix}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles   {input.tsvs} \\
+            --samples   {params.samples} \\
+            --outprefix {params.outprefix} \\
+        2>&1 | tee {log}
         """
 
 

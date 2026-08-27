@@ -406,6 +406,31 @@ mkdir -p "$CADD_SNAKEMAKE_SHIM_DIR"
 ln -sf "$COMPILE_VARIANTS_ENV_DIR/bin/snakemake" "$CADD_SNAKEMAKE_SHIM_DIR/snakemake"
 CADD_LOG="$RESOURCES_DIR/.setup_logs/cadd_install.log"
 echo "  Progress: tail -f $CADD_LOG"
+
+# Asked here, before the log-redirected subshell below, so the prompt and
+# response actually reach/read from the real terminal (that subshell's
+# stdout/stderr get redirected to $CADD_LOG, so anything printed inside it
+# wouldn't be visible to a person watching this run live).
+RUN_CADD_TEST=y
+if [ -t 0 ] && [ -t 1 ]; then
+    echo ""
+    echo "  CADD-scripts setup can optionally run a real test-scoring pass"
+    echo "  against its bundled test VCF (see below). This finishes building"
+    echo "  every conda env CADD.sh needs (beyond install.sh's own narrower"
+    echo "  env-build target) and confirms scoring actually works -- but it's"
+    echo "  slow the first time (several GB per env, several envs)."
+    read -r -p "  Run the CADD test-scoring pass now? [Y/n] " _cadd_test_answer
+    case "$_cadd_test_answer" in
+        [nN]*) RUN_CADD_TEST=n ;;
+        *)     RUN_CADD_TEST=y ;;
+    esac
+    if [ "$RUN_CADD_TEST" = n ]; then
+        echo "  Skipping -- envs will instead get built/finished the first time"
+        echo "  a real sample actually runs CADD (slower there, and could race"
+        echo "  if multiple compile_variants.py runs hit a missing env at once)."
+    fi
+fi
+
 (
     export PATH="$CADD_SNAKEMAKE_SHIM_DIR:$PATH"
 
@@ -600,18 +625,26 @@ WRAPPER_EOF
     # multiple concurrent compile_variants.py runs each try to build the
     # same missing env. Goes through the wrapper, not CADD.sh directly, so
     # this exercises exactly what compile_variants.py invokes at runtime.
-    # See docs/setup.md.
-    n_envs="$(count_complete_cadd_envs)"
-    echo "  Running a real scoring pass (via CADD_wrapper.sh) against the bundled"
-    echo "  test VCF ($n_envs/5 expected conda envs currently complete) to"
-    echo "  force-build the full env set (beyond install.sh's own narrower"
-    echo "  env-build target) and confirm scoring works. Already-complete envs"
-    echo "  are skipped, so this is cheap when everything's already built, and"
-    echo "  slow (conda solves + several envs, several GB each) the first time."
-    ( cd "$CADD_DIR" && ./CADD_wrapper.sh -m -c 1 -o /tmp/cadd_setup_test_output.tsv.gz -g GRCh38 test/input.vcf.gz )
-    rm -f /tmp/cadd_setup_test_output.tsv.gz
-    n_envs="$(count_complete_cadd_envs)"
-    echo "  CADD test-scoring pass done -- $n_envs/5 envs now complete."
+    # See docs/setup.md. RUN_CADD_TEST is set above, before this
+    # log-redirected subshell, from an interactive prompt when a real
+    # terminal is attached (defaults to running it otherwise, e.g. in a
+    # non-interactive/scripted/cron invocation of this script).
+    if [ "$RUN_CADD_TEST" = "n" ]; then
+        echo "  Skipping the real scoring pass (user chose to trust the installation)."
+        echo "  Conda envs will instead get built/finished on first real use."
+    else
+        n_envs="$(count_complete_cadd_envs)"
+        echo "  Running a real scoring pass (via CADD_wrapper.sh) against the bundled"
+        echo "  test VCF ($n_envs/5 expected conda envs currently complete) to"
+        echo "  force-build the full env set (beyond install.sh's own narrower"
+        echo "  env-build target) and confirm scoring works. Already-complete envs"
+        echo "  are skipped, so this is cheap when everything's already built, and"
+        echo "  slow (conda solves + several envs, several GB each) the first time."
+        ( cd "$CADD_DIR" && ./CADD_wrapper.sh -m -c 1 -o /tmp/cadd_setup_test_output.tsv.gz -g GRCh38 test/input.vcf.gz )
+        rm -f /tmp/cadd_setup_test_output.tsv.gz
+        n_envs="$(count_complete_cadd_envs)"
+        echo "  CADD test-scoring pass done -- $n_envs/5 envs now complete."
+    fi
 ) > "$CADD_LOG" 2>&1 || error "CADD-scripts step failed (see $CADD_LOG)"
 
 ##############################################################################
@@ -710,7 +743,7 @@ log "OMIM (bundled with this repo -- see below for how to refresh it)"
     $OMIM_FILE
 
   Whatever you put there must be a tab-separated file containing (at least)
-  these three columns -- scripts/merge_hits.py reads only these, any others
+  these four columns -- scripts/merge_hits.py reads only these, any others
   are ignored:
     approved_gene_symbol   Gene symbol -- joined against this pipeline's own
                             ANNOVAR-derived gene symbols (ANNOVAR_Gene.refGene),
@@ -719,9 +752,82 @@ log "OMIM (bundled with this repo -- see below for how to refresh it)"
                             as-is into the final merged output.
     inheritance_patterns    Associated inheritance pattern(s) (e.g. autosomal
                             recessive), passed through as-is.
+    haploinsufficient       TRUE/FALSE. Only affects tiering for AD/XLD genes:
+                            for a haploinsufficient gene, ASE (one allele
+                            fully silenced) is treated as strong,
+                            near-diagnostic evidence on its own, on par with
+                            a Strong junction outlier. For a non-
+                            haploinsufficient AD/XLD gene, the same ASE
+                            call is weaker evidence (the gene tolerates
+                            reduced dosage from one silenced allele), so it's
+                            ranked lower -- see the tier decision tree in
+                            merge_hits.py's build_hit_table() docstring.
+                            Empty/missing is treated the same as FALSE.
 EOF
     fi
 ) || error "OMIM check failed"
+
+##############################################################################
+log "AMALGAM (used by rules _10C1-_10C6)"
+##############################################################################
+# Isoform discovery/quantification pipeline (github.com/RNA-ROB/amalgam),
+# invoked by rules/10_quantify_genes.smk's _10C1-_10C6 rule chain.
+#
+# No tagged releases exist upstream, so this clones `main` directly
+# (same convention as the NanoTS step above) rather than pinning a
+# version tag the way CADD-scripts does.
+#
+# AMALGAM ships its own conda_requirements.txt and documents its own
+# create/activate/install sequence in its README -- this mirrors that
+# exactly, in its own dedicated env (same pattern as
+# conda_env_compile_variants above: a separate env, not folded into the
+# main conda_env, so its pinned dependency versions can't conflict with
+# the rest of the pipeline's). conda_requirements.txt alone covers every
+# dependency AMALGAM needs (including StringTie and GffCompare) -- nothing
+# else to install separately.
+AMALGAM_LOG="$RESOURCES_DIR/.setup_logs/amalgam.log"
+(
+    AMALGAM_DIR="$RESOURCES_DIR/amalgam"
+    if [ -d "$AMALGAM_DIR/.git" ] || [ -d "$AMALGAM_DIR/scripts" ]; then
+        skip "$AMALGAM_DIR (repo)"
+    else
+        echo "  Cloning AMALGAM..."
+        git clone https://github.com/RNA-ROB/amalgam.git "$AMALGAM_DIR" \
+            || git clone git@github.com:RNA-ROB/amalgam.git "$AMALGAM_DIR"
+    fi
+
+    # AMALGAM's own conda_requirements.txt hard-pins several packages with
+    # "==" at versions that don't actually solve together against
+    # python=3.11 (e.g. biopython==1.78 only has conda-forge builds for
+    # Python 3.6-3.9) -- a bug in that file, not this pipeline. Rather than
+    # use it as-is, write our own known-solvable pin set here instead.
+    AMALGAM_REQ_CUSTOM="$AMALGAM_DIR/conda_requirements_custom.txt"
+    cat > "$AMALGAM_REQ_CUSTOM" <<'REQEOF'
+biopython>=1.79,<2
+cvxpy=1.5.3
+gffcompare=0.12.6
+htslib=1.21
+networkx=2.6.3
+numpy=1.24.4
+pandas=2.0.3
+pysam>=0.22,<0.23
+pytabix=0.1
+python=3.11.*
+samtools=1.21
+stringtie=3.0.0
+REQEOF
+
+    AMALGAM_ENV_DIR="$AMALGAM_DIR/conda_env"
+    if [ -x "$AMALGAM_ENV_DIR/bin/python" ]; then
+        skip "$AMALGAM_ENV_DIR (conda env)"
+    else
+        echo "  Creating AMALGAM's own conda env at $AMALGAM_ENV_DIR"
+        echo "  from $AMALGAM_REQ_CUSTOM..."
+        "$CONDA_BIN" create --yes --prefix "$AMALGAM_ENV_DIR"
+        "$CONDA_BIN" install --yes --prefix "$AMALGAM_ENV_DIR" \
+            -c conda-forge -c bioconda --file "$AMALGAM_REQ_CUSTOM"
+    fi
+) > "$AMALGAM_LOG" 2>&1 || error "AMALGAM step failed (see $AMALGAM_LOG)"
 
 ##############################################################################
 log "Done. Review any MISSING sections above before running the pipeline."

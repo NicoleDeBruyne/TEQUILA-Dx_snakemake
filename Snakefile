@@ -488,7 +488,13 @@ def all_outputs():
             god = group_outdir(gid)  # .../output
             outs.append(god + "/gene_quantification/by_count/gene_count_matrix.tsv")
             outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix.tsv")
-            outs.append(god + "/gene_quantification/by_amalgam/NOT_YET_IMPLEMENTED.txt")
+            outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_gene_matrix.tsv")
+            # _10C4_amalgam_annotate_orf's output isn't consumed by anything
+            # downstream (see that rule's docstring in
+            # rules/10_quantify_genes.smk) -- listed explicitly here so it
+            # still gets scheduled/run rather than silently skipped by
+            # Snakemake's pull-based DAG.
+            outs.append(god + "/gene_quantification/by_amalgam/annotated.gtf.gz")
             outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix.tsv")
 
     if flag("validate_sample_types"):
