@@ -91,6 +91,7 @@ for _sample, _entry in SAMPLES.items():
 _BUNDLED_PATH_KEYS = [
     "genome", "annotation",
     "conda_env", "conda_env_compile_variants", "gnomad_base", "clinvar_vcf", "annovar_dir",
+    "amalgam_dir",
     "cadd_data_dir", "cadd_script", "cadd_local_prescored_snv", "cadd_local_prescored_indel",
     "gnomad_mito_vcf", "longcallr_bin",
     "nanots_model_unphased", "nanots_model_phased", "gtex_data_dir", "omim_file",
@@ -488,13 +489,13 @@ def all_outputs():
             god = group_outdir(gid)  # .../output
             outs.append(god + "/gene_quantification/by_count/gene_count_matrix.tsv")
             outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix.tsv")
-            outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_gene_matrix.tsv")
+            outs.append(god + "/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix.tsv")
             # _10C4_amalgam_annotate_orf's output isn't consumed by anything
             # downstream (see that rule's docstring in
             # rules/10_quantify_genes.smk) -- listed explicitly here so it
             # still gets scheduled/run rather than silently skipped by
             # Snakemake's pull-based DAG.
-            outs.append(god + "/gene_quantification/by_amalgam/annotated.gtf.gz")
+            outs.append(god + "/gene_quantification/by_amalgam/annotation/annotated.gtf.gz")
             outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix.tsv")
 
     if flag("validate_sample_types"):

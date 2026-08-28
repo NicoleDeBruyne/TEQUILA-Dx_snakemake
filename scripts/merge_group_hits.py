@@ -55,6 +55,15 @@ def parse_args():
              "(bed_id, sample_type) group. If omitted/missing, relative_gene_expression/"
              "cohort_relative_gene_expression/n_cohort are filled with '.' (merge_hits.build_hit_table's "
              "existing fallback convention for optional inputs).")
+    parser.add_argument("--debug-sample", required=False, default=None,
+        help="If set, print diagnostic detail (to stderr) for this one sample: the gene list surviving "
+             "the per-sample variant_df slice, and the gene list in build_hit_table's output -- useful "
+             "for tracking down a gene that unexpectedly disappears for one specific sample. No effect "
+             "on output files. Off by default.")
+    parser.add_argument("--debug-gene", required=False, default=None,
+        help="Used together with --debug-sample: also print the matching variant_df row(s) for this "
+             "gene (if any) within that sample's slice, and whether the gene made it into "
+             "build_hit_table's output. Ignored if --debug-sample isn't also set.")
     args = parser.parse_args()
     if len(args.tissues) != len(args.junction_files):
         parser.error("--tissues and --junction-files must have the same number of entries")
@@ -190,10 +199,31 @@ def main():
             cohort_junction_df[cohort_junction_df['sample'].astype(str) == str(sample)]
             if cohort_junction_df is not None else None
         )
+
+        if args.debug_sample and str(sample) == args.debug_sample:
+            genes_in_slice = sorted(sample_variant_df['gene'].dropna().unique().tolist())
+            print(f"  [DEBUG] {sample}: {len(sample_variant_df)} variant_df row(s) after per-sample slice, "
+                  f"genes: {genes_in_slice}", file=sys.stderr)
+            if args.debug_gene:
+                match = sample_variant_df[sample_variant_df['gene'] == args.debug_gene]
+                print(f"  [DEBUG] {sample}: {len(match)} row(s) for gene=={args.debug_gene!r} in the slice:",
+                      file=sys.stderr)
+                if not match.empty:
+                    print(match.to_string(), file=sys.stderr)
+
         hit_df = merge_hits.build_hit_table(
             sample_variant_df, sample_ase_df, sample_junction_df, sample_cohort_junction_df,
             sample, omim_df, gene_expression_df,
         )
+
+        if args.debug_sample and str(sample) == args.debug_sample:
+            genes_in_output = sorted(hit_df['gene'].dropna().unique().tolist())
+            print(f"  [DEBUG] {sample}: {len(hit_df)} row(s) in build_hit_table's output, "
+                  f"genes: {genes_in_output}", file=sys.stderr)
+            if args.debug_gene:
+                present = args.debug_gene in genes_in_output
+                print(f"  [DEBUG] {sample}: gene=={args.debug_gene!r} present in output: {present}", file=sys.stderr)
+
         hit_dfs.append(hit_df)
         print(f"  {sample}: {len(hit_df)} gene(s)")
 

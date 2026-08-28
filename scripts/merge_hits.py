@@ -162,7 +162,7 @@ def load_variant_df(path):
     variant_df['_caller'] = variant_df['name'].apply(_caller_from_name)
     variant_df['_raw_GT'] = variant_df['GT']
     variant_df['GT'] = variant_df['GT'].str.replace('|', '/', regex=False).str.replace('1/0', '0/1', regex=False)
-    variant_df['variant_ID'] = variant_df.apply(lambda x: f"{x.chrom}-{x.pos}-{x.ref}-{x.alt}", axis=1).drop_duplicates()
+    variant_df['variant_ID'] = variant_df.apply(lambda x: f"{x.chrom}-{x.pos}-{x.ref}-{x.alt}", axis=1)
     # ANNOVAR only ever populates one of these two per variant (AAChange.refGene
     # for exonic variants with a codon change to report, GeneDetail.refGene for
     # everything else it has position detail for -- splicing/UTR/intronic/etc.)

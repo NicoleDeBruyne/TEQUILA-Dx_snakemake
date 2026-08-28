@@ -165,38 +165,30 @@ def _amalgam_sample_group_id(sample):
     return _group_id(s["bed"], s["sample_type"])
 
 
-def _amalgam_stringtie_gtf(sample):
-    return SAMPLES[sample]["outdir"] + "/gene_quantification_amalgam/" + sample + "_stringtie.gtf"
-
-
 def _amalgam_group_dir(bed_id, sample_type):
     return _cohort_outdir + "/" + str(bed_id) + "/output/sample_types/" + str(sample_type) + "/output/gene_quantification/by_amalgam"
 
 
-def _amalgam_group_filtered_gtf_gz(wc_or_sample):
-    """Accepts either a rule's wildcards (bed_id/sample_type already
-    present) or a sample name (resolved via _amalgam_sample_group_id) --
-    used both by _10C5 (per-sample, needs to resolve its own group) and
-    directly by group-level rules."""
-    if hasattr(wc_or_sample, 'bed_id'):
-        bed_id, sample_type = wc_or_sample.bed_id, wc_or_sample.sample_type
-    else:
-        s = SAMPLES[wc_or_sample]
-        bed_id, sample_type = _bed_id(s["bed"]), s["sample_type"]
-    return _amalgam_group_dir(bed_id, sample_type) + "/filtered.gtf.gz"
+def _amalgam_stringtie_gtf(bed_id, sample_type, sample):
+    return _amalgam_group_dir(bed_id, sample_type) + "/stringtie/" + sample + "_stringtie.gtf"
+
+
+def _amalgam_quantification_tsv(bed_id, sample_type, sample):
+    return _amalgam_group_dir(bed_id, sample_type) + "/quantification/" + sample + "_transcript_quantification.tsv"
 
 
 rule _10C1_amalgam_stringtie:
     # Step 1 of AMALGAM's own pipeline (see its README): de-novo
     # transcriptome assembly per sample, short-read mode/default settings.
-    # Per-sample (not per-group) since StringTie only ever looks at one
-    # BAM at a time -- output lives under the sample's own directory,
-    # same convention as every other per-sample rule (e.g. rule 4's ASE
-    # output), not under the group's cohort/ directory.
+    # Lives under the GROUP's by_amalgam/stringtie/ directory (not the
+    # sample's own directory) even though StringTie itself only looks at
+    # one BAM at a time -- bed_id/sample_type/sample are all real
+    # wildcards here so every step of this sub-pipeline's output lands in
+    # one place: by_amalgam/{stringtie,annotation,quantification}/.
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
     output:
-        gtf = "{outdir}/gene_quantification_amalgam/{sample}_stringtie.gtf",
+        gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/stringtie/{sample}_stringtie.gtf",
     params:
         amalgam_env = config["amalgam_dir"] + "/conda_env",
     threads: 1
@@ -204,7 +196,7 @@ rule _10C1_amalgam_stringtie:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
-        "{outdir}/../logs/{sample}_amalgam_stringtie.log"
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/{sample}_amalgam_stringtie.log"
     shell:
         """
         mkdir -p $(dirname {output.gtf}) $(dirname {log})
@@ -224,15 +216,16 @@ rule _10C2_amalgam_merge_gtfs:
     input:
         annotation  = config["annotation"],
         sample_gtfs = lambda wc: [
-            _amalgam_stringtie_gtf(s) for s in GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]
+            _amalgam_stringtie_gtf(wc.bed_id, wc.sample_type, s)
+            for s in GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]
         ],
     output:
-        combined_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/merged.combined.gtf",
-        tracking      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/merged.tracking",
+        combined_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/merged.combined.gtf",
+        tracking      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/merged.tracking",
     params:
         amalgam_env = config["amalgam_dir"] + "/conda_env",
-        outprefix   = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/merged",
-        gtf_list    = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/gtf_list.tsv",
+        outprefix   = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/annotation/merged",
+        gtf_list    = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/annotation/gtf_list.tsv",
     threads: 1
     resources:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 32,
@@ -261,19 +254,19 @@ rule _10C3_amalgam_build_transcriptome:
     # matching AMALGAM's own README) and the sorted/bgzip/tabix-indexed
     # filtered.gtf.gz (needed by _10C5) as real tracked outputs.
     input:
-        combined_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/merged.combined.gtf",
-        tracking      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/merged.tracking",
+        combined_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/merged.combined.gtf",
+        tracking      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/merged.tracking",
         annotation    = config["annotation"],
         genome        = config["genome"],
     output:
-        filtered_gtf    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/filtered.gtf",
-        filtered_gtf_gz = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/filtered.gtf.gz",
-        filtered_tbi    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/filtered.gtf.gz.tbi",
+        filtered_gtf    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/filtered.gtf",
+        filtered_gtf_gz = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/filtered.gtf.gz",
+        filtered_tbi    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/filtered.gtf.gz.tbi",
     params:
         amalgam_env    = config["amalgam_dir"] + "/conda_env",
         main_env       = workflow.basedir + "/envs/conda_env",  # bgzip/tabix (htslib) -- not part of AMALGAM's own env
         amalgam_dir    = config["amalgam_dir"],
-        merge_prefix   = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/merged",
+        merge_prefix   = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/annotation/merged",
     threads: 1
     resources:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 8,  # AMALGAM's README: ~4.5GB observed
@@ -312,13 +305,13 @@ rule _10C4_amalgam_annotate_orf:
     # ran it unconditionally, but flagging here in case that was meant to
     # feed step 5 and didn't due to an oversight in the original script.
     input:
-        filtered_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/filtered.gtf",
+        filtered_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/filtered.gtf",
         annotation   = config["annotation"],
         genome       = config["genome"],
     output:
-        annotated_gtf    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotated.gtf",
-        annotated_gtf_gz = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotated.gtf.gz",
-        annotated_tbi    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotated.gtf.gz.tbi",
+        annotated_gtf    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/annotated.gtf",
+        annotated_gtf_gz = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/annotated.gtf.gz",
+        annotated_tbi    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/annotated.gtf.gz.tbi",
     params:
         amalgam_env = config["amalgam_dir"] + "/conda_env",
         main_env    = workflow.basedir + "/envs/conda_env",
@@ -349,12 +342,15 @@ rule _10C5_amalgam_quantify_transcripts:
     # Step 5: Quantify_Transcripts.py, per sample, against the GROUP's
     # filtered transcriptome from _10C3 (every sample in a group shares
     # the same transcriptome; only the BAM being quantified differs).
+    # bed_id/sample_type are real wildcards here (not resolved from
+    # sample via a helper) since output now lives under the group's
+    # by_amalgam/quantification/ directory rather than the sample's own.
     input:
         bam    = lambda wc: SAMPLES[wc.sample]["bam"],
-        gtf_gz = lambda wc: _amalgam_group_filtered_gtf_gz(wc.sample),
-        tbi    = lambda wc: _amalgam_group_filtered_gtf_gz(wc.sample) + ".tbi",
+        gtf_gz = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/filtered.gtf.gz",
+        tbi    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/filtered.gtf.gz.tbi",
     output:
-        tsv = "{outdir}/gene_quantification_amalgam/{sample}_transcript_quantification.tsv",
+        tsv = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/{sample}_transcript_quantification.tsv",
     params:
         amalgam_env = config["amalgam_dir"] + "/conda_env",
         amalgam_dir = config["amalgam_dir"],
@@ -363,7 +359,7 @@ rule _10C5_amalgam_quantify_transcripts:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 8,  # AMALGAM's README: ~3.5GB observed
         runtime = config["time"],
     log:
-        "{outdir}/../logs/{sample}_amalgam_quantify_transcripts.log"
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/{sample}_amalgam_quantify_transcripts.log"
     shell:
         """
         mkdir -p $(dirname {output.tsv}) $(dirname {log})
@@ -386,15 +382,15 @@ rule _10C6_amalgam_aggregate_matrices:
     # Python, matching this repo's convention elsewhere.
     input:
         tsvs = lambda wc: [
-            SAMPLES[s]["outdir"] + "/gene_quantification_amalgam/" + s + "_transcript_quantification.tsv"
+            _amalgam_quantification_tsv(wc.bed_id, wc.sample_type, s)
             for s in GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]
         ],
     output:
-        transcript_matrix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_transcript_matrix.tsv",
-        gene_matrix        = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_gene_matrix.tsv",
+        transcript_matrix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/gene_amalgam_transcript_matrix.tsv",
+        gene_matrix        = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix.tsv",
     params:
         samples   = lambda wc: GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)],
-        outprefix = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/gene_amalgam",
+        outprefix = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/quantification/gene_amalgam",
         script    = workflow.basedir + "/scripts/aggregate_amalgam_matrices.py",
     threads: 1
     resources:
