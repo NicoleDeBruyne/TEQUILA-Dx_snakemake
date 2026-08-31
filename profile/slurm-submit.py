@@ -18,8 +18,12 @@ from slurm_utils import (
     submit_job,
 )
 
-# Directory where all per-job SLURM stdout/stderr logs are written.
-# Matches the orchestrator log directory used by submit_snakemake.sh.
+# Directory where ALL per-job SLURM stdout/stderr logs are written, flat
+# (no subdirectories) -- e.g. logs/slurm/slurm-<jobid>_<rule>_<wildcards>.out.
+# Normally set by the orchestrator (submit_snakemake.sh) to the same
+# timestamped run directory Snakemake's own run log lives under, so every
+# log from one invocation lands in one place; falls back to logs/slurm/
+# under the current directory if run without that orchestrator.
 LOG_DIR = os.environ.get(
     "SNAKEMAKE_SLURM_LOG_DIR",
     os.path.join(os.getcwd(), "logs", "slurm"),

@@ -71,6 +71,45 @@ def parse_args():
 _CALLER_PHASE_PRIORITY = ('nanoTS', 'clair3_rna', 'longcallR')
 
 
+def _clnsig_category_rank(clnsig):
+    """Rank a raw ClinVar CLNSIG string (compile_variants.py's extract_CLNSIG
+    format: 'BASE' normally, or 'BASE:CLNSIGCONF' when ClinVar reports
+    conflicting submissions) among the pathogenic-implicated categories used
+    as a merge_hits tiebreaker. Lower rank = stronger evidence. Returns None
+    for anything not pathogenic-implicated (VUS/benign/etc. never reach
+    this -- callers only invoke it on variants where the broader
+    'Pathogenic|Likely_pathogenic' substring match already matched).
+
+    Priority (best to worst):
+      0: Pathogenic
+      1: Pathogenic/Likely_pathogenic
+      2: Likely_pathogenic
+      3: Conflicting_classifications_of_pathogenicity, but only when the
+         CLNSIGCONF submission breakdown includes Pathogenic and/or
+         Likely_pathogenic submissions (checked against the full string,
+         which includes the ':CLNSIGCONF' suffix)
+      4: any other string that still matched 'Pathogenic|Likely_pathogenic'
+         (e.g. a multi-condition CLNSIG like 'Pathogenic|association') --
+         kept as a catch-all so the tiebreaker never errors on real data,
+         ranked below the four explicitly requested categories.
+    """
+    s = str(clnsig)
+    base = s.split(':', 1)[0]
+    if base == 'Pathogenic':
+        return 0
+    if base == 'Pathogenic/Likely_pathogenic':
+        return 1
+    if base == 'Likely_pathogenic':
+        return 2
+    if base == 'Conflicting_classifications_of_pathogenicity':
+        if re.search(r'Pathogenic|Likely_pathogenic', s):
+            return 3
+        return None
+    if re.search(r'Pathogenic|Likely_pathogenic', s):
+        return 4
+    return None
+
+
 def _caller_from_name(name):
     """compile_variants.py's --vcf-file-names are '{sample}_{caller}'
     (e.g. 'IDT-160_PID843_nanoTS') -- match against the known caller
@@ -80,6 +119,49 @@ def _caller_from_name(name):
         if name.endswith('_' + caller):
             return caller
     return None
+
+
+# Internal _caller token -> display suffix used for the per-caller
+# variant_GT_{suffix} output columns. Kept separate from the internal
+# token (rather than renaming _caller itself) since 'clair3_rna' is used
+# elsewhere (VCF filenames, _CALLER_PHASE_PRIORITY) and shouldn't change.
+_CALLER_GT_DISPLAY = {
+    'nanoTS':     'nanoTS',
+    'longcallR':  'longcallR',
+    'clair3_rna': 'clair3-RNA',
+    'deepvariant': 'deepvariant',
+}
+
+
+def _build_gt_by_caller(variant_df):
+    """Pivot variant_df (one row per sample/variant/caller) into one row
+    per (gene, variant_ID) with a separate GT column per caller --
+    'variant_GT_nanoTS', 'variant_GT_longcallR', 'variant_GT_clair3-RNA',
+    'variant_GT_deepvariant' -- instead of merging every caller's GT into
+    a single comma-joined string. A variant not called by a given caller
+    gets '.' in that caller's column; the rare case of >1 row from the
+    same caller for the same variant (see resolve_phase()'s docstring)
+    is comma-joined within that caller's own cell."""
+    gt_long = (
+        variant_df
+            .groupby(['gene', 'variant_ID', '_caller'])['GT']
+            .agg(lambda x: ','.join(x))
+            .reset_index()
+    )
+    gt_wide = (
+        gt_long
+            .pivot(index=['gene', 'variant_ID'], columns='_caller', values='GT')
+            .reset_index()
+    )
+    for caller in _CALLER_GT_DISPLAY:
+        if caller not in gt_wide.columns:
+            gt_wide[caller] = pd.NA
+    gt_wide = gt_wide.rename(
+        columns={caller: f'variant_GT_{suffix}' for caller, suffix in _CALLER_GT_DISPLAY.items()}
+    )
+    gt_cols = [f'variant_GT_{suffix}' for suffix in _CALLER_GT_DISPLAY.values()]
+    gt_wide[gt_cols] = gt_wide[gt_cols].fillna('.')
+    return gt_wide[['gene', 'variant_ID'] + gt_cols]
 
 
 def resolve_phase(variant_a, variant_b):
@@ -157,8 +239,8 @@ def load_variant_df(path):
     # caller reported this specific GT/PS pair. resolve_phase() below
     # needs the untouched '|' separator and caller identity to determine
     # trans/cis; keep this BEFORE the cosmetic canonicalization that
-    # follows, which is for the human-readable variant_GT display column
-    # only and would otherwise destroy phase information.
+    # follows, which is for the human-readable variant_GT_{caller} display
+    # columns only and would otherwise destroy phase information.
     variant_df['_caller'] = variant_df['name'].apply(_caller_from_name)
     variant_df['_raw_GT'] = variant_df['GT']
     variant_df['GT'] = variant_df['GT'].str.replace('|', '/', regex=False).str.replace('1/0', '0/1', regex=False)
@@ -266,26 +348,30 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     filled with '.')."""
 
     # Create modified DataFrames
-    # mod_variant_df should contain genes, variant_pos, variant_GT, variant_CLNSIG, variant_nsamples
+    # mod_variant_df should contain genes, variant_pos, variant_GT_{caller}, variant_CLNSIG, variant_nsamples
+    gt_by_caller = _build_gt_by_caller(variant_df)
+    gt_caller_cols = [f'variant_GT_{suffix}' for suffix in _CALLER_GT_DISPLAY.values()]
     mod_variant_df = (
         variant_df
             .sort_values(['gene', 'variant_ID'])
             .groupby(['gene', 'variant_ID'], sort=False)
             .agg(
-                GT=('GT', lambda x: ','.join(x)),
-                gnomAD_AF=('gnomAD_AF', lambda x: ','.join(x.dropna().astype(str))),
-                CLNSIG=('CLNSIG', lambda x: ','.join(x.dropna().astype(str))),
-                CADD_PHRED=('CADD_PHRED', lambda x: ','.join(x.dropna().astype(str))),
-                SpliceAI=('SpliceAI', lambda x: ','.join(x.dropna().astype(str))),
-                variant_consequence=('variant_consequence', lambda x: ','.join(x.dropna().astype(str))),
-                num_callers=('num_callers', lambda x: ','.join(x.astype(str))),
-                variant_nsamples=('variant_nsamples', lambda x: ','.join(x.astype(str))),
+                gnomAD_AF=('gnomAD_AF', lambda x: ','.join(dict.fromkeys(x.dropna().astype(str)))),
+                CLNSIG=('CLNSIG', lambda x: ','.join(dict.fromkeys(x.dropna().astype(str)))),
+                CADD_PHRED=('CADD_PHRED', lambda x: ','.join(dict.fromkeys(x.dropna().astype(str)))),
+                SpliceAI=('SpliceAI', lambda x: ','.join(dict.fromkeys(x.dropna().astype(str)))),
+                variant_consequence=('variant_consequence', lambda x: ','.join(dict.fromkeys(x.dropna().astype(str)))),
+                num_callers=('num_callers', lambda x: ','.join(dict.fromkeys(x.astype(str)))),
+                variant_nsamples=('variant_nsamples', lambda x: ','.join(dict.fromkeys(x.astype(str)))),
             )
             .reset_index()
+            # Bring in the per-caller GT columns (one row per (gene, variant_ID),
+            # same grain as the aggregation above) before collapsing to gene level.
+            .merge(gt_by_caller, on=['gene', 'variant_ID'], how='left')
             .groupby('gene', sort=False)
             .agg(
                 variant_ID=('variant_ID', ';'.join),
-                variant_GT=('GT', ';'.join),
+                **{col: (col, ';'.join) for col in gt_caller_cols},
                 variant_gnomAD_AF=('gnomAD_AF', ';'.join),
                 variant_CLNSIG=('CLNSIG', ';'.join),
                 variant_CADD_PHRED=('CADD_PHRED', ';'.join),
@@ -497,17 +583,25 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
             has_2_pathogenic_trans=False, has_2_pathogenic_unclear=False,
             has_1_pathogenic_1_vus_trans=False,
             has_2_vus_trans=False, has_2_vus_unclear=False,
+            best_pathogenic_clnsig_rank=None,
         )
         if gene_variant_rows.empty:
             return empty
 
         variants = {}
         for variant_id, sub in gene_variant_rows.groupby('variant_ID'):
-            is_pathogenic = sub['CLNSIG'].astype(str).str.contains(r'Pathogenic|Likely_pathogenic', regex=True).any()
+            clnsig_values = sub['CLNSIG'].astype(str)
+            is_pathogenic = clnsig_values.str.contains(r'Pathogenic|Likely_pathogenic', regex=True).any()
             is_homozygous = (sub['GT'] == '1/1').any()
+            # CLNSIG is a per-variant (not per-caller) annotation -- every
+            # caller row for this variant carries the same value (see
+            # compile_variants.py's extract_CLNSIG), so any row is
+            # representative for ranking purposes.
+            clnsig_rank = _clnsig_category_rank(clnsig_values.iloc[0]) if is_pathogenic else None
             variants[variant_id] = dict(
                 is_pathogenic=is_pathogenic,
                 is_homozygous=is_homozygous,
+                clnsig_rank=clnsig_rank,
                 rows=sub[['_caller', '_raw_GT', 'PS']].to_dict('records'),
             )
 
@@ -547,6 +641,9 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
             has_1_pathogenic_1_vus_trans=has_1_pathogenic_1_vus_trans,
             has_2_vus_trans=has_2_vus_trans,
             has_2_vus_unclear=has_2_vus_unclear,
+            best_pathogenic_clnsig_rank=(
+                min((variants[v]['clnsig_rank'] for v in path_ids if variants[v]['clnsig_rank'] is not None), default=None)
+            ),
         )
 
     variant_class_by_gene = {
@@ -559,6 +656,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         has_2_pathogenic_trans=False, has_2_pathogenic_unclear=False,
         has_1_pathogenic_1_vus_trans=False,
         has_2_vus_trans=False, has_2_vus_unclear=False,
+        best_pathogenic_clnsig_rank=None,
     )
 
     def _assign_tier(row):
@@ -646,6 +744,9 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     hit_df['_tb_n_pathogenic'] = hit_df['gene'].map(
         lambda g: variant_class_by_gene.get(g, _empty_variant_class)['n_pathogenic_variants']
     )
+    hit_df['_tb_clnsig_rank'] = hit_df['gene'].map(
+        lambda g: variant_class_by_gene.get(g, _empty_variant_class)['best_pathogenic_clnsig_rank']
+    )
 
     def _max_bulk_delta(row):
         a = max_deltas(row, '')[0]
@@ -655,18 +756,47 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
 
     hit_df['_tb_max_bulk_delta'] = hit_df.apply(_max_bulk_delta, axis=1)
 
-    # Tiebreak chain (applied only when two genes have the same tier),
-    # in priority order: # pathogenic variants (descending), presence of
-    # ASE (True first), max junction delta magnitude (descending, across
-    # both GTEx- and cohort-comparison junctions), then gene name
-    # alphabetically as a final stable tiebreak.
+    def _max_cadd(row):
+        """Highest CADD_PHRED across this gene's variants (semicolon-joined
+        per-variant values in variant_CADD_PHRED; '.'/blank means
+        unscored/not run and is skipped, not treated as 0)."""
+        s = row.get('variant_CADD_PHRED')
+        if not pd.notna(s):
+            return -1
+        vals = []
+        for v in str(s).split(';'):
+            v = v.strip()
+            if not v or v == '.':
+                continue
+            try:
+                vals.append(float(v))
+            except ValueError:
+                continue
+        return max(vals) if vals else -1
+
+    hit_df['_tb_max_cadd'] = hit_df.apply(_max_cadd, axis=1)
+
+    # Tiebreak chain (applied only when two genes have the same tier), in
+    # priority order:
+    #   1. # pathogenic variants (descending)
+    #   2. ClinVar CLNSIG category rank of the gene's best pathogenic
+    #      variant (ascending -- lower rank = stronger evidence; see
+    #      _clnsig_category_rank: Pathogenic < Pathogenic/Likely_pathogenic
+    #      < Likely_pathogenic < Conflicting_classifications_of_pathogenicity
+    #      with P/LP submissions < any other pathogenic-matching CLNSIG).
+    #      Genes with no pathogenic variant have no rank (NaN, sorts last).
+    #   3. presence of ASE (True first)
+    #   4. max junction delta magnitude (descending, across both GTEx- and
+    #      cohort-comparison junctions)
+    #   5. highest CADD score across the gene's variants (descending)
+    #   6. gene name alphabetically, as a final stable tiebreak
     hit_df.sort_values(
-        by=['tier', '_tb_n_pathogenic', 'ASE', '_tb_max_bulk_delta', 'gene'],
-        ascending=[True, False, False, False, True],
+        by=['tier', '_tb_n_pathogenic', '_tb_clnsig_rank', 'ASE', '_tb_max_bulk_delta', '_tb_max_cadd', 'gene'],
+        ascending=[True, False, True, False, False, False, True],
         na_position='last',
         inplace=True
     )
-    hit_df.drop(columns=['_tb_n_pathogenic', '_tb_max_bulk_delta'], inplace=True)
+    hit_df.drop(columns=['_tb_n_pathogenic', '_tb_clnsig_rank', '_tb_max_bulk_delta', '_tb_max_cadd'], inplace=True)
     hit_df['ranking'] = np.arange(1, len(hit_df) + 1)
 
     # Gene expression (rule _10D's targeted-panel CPTM matrix, one row per
@@ -709,7 +839,8 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     hit_df = hit_df[[
         'sample', 'gene', 'phenotypes', 'inheritance_patterns', 'haploinsufficient', 'ranking', 'tier', 'variant', 'pathogenic_variant', 'ASE', 'outlier_junction', 'cohort_outlier_junction',
         'relative_gene_expression', 'cohort_relative_gene_expression', 'n_cohort',
-        'variant_ID', 'variant_GT', 'variant_gnomAD_AF',  'variant_CLNSIG', 'variant_CADD_PHRED', 'variant_SpliceAI', 'variant_consequence', 'variant_num_callers', 'variant_nsamples',
+        'variant_ID', 'variant_GT_nanoTS', 'variant_GT_longcallR', 'variant_GT_clair3-RNA', 'variant_GT_deepvariant',
+        'variant_gnomAD_AF',  'variant_CLNSIG', 'variant_CADD_PHRED', 'variant_SpliceAI', 'variant_consequence', 'variant_num_callers', 'variant_nsamples',
         'ASE_ratio', 'ASE_nsamples', 
         'bulk_jxns', 'bulk_jxn_coverage', 'bulk_deltaPSI', 'bulk_jxn_annotation', 'bulk_jxn_event', 'bulk_jxn_nsamples',
         'hap1_jxns', 'hap1_jxn_coverage', 'hap1_deltaPSI', 'hap1_jxn_annotation', 'hap1_jxn_event', 'hap1_jxn_nsamples',

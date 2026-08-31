@@ -269,7 +269,7 @@ rule _10C3_amalgam_build_transcriptome:
         merge_prefix   = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/annotation/merged",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,  # AMALGAM's README: ~4.5GB observed
+        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_build_transcriptome.log"

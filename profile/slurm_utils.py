@@ -3,7 +3,6 @@ profile/slurm_utils.py
 Shared helpers for slurm-submit.py and slurm-status.py.
 """
 
-import glob
 import os
 import re
 import subprocess
@@ -55,10 +54,15 @@ def build_sbatch_command(job_properties, jobscript, log_dir):
     mem_mb  = resources.get("mem_mb", 4000)
     runtime = resources.get("runtime", 720)  # minutes
 
-    # Build a readable job/log name: rule + sample wildcard only. Only
-    # short, filename-safe wildcards are used here (some wildcards, like
-    # `outdir`, are full filesystem paths and would break --output).
-    SAFE_WILDCARD_KEYS = {"sample", "tissue"}
+    # Build a readable job/log name: rule + every short, filename-safe
+    # wildcard used anywhere in this pipeline (bed_id, sample, sample_type,
+    # tissue -- none of these are full filesystem paths, unlike e.g.
+    # `outdir`, which would break --output and is deliberately excluded).
+    # Including bed_id/sample_type (not just sample/tissue) matters for
+    # group-level rules like _10C3_amalgam_build_transcriptome, which have
+    # no `sample` wildcard at all -- without this, every group's job for
+    # such a rule shared the exact same job_label.
+    SAFE_WILDCARD_KEYS = {"bed_id", "sample", "sample_type", "tissue"}
     safe_values = [
         str(v) for k, v in wildcards.items()
         if k in SAFE_WILDCARD_KEYS
@@ -66,22 +70,13 @@ def build_sbatch_command(job_properties, jobscript, log_dir):
     wildcard_str = "_".join(safe_values)
     job_label = f"{rule_name}_{wildcard_str}" if wildcard_str else rule_name
 
-    # Route logs into a per-sample subdirectory when a sample wildcard
-    # exists:  ${LOG_DIR}/<sample>/slurm-<jobid>_<rule>_<sample>.out
-    # Falls back to LOG_DIR directly for jobs with no sample wildcard.
-    sample = wildcards.get("sample")
-    target_dir = os.path.join(log_dir, sample) if sample else log_dir
-    os.makedirs(target_dir, exist_ok=True)
-
-    # `%j` (SLURM job ID) differs on every submission, so a rerun leaves
-    # the previous attempt's log behind under a different name. Remove any
-    # prior log(s) for this exact rule+sample before submitting the new one.
-    stale_pattern = os.path.join(target_dir, f"slurm-*_{job_label}.out")
-    for stale_log in glob.glob(stale_pattern):
-        try:
-            os.remove(stale_log)
-        except OSError:
-            pass
+    # All SLURM stdout/stderr logs go directly into log_dir, flat -- no
+    # per-sample or other subdirectories. `%j` (SLURM job ID) is globally
+    # unique per submission, so slurm-<jobid>_<job_label>.out can never
+    # collide with another job's file even without one, and past attempts'
+    # logs are deliberately left in place (not deleted) for later
+    # debugging -- see get_job_properties's docstring / docs/slurm.md.
+    os.makedirs(log_dir, exist_ok=True)
 
     cmd = [
         "sbatch",
@@ -91,7 +86,7 @@ def build_sbatch_command(job_properties, jobscript, log_dir):
         f"--mem={mem_mb}M",
         f"--time={runtime_to_hms(runtime)}",
         f"--exclude={EXCLUDE_NODES}",
-        f"--output={target_dir}/slurm-%j_{job_label}.out",
+        f"--output={log_dir}/slurm-%j_{job_label}.out",
         f"--export=ALL,CONDA_ENV_DIR={default_conda_env_dir()}",
         jobscript,
     ]
