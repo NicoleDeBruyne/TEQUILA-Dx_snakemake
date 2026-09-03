@@ -137,7 +137,7 @@ def main():
     if mask.sum() == 0:
         print("No valid p-values to correct.")
     else:
-        padj_values = multipletests(pd.to_numeric(df.loc[mask, 'p_value'], errors='coerce').dropna(), method='fdr_by')[1]
+        padj_values = multipletests(pd.to_numeric(df.loc[mask, 'p_value'], errors='coerce').dropna(), method='fdr_bh')[1]
         df.loc[mask, 'padj'] = padj_values
 
     df.to_csv(outfile, sep='\t', index=False)

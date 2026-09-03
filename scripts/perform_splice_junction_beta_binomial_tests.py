@@ -565,7 +565,7 @@ def main():
     df.insert(col_idx + 1, "padj", "n/a")
     df['padj'] = df['padj'].astype(object)
     numeric_p_values = pd.to_numeric(df.loc[mask, 'p_value'], errors='coerce')
-    padj_values = multipletests(numeric_p_values.dropna(), method='fdr_by')[1]
+    padj_values = multipletests(numeric_p_values.dropna(), method='fdr_bh')[1]
     df.loc[mask & numeric_p_values.notna(), 'padj'] = padj_values
 
     df = df.sort_values(by=['sample', 'junction', 'phasing'])
