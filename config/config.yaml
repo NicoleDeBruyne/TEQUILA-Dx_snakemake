@@ -187,7 +187,7 @@ merge_ase_sample_fraction:             0.05   # a gene with ASE in > this fracti
 merge_jxn_coverage_threshold:         50
 merge_jxn_padj_threshold:              0.01
 merge_delta_psi_threshold:             0.1
-merge_jxn_sample_fraction:              0.01  # a junction that's an outlier in > this fraction of a group's samples is dropped
+merge_jxn_sample_fraction:              0.05  # a junction that's an outlier in > this fraction of a group's samples is dropped
 
 # ---------------------------------------------------------------------------
 # Sample-type validation (rules/8_validate_sample_types.smk)

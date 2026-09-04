@@ -387,27 +387,24 @@ def _rule_threads(wc, rule_key):
 
 
 # ---------------------------------------------------------------------------
-# Per-group / per-bed-panel thread & memory overrides, for rules that run
-# once per (bed, sample_type) group or once per bed panel rather than per
-# sample. Set via a top-level `groups:` block in the run config YAML:
+# Per-group / per-bed-panel thread overrides, for rules that run once per
+# (bed, sample_type) group or once per bed panel rather than per sample.
+# Set via a top-level `groups:` block in the run config YAML:
 #
 #   groups:
 #     IEI422_gene_symbols_fibroblasts:            # group-level: bed_id_sample_type
 #       build_group_junction_matrix_threads: 1
-#       build_group_junction_matrix_mem_gb: 40
 #       identify_cohort_junction_outliers_threads: 16
-#       identify_cohort_junction_outliers_mem_gb: 96
-#     IEI422_gene_symbols:                        # bed-level: bare bed_id
-#       validate_sample_types_mem_gb: 300
 #
-# Resolution order: groups.<id>.<rule_key>_<field> in the run config, else
+# Resolution order: groups.<id>.<rule_key>_threads in the run config, else
 # whatever default the rule itself passes in.
+#
+# Memory for these same rules is NOT set here -- it scales automatically
+# with cohort size (samples in the group, or on the bed panel, whichever
+# is relevant to that rule) directly in each rule's `resources:` block.
 # ---------------------------------------------------------------------------
 def _group_threads(group_id, rule_key, default):
     return int(config.get("groups", {}).get(group_id, {}).get((str(rule_key) + '_threads'), default))
-
-def _group_mem_gb(group_id, rule_key, default_gb):
-    return float(config.get("groups", {}).get(group_id, {}).get((str(rule_key) + '_mem_gb'), default_gb))
 
 
 # ---------------------------------------------------------------------------

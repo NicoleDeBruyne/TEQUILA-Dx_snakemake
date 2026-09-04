@@ -269,7 +269,7 @@ rule _10C3_amalgam_build_transcriptome:
         merge_prefix   = lambda wc: _amalgam_group_dir(wc.bed_id, wc.sample_type) + "/annotation/merged",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * max(32, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])),  # AMALGAM's README: ~4.5GB observed, but gencode v44 + larger cohorts (e.g. PBMCs) OOM'd at 8GB flat in practice -- scale with cohort size like _10D/other group-level rules, with a 32GB floor
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(32, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_build_transcriptome.log"
@@ -318,7 +318,7 @@ rule _10C4_amalgam_annotate_orf:
         amalgam_dir = config["amalgam_dir"],
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,  # AMALGAM's README: ~8GB observed
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]) // 8),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_annotate_orf.log"
@@ -356,7 +356,7 @@ rule _10C5_amalgam_quantify_transcripts:
         amalgam_dir = config["amalgam_dir"],
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,  # AMALGAM's README: ~3.5GB observed
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/{sample}_amalgam_quantify_transcripts.log"
@@ -394,7 +394,7 @@ rule _10C6_amalgam_aggregate_matrices:
         script    = workflow.basedir + "/scripts/aggregate_amalgam_matrices.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]) // 8),  # scales with cohort size (~125MB/sample, 8GB floor) now that aggregate_amalgam_matrices.py's two-pass rewrite keeps per-sample memory to a lean numeric count array rather than duplicated id strings
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]) // 8),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_aggregate_matrices.log"
@@ -431,7 +431,7 @@ rule _10D_plot_relative_gene_by_assignment:
         # Each worker parses the full GTF once (genome-wide gene index, not
         # just the BED panel), on top of the per-sample BAM scan -- higher
         # floor than _10A/_10B to account for that shared parsing cost.
-        mem_mb  = lambda wc, attempt: attempt * 2048 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 2 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_assignment_quantification.log"

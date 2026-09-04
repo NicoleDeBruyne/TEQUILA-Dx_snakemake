@@ -27,11 +27,7 @@ rule _8A_build_group_junction_matrix:
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.bed_id, wc.sample_type), "build_group_junction_matrix", 1)
     resources:
         # Scales with group size (the matrix has one column per sample).
-        # 1GB/sample with an 8GB floor by default; override per-group via
-        # `groups: <group_id>: build_group_junction_matrix_mem_gb` if needed.
-        mem_mb  = lambda wc, attempt: max(4096, attempt * 1024 * _group_mem_gb(
-            _group_id_from_ids(wc.bed_id, wc.sample_type), "build_group_junction_matrix",
-            max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])))),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/group_junction_matrix.log"
@@ -66,7 +62,11 @@ rule _8B_validate_sample_types:
         script       = workflow.basedir + "/scripts/validate_sample_type.py",
     threads: lambda wc: _group_threads(wc.bed_id, "validate_sample_types", 1)
     resources:
-        mem_mb  = lambda wc, attempt: max(4096, attempt * 1024 * _group_mem_gb(wc.bed_id, "validate_sample_types", 256)),
+        # Pools every sample_type sharing this BED panel; the reference GTEx
+        # matrices dominate baseline memory use, hence the high floor -- 256GB
+        # covers that regardless of cohort size, and scales up further only
+        # once the local cohort itself exceeds that many samples.
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(256, len(bed_samples(wc.bed_id))),
         runtime = 1440,   # 1 day, matches the old bash wrapper's --time=1-00:00:00
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_validate_sample_types.log"

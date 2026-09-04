@@ -88,8 +88,7 @@ rule _7A_cohort_junction_analysis:
         script      = workflow.basedir + "/scripts/cohort_junction_analysis.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.bed_id, wc.sample_type), "cohort_junction_analysis", config["threads"])
     resources:
-        mem_mb     = lambda wc, threads, attempt: max(4096, attempt * 1024 * _group_mem_gb(
-            _group_id_from_ids(wc.bed_id, wc.sample_type), "cohort_junction_analysis", threads * 4)),
+        mem_mb     = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])),
         runtime    = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/cohort_junction_analysis.log"
@@ -149,8 +148,7 @@ rule _7B_identify_cohort_junction_outliers:
         script    = workflow.basedir + "/scripts/identify_cohort_junction_outliers.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.bed_id, wc.sample_type), "identify_cohort_junction_outliers", config["threads"])
     resources:
-        mem_mb     = lambda wc, threads, attempt: max(4096, attempt * 1024 * _group_mem_gb(
-            _group_id_from_ids(wc.bed_id, wc.sample_type), "identify_cohort_junction_outliers", threads * 4)),
+        mem_mb     = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])),
         runtime    = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/identify_cohort_junction_outliers_{thr_label}.log"

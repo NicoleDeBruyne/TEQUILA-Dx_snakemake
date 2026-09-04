@@ -100,7 +100,7 @@ rule _9B_plot_read_attributes:
         # cohort size like _9A, with a higher floor since this rule is the
         # more memory-hungry of the two (holds every read's length in
         # memory per worker before down-sampling to 100k/group).
-        mem_mb  = lambda wc, attempt: attempt * 2048 * max(8, len(bed_samples(wc.bed_id))),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 2 * max(8, len(bed_samples(wc.bed_id))),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_read_attributes.log"

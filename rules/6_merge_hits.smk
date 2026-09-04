@@ -109,8 +109,7 @@ rule _6A_merge_group_variants:
         script       = workflow.basedir + "/scripts/merge_and_filter_variants.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.bed_id, wc.sample_type), "merge_group_variants", 1)
     resources:
-        mem_mb  = lambda wc, attempt: max(4096, attempt * 1024 * _group_mem_gb(
-            _group_id_from_ids(wc.bed_id, wc.sample_type), "merge_group_variants", 8)),
+        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]) // 8),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_variants.log"
@@ -151,8 +150,7 @@ rule _6B_merge_group_ase:
         script       = workflow.basedir + "/scripts/merge_and_filter_ase_results.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.bed_id, wc.sample_type), "merge_group_ase", 1)
     resources:
-        mem_mb  = lambda wc, attempt: max(4096, attempt * 1024 * _group_mem_gb(
-            _group_id_from_ids(wc.bed_id, wc.sample_type), "merge_group_ase", 8)),
+        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]) // 8),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_ase.log"
@@ -195,8 +193,7 @@ rule _6C_merge_group_junctions:
         script    = workflow.basedir + "/scripts/merge_and_filter_junction_results.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.bed_id, wc.sample_type), "merge_group_junctions", 1)
     resources:
-        mem_mb  = lambda wc, attempt: max(4096, attempt * 1024 * _group_mem_gb(
-            _group_id_from_ids(wc.bed_id, wc.sample_type), "merge_group_junctions", 8)),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(_group_tissue_samples(_group_id_from_ids(wc.bed_id, wc.sample_type), wc.tissue)) // 8),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_junctions_{tissue}.log"
@@ -399,7 +396,7 @@ rule _6F_final_merge:
         merged = _cohort_outdir + "/{bed_id}/output/merged_all_hits.tsv",
     threads: lambda wc: _group_threads(wc.bed_id, "final_merge", 1)
     resources:
-        mem_mb  = lambda wc, attempt: max(4096, attempt * 1024 * _group_mem_gb(wc.bed_id, "final_merge", 2)),
+        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(bed_samples(wc.bed_id)) // 8),
         runtime = 60,
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_final_merge.log"
