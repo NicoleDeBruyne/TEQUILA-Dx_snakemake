@@ -32,9 +32,17 @@ are skipped) in each BAM is then assigned as follows:
     tied with another gene) and shares at least one site. Ties, and reads
     whose sites match no overlapping gene at all, are left unassigned.
   - Unspliced alignment (no 'N' CIGAR op): assigned to a gene only if its
-    aligned span overlaps that gene's exons and no *other* gene's exons.
-    Overlapping the exons of more than one gene, or no gene's exons at all,
-    leaves it unassigned.
+    aligned span overlaps that gene's (merged) exons and no *other* gene's
+    exons, AND is entirely CONTAINED within that one gene's merged exon
+    set -- e.g. a transcript with an exon 100-200 and another with an exon
+    190-250 merge into one 100-250 block, so a read spanning 120-230
+    counts as contained even though no single annotated exon covers that
+    whole range. If the gene is monoexonic (its merged exon set is a
+    single interval), containment is relaxed to plain overlap, since a
+    single-exon gene has no internal intron for a partial overlap to fall
+    into. Overlapping the exons of more than one gene, overlapping none,
+    or overlapping exactly one gene's exons but not being contained within
+    them, all leave the read unassigned.
 
 Unlike --metric count/coverage in quantify_gene_expression.py (which only
 ever see genes on the run's BED panel, since they're computed directly from
@@ -279,6 +287,24 @@ def _overlaps_exons(exons, start, end):
     return False
 
 
+def _contained_in_exons(exons, start, end):
+    """True if [start, end) is entirely contained within a SINGLE interval
+    in the sorted, merged exons list -- e.g. a transcript with an exon
+    100-200 and another with an exon 190-250 merge into one 100-250
+    interval, so a read spanning 120-230 counts as contained even though
+    no single annotated exon covers that whole range. A read that starts
+    inside one merged interval and extends past its end (into a genuine
+    gap between merged exon blocks) is NOT contained, even if it's fully
+    covered by exon sequence from some other transcript not merged into
+    this same block."""
+    for e_start, e_end in exons:
+        if e_start <= start < e_end:
+            return end <= e_end
+        if e_start > start:
+            break
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Per-read splice-site extraction
 # ---------------------------------------------------------------------------
@@ -316,11 +342,22 @@ def _keep_read(r):
 # ---------------------------------------------------------------------------
 
 def assign_sample(sample, bam, genes, gene_bins):
-    """Returns (sample, {gene: assigned_read_count}, stats_dict)."""
+    """Returns (sample, {gene: assigned_read_count}, stats_dict). stats_dict
+    breaks unassigned reads down by the specific reason they were left
+    unassigned (see module docstring for the assignment rules each of these
+    corresponds to), not just a spliced/unspliced assigned/unassigned total."""
 
     counts = defaultdict(int)
-    n_total = n_spliced_assigned = n_spliced_unassigned = 0
-    n_unspliced_assigned = n_unspliced_unassigned = 0
+    stats = {
+        "n_total": 0,
+        "spliced_assigned": 0,
+        "spliced_unassigned_zero_shared": 0,      # >=1 candidate gene, but none shares a splice site
+        "spliced_unassigned_tied": 0,              # >=2 genes tied for the most shared splice sites
+        "unspliced_assigned": 0,
+        "unspliced_unassigned_zero_overlap": 0,    # no candidate gene's exons overlapped
+        "unspliced_unassigned_multi_overlap": 0,   # >=2 candidate genes' exons overlapped
+        "unspliced_unassigned_not_contained": 0,   # exactly 1 gene overlapped, but read not contained in it
+    }
 
     with pysam.AlignmentFile(bam, "rb") as f:
         for read in f.fetch(until_eof=True):
@@ -328,7 +365,7 @@ def assign_sample(sample, bam, genes, gene_bins):
                 continue
             if read.cigartuples is None:
                 continue
-            n_total += 1
+            stats["n_total"] += 1
 
             sites = read_splice_sites(read)
             cands = candidate_genes(read.reference_name, read.reference_start,
@@ -346,30 +383,82 @@ def assign_sample(sample, bam, genes, gene_bins):
                         n_at_best += 1
                 if best_gene is not None and best_count > 0 and n_at_best == 1:
                     counts[best_gene] += 1
-                    n_spliced_assigned += 1
+                    stats["spliced_assigned"] += 1
+                elif best_count == 0:
+                    stats["spliced_unassigned_zero_shared"] += 1
                 else:
-                    n_spliced_unassigned += 1
+                    stats["spliced_unassigned_tied"] += 1
             else:
-                # Unspliced: assign only if the read's span overlaps exactly
-                # one candidate gene's exons.
+                # Unspliced: assign only if the read's span overlaps
+                # exactly one candidate gene's (merged) exons -- the
+                # uniqueness gate -- AND is entirely CONTAINED within that
+                # one gene's merged exon set. A monoexonic gene (its merged
+                # exon set collapses to a single interval) relaxes the
+                # second requirement to plain overlap, since a single-exon
+                # gene has no internal intron to fall outside of the way a
+                # partial-exon overlap on a multiexonic gene would.
                 overlapping = [
                     gene_key for gene_key in cands
                     if _overlaps_exons(genes[gene_key]["exons"], read.reference_start, read.reference_end)
                 ]
-                if len(overlapping) == 1:
-                    counts[overlapping[0]] += 1
-                    n_unspliced_assigned += 1
+                if len(overlapping) == 0:
+                    stats["unspliced_unassigned_zero_overlap"] += 1
+                elif len(overlapping) > 1:
+                    stats["unspliced_unassigned_multi_overlap"] += 1
                 else:
-                    n_unspliced_unassigned += 1
+                    gene_key = overlapping[0]
+                    gene_exons = genes[gene_key]["exons"]
+                    is_monoexonic = len(gene_exons) == 1
+                    if is_monoexonic or _contained_in_exons(gene_exons, read.reference_start, read.reference_end):
+                        counts[gene_key] += 1
+                        stats["unspliced_assigned"] += 1
+                    else:
+                        stats["unspliced_unassigned_not_contained"] += 1
 
-    stats = {
-        "n_total": n_total,
-        "n_spliced_assigned": n_spliced_assigned,
-        "n_spliced_unassigned": n_spliced_unassigned,
-        "n_unspliced_assigned": n_unspliced_assigned,
-        "n_unspliced_unassigned": n_unspliced_unassigned,
-    }
     return sample, dict(counts), stats
+
+
+# Category display order/labels/colors for the assignment-outcome plot below.
+# Greens for assigned, reds/oranges for the specific unassigned reasons --
+# grouped spliced-then-unspliced so the two read types are visually adjacent.
+_STATS_CATEGORIES = [
+    ("spliced_assigned",                   "Spliced: assigned",                        "#2ca25f"),
+    ("spliced_unassigned_zero_shared",     "Spliced: 0 shared splice sites",           "#fc9272"),
+    ("spliced_unassigned_tied",            "Spliced: tied genes",                      "#de2d26"),
+    ("unspliced_assigned",                 "Unspliced: assigned",                      "#66c2a4"),
+    ("unspliced_unassigned_zero_overlap",  "Unspliced: 0 overlapping gene exons",      "#fdae6b"),
+    ("unspliced_unassigned_multi_overlap", "Unspliced: multiple overlapping genes",    "#e6550d"),
+    ("unspliced_unassigned_not_contained", "Unspliced: not entirely within exon",      "#a63603"),
+]
+
+
+def make_assignment_summary_plot(stats_df, out_pdf, title):
+    """One stacked horizontal bar per sample: how many of that sample's
+    alignments landed in each assigned/unassigned-reason category (see
+    _STATS_CATEGORIES). Read counts, not gene counts -- this is about
+    assignment outcome, not the per-gene quantification matrices."""
+    samples = list(stats_df.index)
+    n_samples = len(samples)
+
+    fig_height = max(3, 0.35 * n_samples + 1.5)
+    fig, ax = plt.subplots(figsize=(10, fig_height))
+
+    y_pos = np.arange(n_samples)
+    left = np.zeros(n_samples)
+    for col, label, color in _STATS_CATEGORIES:
+        vals = stats_df[col].to_numpy(dtype=float)
+        ax.barh(y_pos, vals, left=left, height=0.7, color=color, label=label)
+        left += vals
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(samples)
+    ax.invert_yaxis()  # first sample at the top
+    ax.set_xlabel("Alignments")
+    ax.set_title(title)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_pdf)
+    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +535,7 @@ def main():
             sample, gene_counts, stats = f.result()
             raw[sample] = gene_counts
             all_stats[sample] = stats
-            print("Finished: " + sample + " (" + str(stats["n_spliced_assigned"] + stats["n_unspliced_assigned"]) +
+            print("Finished: " + sample + " (" + str(stats["spliced_assigned"] + stats["unspliced_assigned"]) +
                   "/" + str(stats["n_total"]) + " alignments assigned)")
 
     # Every GTF gene that received >=1 assigned read anywhere in the cohort.
@@ -483,6 +572,23 @@ def main():
     plot_outdir = os.path.dirname(args.outprefix)
     make_gene_boxplots(cptm_df, plot_outdir, metric_label)
     print("Saved per-gene boxplots to: " + plot_outdir)
+
+    # Per-sample breakdown of assigned vs. unassigned-and-why (see
+    # _STATS_CATEGORIES), one row per sample, columns in the same order the
+    # plot stacks them in -- ordered by the sample order in the mapping
+    # file, same convention as the gene matrices above.
+    stats_df = pd.DataFrame(all_stats).T
+    stats_df = stats_df.reindex(df["sample"].tolist())
+    stats_df.index.name = "sample"
+    stats_df = stats_df[["n_total"] + [col for col, _, _ in _STATS_CATEGORIES]]
+
+    out_stats = args.outprefix + "_read_outcomes.tsv"
+    stats_df.to_csv(out_stats, sep="\t")
+    print("Saved per-sample assignment-outcome stats: " + out_stats)
+
+    out_stats_pdf = args.outprefix + "_read_outcomes.pdf"
+    make_assignment_summary_plot(stats_df, out_stats_pdf, args.title + " - read assignment outcomes")
+    print("Saved read-assignment outcome plot: " + out_stats_pdf)
 
 
 if __name__ == "__main__":

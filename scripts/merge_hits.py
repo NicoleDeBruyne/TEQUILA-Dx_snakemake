@@ -234,16 +234,28 @@ def load_variant_df(path):
     # is grouped into each of those genes' hit rows individually.
     variant_df['gene'] = variant_df['gene'].str.split(',')
     variant_df = variant_df.explode('gene')
-    # Raw, phase-preserving copy -- 'name' is "{sample}_{caller}" (see
-    # compile_variants.py's --vcf-file-names), so this identifies which
-    # caller reported this specific GT/PS pair. resolve_phase() below
-    # needs the untouched '|' separator and caller identity to determine
-    # trans/cis; keep this BEFORE the cosmetic canonicalization that
-    # follows, which is for the human-readable variant_GT_{caller} display
-    # columns only and would otherwise destroy phase information.
+    # Raw copy of GT before any canonicalization -- 'name' is
+    # "{sample}_{caller}" (see compile_variants.py's --vcf-file-names), so
+    # this identifies which caller reported this specific GT/PS pair.
+    # resolve_phase() below needs the untouched original GT + caller
+    # identity to determine trans/cis, and is kept separate from the
+    # working 'GT' column so a future change to that column's display
+    # canonicalization can't silently affect resolve_phase()'s input.
     variant_df['_caller'] = variant_df['name'].apply(_caller_from_name)
+    # Only collapse allele order for genuinely UNPHASED genotypes ('/') --
+    # 0/1 and 1/0 are the same unordered call for an unphased GT, so
+    # canonicalize those to one consistent display form. A phased genotype
+    # ('|') has a real, caller-determined haplotype order -- 0|1 and 1|0
+    # are NOT the same call (they place the ALT allele on the opposite
+    # haplotype), so those are left untouched. This column (not just
+    # _raw_GT) now also feeds the variant_GT_{caller} display columns via
+    # _build_gt_by_caller() below, so phase is visible in the final output,
+    # not just used internally by resolve_phase().
     variant_df['_raw_GT'] = variant_df['GT']
-    variant_df['GT'] = variant_df['GT'].str.replace('|', '/', regex=False).str.replace('1/0', '0/1', regex=False)
+    variant_df['GT'] = variant_df['GT'].where(
+        variant_df['GT'].str.contains('|', regex=False),
+        variant_df['GT'].str.replace('1/0', '0/1', regex=False),
+    )
     variant_df['variant_ID'] = variant_df.apply(lambda x: f"{x.chrom}-{x.pos}-{x.ref}-{x.alt}", axis=1)
     # ANNOVAR only ever populates one of these two per variant (AAChange.refGene
     # for exonic variants with a codon change to report, GeneDetail.refGene for
@@ -302,9 +314,63 @@ def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
     '{prefix}bulk_{suffix}' per entry in delta_cols, etc. Used for both
     the GTEx-comparison junction_df (prefix='', delta_cols=('delta_PSI',))
     and the cohort-comparison cohort_junction_df (prefix='cohort_',
-    delta_cols=all six metrics)."""
+    delta_cols=all six metrics).
+
+    If df has a 'gtex_tissue' column (see merge_group_hits.py, which tags
+    every row with which GTEx tissue it was compared against before
+    concatenating across tissues), rows for the SAME (gene, phasing,
+    junction) that came from different tissue comparisons are collapsed
+    into one entry per junction before joining -- otherwise a junction
+    that's an outlier against e.g. both GTEx fibroblasts and GTEx brain
+    would appear twice in bulk_jxns (once per tissue), duplicating the
+    junction string itself rather than the semicolon-separator actually
+    separating distinct junctions. jxn_coverage/annotation are computed
+    purely from the sample's own alignment data / a GTF lookup -- neither
+    depends on which GTEx tissue was compared against, so a single value
+    is kept for those. delta_PSI/event/sample_count, by contrast, ARE each
+    computed relative to that specific tissue's own reference distribution
+    or outlier set, so every contributing tissue's value is preserved,
+    each tagged "value (tissue)", rather than picking one or silently
+    duplicating the whole row."""
+    has_tissue = 'gtex_tissue' in df.columns
     tiers = {}
     for phasing, sep in (('bulk', ';'), ('hap1', ','), ('hap2', ',')):
+        sub = df[df['phasing'] == phasing]
+
+        if has_tissue:
+            if len(sub):
+                collapsed_rows = []
+                for (gene, junction), g in sub.groupby(['gene', 'junction'], sort=False):
+                    g = g.sort_values('gtex_tissue')
+                    tissues = g['gtex_tissue'].astype(str)
+
+                    # Tissue-independent -- same underlying value regardless
+                    # of which tissue this row came from, so just take one.
+                    # (If they genuinely disagree, that's a real data
+                    # anomaly worth surfacing rather than silently masking.)
+                    if g['jxn_coverage'].astype(str).nunique() > 1:
+                        print(f"WARNING: jxn_coverage disagrees across GTEx tissues for "
+                              f"{gene} {junction} ({dict(zip(tissues, g['jxn_coverage']))}) -- using the first value.")
+                    if g['annotation'].astype(str).nunique() > 1:
+                        print(f"WARNING: annotation disagrees across GTEx tissues for "
+                              f"{gene} {junction} ({dict(zip(tissues, g['annotation']))}) -- using the first value.")
+                    row = {
+                        'gene': gene,
+                        'junction': junction,
+                        'jxn_coverage': g['jxn_coverage'].iloc[0],
+                        'annotation': g['annotation'].iloc[0],
+                    }
+                    # Tissue-dependent -- every contributing tissue's value
+                    # is kept, tagged, rather than collapsed to one.
+                    for col in delta_cols:
+                        row[col] = ' '.join(f"{v} ({t})" for v, t in zip(g[col], tissues))
+                    row['event'] = ' '.join(f"{v} ({t})" for v, t in zip(g['event'], tissues))
+                    row['sample_count'] = ' '.join(f"{v} ({t})" for v, t in zip(g['sample_count'], tissues))
+                    collapsed_rows.append(row)
+                sub = pd.DataFrame(collapsed_rows)
+            else:
+                sub = sub.drop(columns=['gtex_tissue'])
+
         agg_kwargs = {
             prefix + phasing + '_jxns':         ('junction', lambda x, sep=sep: sep.join(map(str, x))),
             prefix + phasing + '_jxn_coverage': ('jxn_coverage', lambda x, sep=sep: sep.join(map(str, x))),
@@ -316,8 +382,7 @@ def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
         agg_kwargs[prefix + phasing + '_jxn_event']      = ('event', lambda x, sep=sep: sep.join(map(str, x)))
         agg_kwargs[prefix + phasing + '_jxn_nsamples']   = ('sample_count', lambda x, sep=sep: sep.join(map(str, x)))
         tiers[phasing] = (
-            df[df['phasing'] == phasing]
-                .sort_values('junction')
+            sub.sort_values('junction')
                 .groupby('gene')
                 .agg(**agg_kwargs)
                 .reset_index()
@@ -433,6 +498,8 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
 
     # Add a column to indicate whether a gene has strong, moderate, weak, splicing dysregulation
 
+    _FLOAT_TOKEN_RE = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
+
     def max_deltas(row, prefix=''):
         """ Extract the max |delta| across all populated delta metrics for a gene, per phasing tier """
         def parse_vals(s):
@@ -443,17 +510,34 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
                 v = v.strip()
                 if not v:
                     continue
-                try:
-                    vals.append(float(v))
-                except ValueError:
-                    # Non-numeric sentinel from rules/7_cohort_junction_analysis.smk's
-                    # identify_cohort_junction_outliers.py -- "low_n" (too few
-                    # cohort samples with good coverage), "error" (beta_binomial
-                    # fit failed), or "no_variance" (modified_zscore: zero
-                    # variance in the reference distribution). These mean "not
-                    # statistically testable", not a numeric value -- skip
-                    # rather than crash, same as a blank/missing entry.
-                    continue
+                # Each [,;]-split chunk is one junction's value(s) for this
+                # delta metric -- for the GTEx-comparison columns this is no
+                # longer always a bare number: build_phased_junction_df now
+                # tags every value with which GTEx tissue it came from (e.g.
+                # "0.24 (wholeblood)", or "0.11 (brain) 0.11 (fibroblasts)"
+                # if more than one tissue flagged the same junction), so
+                # calling float() on the whole chunk directly would always
+                # raise here. Extract every numeric token in the chunk
+                # instead -- this also naturally still handles the
+                # untagged, comma/semicolon-only case (cohort_* columns,
+                # which have no per-tissue axis) since a bare number is
+                # itself a single matching token.
+                for token in _FLOAT_TOKEN_RE.findall(v):
+                    try:
+                        vals.append(float(token))
+                    except ValueError:
+                        # Shouldn't happen given the regex already
+                        # constrains to float-shaped tokens, but skip
+                        # rather than crash if it somehow does.
+                        continue
+                # Non-numeric sentinels (from rules/7_cohort_junction_analysis.smk's
+                # identify_cohort_junction_outliers.py: "low_n" -- too few
+                # cohort samples with good coverage, "error" -- beta_binomial
+                # fit failed, "no_variance" -- modified_zscore found zero
+                # variance in the reference distribution) contain no digits
+                # at all, so the regex above naturally finds no tokens and
+                # contributes nothing for them -- same "not statistically
+                # testable, skip rather than crash" behavior as before.
             return vals
 
         def max_for_phasing(phasing):
@@ -497,7 +581,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         # column with that in mind.
         hit_df['cohort_outlier_junction'] = hit_df.apply(lambda row: inspect_row(row, prefix='cohort_'), axis=1)
     else:
-        hit_df['cohort_outlier_junction'] = '.'
+        hit_df['cohort_outlier_junction'] = 'None'
 
     # Fill missing values
     # Cast to object before fillna: on pandas >=3.0, filling a still-numeric
@@ -592,7 +676,10 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         for variant_id, sub in gene_variant_rows.groupby('variant_ID'):
             clnsig_values = sub['CLNSIG'].astype(str)
             is_pathogenic = clnsig_values.str.contains(r'Pathogenic|Likely_pathogenic', regex=True).any()
-            is_homozygous = (sub['GT'] == '1/1').any()
+            # '1/1' or the phased '1|1' -- phased homozygous-ALT calls no
+            # longer get collapsed to '/' above, so both forms need
+            # checking here now.
+            is_homozygous = sub['GT'].isin(['1/1', '1|1']).any()
             # CLNSIG is a per-variant (not per-caller) annotation -- every
             # caller row for this variant carries the same value (see
             # compile_variants.py's extract_CLNSIG), so any row is

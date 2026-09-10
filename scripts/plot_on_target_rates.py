@@ -10,7 +10,6 @@ Adapted from a script pulled from Github 2026.04.08.
 import argparse
 import os
 import concurrent.futures
-import math
 
 import pandas as pd
 import pysam
@@ -122,7 +121,10 @@ def main():
     color_dict = {g: colors[i % len(colors)] for i, g in enumerate(groups)} if groups else {}
     bar_colors = df['group'].map(color_dict).fillna('#6997B9')  # blue
 
-    width = min(30, 3 + 3 * math.log2(max(len(df), 1)))
+    # Linear scaling: reserve a fixed amount of horizontal space per sample so
+    # labels don't overlap, with a floor for small cohorts. No upper cap —
+    # large cohorts (e.g. AGS390 has ~200 samples) need a genuinely wide PDF.
+    width = max(10, 0.22 * len(df))
 
     # -------- FIGURE 1 --------
     fig, ax = plt.subplots(2, figsize=(width, 10))

@@ -419,6 +419,8 @@ rule _10D_plot_relative_gene_by_assignment:
         matrix       = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix.tsv",
         matrix_raw   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_raw.tsv",
         matrix_raw_all_genes = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_raw_all_genes.tsv",
+        assignment_stats     = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_read_outcomes.tsv",
+        assignment_stats_pdf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_read_outcomes.pdf",
     params:
         names     = lambda wc: _quoted(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]),
         bams      = lambda wc: _quoted([SAMPLES[s]["bam"] for s in GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]]),

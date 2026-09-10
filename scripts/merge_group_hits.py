@@ -162,7 +162,16 @@ def main():
     per_tissue_dfs = []
     for tissue, jxn_file in zip(args.tissues, args.junction_files):
         if os.path.isfile(jxn_file):
-            per_tissue_dfs.append(merge_hits.load_junction_df(jxn_file))
+            tissue_df = merge_hits.load_junction_df(jxn_file)
+            # Tag every row with which GTEx tissue it was compared against,
+            # BEFORE concatenating across tissues -- the same physical
+            # junction can legitimately be an outlier against more than one
+            # GTEx reference tissue, and merge_hits.build_phased_junction_df
+            # needs this tag to collapse those into one entry per junction
+            # (rather than one per tissue) while still showing which
+            # tissue(s) each delta_PSI/event/sample_count value came from.
+            tissue_df['gtex_tissue'] = tissue
+            per_tissue_dfs.append(tissue_df)
         else:
             print(f"WARNING: No junction hits file found for tissue {tissue} at {jxn_file}")
     junction_df = (pd.concat(per_tissue_dfs, ignore_index=True) if per_tissue_dfs

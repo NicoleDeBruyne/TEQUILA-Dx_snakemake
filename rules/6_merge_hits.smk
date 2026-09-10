@@ -208,7 +208,6 @@ rule _6C_merge_group_junctions:
             --delta-PSI-threshold {params.delta_psi_thr} \\
             --event-types exon_skipping exon_inclusion alt_ss1 alt_ss2 \\
             --sample-number-threshold {params.n} \\
-            --filter-by-cohort-IQR \\
             --plot \\
             --title "{params.group_id}: Number of Genes with Outlier Junctions by Sample" \\
         2>&1 | tee {log}
@@ -409,6 +408,36 @@ rule _6F_final_merge:
 
 
 # ---------------------------------------------------------------------------
+# 6F2. Simplified companion to merged_all_hits.tsv -- core columns only,
+#    plus every *_jxns column merged and deduplicated into one "jxns"
+#    column. Dead-end branch (nothing downstream consumes it), so it must
+#    be requested explicitly in the Snakefile's final-target list, same as
+#    _6E's PDFs above.
+# ---------------------------------------------------------------------------
+rule _6F2_simplify_all_hits:
+    input:
+        merged = _cohort_outdir + "/{bed_id}/output/merged_all_hits.tsv",
+    output:
+        simplified = _cohort_outdir + "/{bed_id}/output/merged_all_hits_simplified.tsv",
+    params:
+        script = workflow.basedir + "/scripts/simplify_all_hits.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(4, len(bed_samples(wc.bed_id)) // 16),
+        runtime = 30,
+    log:
+        _cohort_outdir + "/{bed_id}/logs/{bed_id}_simplify_all_hits.log"
+    shell:
+        """
+        mkdir -p $(dirname {log})
+        python -u {params.script} \\
+            --infile  {input.merged} \\
+            --outfile {output.simplified} \\
+        2>&1 | tee {log}
+        """
+
+
+# ---------------------------------------------------------------------------
 # 6G. UpSet-style boxplot of merged_all_hits.tsv's four hit categories
 #    (variant, ASE, outlier_junction, cohort_outlier_junction): for every
 #    non-empty combination of those categories, a boxplot of "how many
@@ -423,7 +452,7 @@ rule _6G_plot_hits_upset:
     input:
         all_hits = _cohort_outdir + "/{bed_id}/output/merged_all_hits.tsv",
     output:
-        pdf = _cohort_outdir + "/{bed_id}/output/hits_upset_plot.pdf",
+        pdf_density = _cohort_outdir + "/{bed_id}/output/hits_upset_density.pdf",
         tsv = _cohort_outdir + "/{bed_id}/output/hits_upset_counts.tsv",
     params:
         samples      = lambda wc: bed_samples(wc.bed_id),

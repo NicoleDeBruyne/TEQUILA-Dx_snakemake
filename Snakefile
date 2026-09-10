@@ -452,15 +452,17 @@ def all_outputs():
     if flag("merge_hits"):
         # Requesting _6G's output pulls in _6A-_6D/_6F (everything _6G
         # actually depends on, including merged_all_hits.tsv). It does NOT
-        # pull in _6E_plot_group_hits: that rule's four PDFs are a dead-end
-        # branch off all_hits.tsv -- nothing downstream (_6F/_6G) consumes
-        # them, so they must be requested explicitly here or Snakemake
-        # never builds them. Which of _6D1/_6D2 the _6G branch actually
-        # runs is controlled by config['merge_hits_include_cohort_junctions'],
-        # not here -- see rules/6_merge_hits.smk's module docstring.
+        # pull in _6E_plot_group_hits or _6F2_simplify_all_hits: those are
+        # dead-end branches off all_hits.tsv/merged_all_hits.tsv --
+        # nothing downstream (_6F/_6G) consumes them, so they must be
+        # requested explicitly here or Snakemake never builds them. Which
+        # of _6D1/_6D2 the _6G branch actually runs is controlled by
+        # config['merge_hits_include_cohort_junctions'], not here -- see
+        # rules/6_merge_hits.smk's module docstring.
         for bid in BED_GROUPS:
             bod = bed_outdir(bid)
-            outs.append((str(bod) + '/hits_upset_plot.pdf'))
+            outs.append((str(bod) + '/hits_upset_density.pdf'))
+            outs.append((str(bod) + '/merged_all_hits_simplified.tsv'))
         for gid in GROUPS:
             god = group_outdir(gid)
             # One representative file per category is enough to pull the
