@@ -1,75 +1,68 @@
 # RNA-Dx Snakemake Pipeline
 
-*(repo name: `TEQUILA-Dx_snakemake`)*
-
-A Snakemake pipeline for diagnostic analysis of long-read RNA-seq data: multi-caller variant
-calling, read phasing, allele-specific expression (ASE) outlier detection, and splice-junction
-outlier analysis, with cross-sample merging into a candidate diagnostic hit list annotated
-against OMIM.
+A Snakemake pipeline for diagnostic analysis of long-read RNA-seq data. It calls variants with multiple tools, 
+phases reads, finds allele-specific expression (ASE) outliers, and finds splice-junction outliers. 
+Results from all samples are then merged into one candidate diagnostic hit list.
 
 ## What it does
 
-For each sample (a long-read RNA-seq BAM), the pipeline:
+For each sample (a long-read RNA-seq BAM file), the pipeline:
 
-1. **Calls variants** with four independent callers: [longcallR](https://github.com/huangnengCSU/longcallR), [NanoTS](https://github.com/Xinglab/NanoTS), [Clair3-RNA](https://github.com/HKU-BAL/Clair3-RNA), and [DeepVariant](https://github.com/google/deepvariant).
-2. **Compiles variants** (`compile_variants`) — merges the four VCFs and annotates with ANNOVAR, gnomAD allele frequency, ClinVar significance, CADD, and SpliceAI.
-3. **Phases reads** (`phase_reads`) — builds a merged VCF from all callers and runs WhatsHap-based per-gene phasing, producing per-haplotype BAMs and a gene→BAM mapping file used downstream.
-4. **Detects ASE outliers** (`ase_analysis`) — binomial test for allele-specific expression per gene from the phased haplotype counts.
-5. **Detects splice-junction outliers**, two ways:
-   - `junction_analysis` — per-sample junction usage vs. **GTEx reference tissue** matrices (beta-binomial test).
-   - `cohort_junction_analysis` — per-sample junction usage vs. the **rest of the cohort's own bulk BAMs** (rather than GTEx).
-6. **Validates sample types** (`validate_sample_types`) — PSI-based check of each sample's tissue identity against GTEx reference tissues, to flag potential sample mislabeling.
-7. **Merges hits across samples** (`merge_hits`) — for each (BED panel, sample type) group, filters and merges variant / ASE / junction hits across samples, annotates against a bundled **OMIM** gene→phenotype table, and concatenates everything into a final `merged_all_hits.tsv` per panel.
+1. **Calls variants** with four independent tools: [longcallR](https://github.com/huangnengCSU/longcallR), [NanoTS](https://github.com/Xinglab/NanoTS), [Clair3-RNA](https://github.com/HKU-BAL/Clair3-RNA), and [DeepVariant](https://github.com/google/deepvariant).
+2. **Compiles variants** (`compile_variants`) — combines the four VCFs into one and adds annotations from gnomAD, ClinVar,  ANNOVAR, CADD, and SpliceAI.
+3. **Phases reads** (`phase_reads`) — Produces one BAM file per haplotype (where possible) and a table mapping each gene to its phased BAM files, used in later steps.
+4. **Finds ASE outliers** (`ase_analysis`) — runs a binomial test per gene on the phased haplotype read counts to detect allele-specific expression.
+5. **Finds splice-junction outliers vs. GTEx** (`junction_analysis`) — compares each sample's junction usage to **GTEx reference tissue** data, using a beta-binomial test.
+6. **Merges hits across samples** (`merge_hits`) — for each (BED panel, sample type) group, filters and combines the variant, ASE, and junction results into one final `merged_all_hits.tsv` file per panel.
+7. **Finds splice-junction outliers vs. cohort** (`cohort_junction_analysis`) — compares each sample's junction usage to **the rest of the cohort's own samples**, instead of GTEx.
+8. **Checks cohort-wide QC** (`cohort_qc`) — for each BED panel: mapping/on-target rates, read-length distributions, a "full-length ratio" per gene, and a sample-identity check
+9. **Quantifies gene expression** (`quantify_genes`) — for each (BED panel, sample type) group: approximate relative gene expression by read count, by peak coverage, by splice-site-sharing assignment, and by isoform-aware quantification (AMALGAM).
+
 
 ## Repository structure
 
 ```
 TEQUILA-Dx_snakemake/
-├── Snakefile                          # Multi-sample orchestration: loads run config, builds
-│                                       # sample/group wildcards, defines rule `all`
+├── Snakefile 
 ├── config/
-│   └── config.yaml                    # Default paths, resource DBs, thresholds, stage on/off flags
-├── profile/                            # Snakemake 7 SLURM cluster profile
-│   ├── config.yaml                    # --profile settings (jobs, latency-wait, etc.)
-│   ├── slurm-submit.py                # SLURM job submission
-│   ├── slurm-status.py                # SLURM job status polling
-│   ├── slurm-jobscript.sh             # Per-job wrapper (activates conda env, etc.)
+│   └── config.yaml                    # Default paths, resource databases, thresholds, and on/off switches for each stage
+├── profile/                           # SLURM cluster profile for Snakemake 7
+│   ├── config.yaml 
+│   ├── slurm-submit.py                # Submits jobs to SLURM
+│   ├── slurm-status.py                # Checks SLURM job status
+│   ├── slurm-jobscript.sh             # Wrapper script run for each job (activates conda env, etc.)
 │   └── slurm_utils.py
-├── rules/                              # One .smk file per pipeline stage (included by Snakefile)
-│   ├── 1_call_variants.smk            # 4 independent callers: longcallR, NanoTS, Clair3-RNA, DeepVariant
+├── rules/   
+│   ├── 1_call_variants.smk 
 │   ├── 2_compile_variants.smk
 │   ├── 3_phase_reads.smk
 │   ├── 4_ase_analysis.smk
 │   ├── 5_junction_analysis.smk
 │   ├── 6_merge_hits.smk
 │   ├── 7_cohort_junction_analysis.smk
-│   └── 8_validate_sample_types.smk
-├── scripts/                            # Python scripts invoked by the rules above
+│   ├── 8_cohort_qc.smk                # On-target rates, read attributes, full-length ratio, sample-identity check
+│   └── 9_quantify_genes.smk           # Gene expression matrices (by count, coverage, assignment, and AMALGAM)
+├── scripts/                            # Python scripts called by the rules above
 ├── resources/
-│   └── omim_data/OMIM.tsv             # Bundled OMIM gene → phenotype/inheritance table
-│                                       # (other resources — genome, gnomAD, ClinVar, CADD,
-│                                       # GTEx, etc. — are downloaded by setup.sh, not bundled)
-├── environment.yaml                    # Main conda env (`RNA-Dx`) — Snakemake 7.x, used by
-│                                       # every rule except compile_variants
-├── environment_compile_variants.yaml   # Dedicated conda env (`RNA-Dx-compile-variants`) —
-│                                       # Snakemake ≥8.25.2, used only by the compile_variants
-│                                       # rule (needed for CADD's own internal snakemake call)
-└── setup.sh                            # Builds both conda envs and downloads/prepares all
-                                        # reference data under resources/
+│   └── omim_data/OMIM.tsv              # Included OMIM gene -> phenotype/inheritance table
+│                                       # (other reference data is downloaded by setup.sh)
+├── environment.yaml                    # Main conda environment (`RNA-Dx`), Snakemake 7.x,
+├── environment_compile_variants.yaml   # Separate conda environment (`RNA-Dx-compile-variants`),
+│                                       # Snakemake >= 8.25.2, used only by the compile_variants
+│                                       # rule (because CADD runs Snakemake 8.x internally)
+└── setup.sh                            # Builds both conda environments and downloads/prepares all reference data into resources/
 ```
 
 ## Requirements
 
-- Linux, SLURM cluster (the bundled `profile/` targets SLURM specifically)
-- conda or mamba (mamba preferred — `setup.sh` uses it automatically if present)
-- Singularity/Apptainer and/or Docker, for the containerized callers (NanoTS, Clair3-RNA, DeepVariant)
-- Substantial disk space for reference data — gnomAD alone is ~300GB+; CADD annotations/prescored
-  data can add several hundred GB more (see `setup.sh` for what's downloaded and how to skip pieces)
-- Free registrations required for two resources that `setup.sh` **cannot** auto-download:
-  - **ANNOVAR** (academic registration)
-  - **SpliceAI precomputed scores** (Illumina BaseSpace account) — optional; the pipeline runs
-    SpliceAI live via the bioconda `spliceai` package by default and only falls back to these
-    precomputed files if that fails
+- Linux, SLURM cluster (the included `profile/` is written for SLURM specifically)
+- conda or mamba (mamba is preferred — `setup.sh` uses it automatically if it's installed)
+- Singularity/Apptainer and/or Docker, for the containerized tools (NanoTS, Clair3-RNA, DeepVariant)
+- A lot of disk space for reference data — gnomAD 596GB, CADD 462GB, SpliceAI 91GB
+  data can add several hundred GB more (see `setup.sh` for what gets downloaded and how to skip parts of it)
+- Free registration is required for two resources that `setup.sh` **cannot** download automatically:
+  - **ANNOVAR** (requires academic registration)
+  - **SpliceAI precomputed scores** (requires an Illumina BaseSpace account)
 
 ## Setup
 
@@ -79,35 +72,27 @@ cd TEQUILA-Dx_snakemake
 ./setup.sh
 ```
 
-`setup.sh` is idempotent (safe to re-run — it skips anything already present) and will:
+`setup.sh` can be run more than once safely — it skips anything that's already set up. It will:
 - Create the `envs/conda_env` and `envs/conda_env_compile_variants` conda environments
-- Download the GENCODE v44 GRCh38 genome + annotation
-- Clone NanoTS and confirm longcallR is installed
+- Download the GENCODE v44 GRCh38 genome and annotation
+- Clone NanoTS and check that longcallR is installed via conda
 - Build per-sample-type GTEx junction count matrices (v11)
-- Download gnomAD v4.1 genomes + ClinVar
+- Download gnomAD v4.1 genomes and ClinVar variant annotations
 - Clone and install CADD-scripts v1.7.1 (and generate `CADD_wrapper.sh`)
-- Check for ANNOVAR and SpliceAI precomputed scores, printing manual setup instructions if missing
-- Verify the bundled `resources/omim_data/OMIM.tsv` is present
+- Check whether ANNOVAR and the SpliceAI precomputed scores are present, and print manual setup instructions if not
+- Check that the included `resources/omim_data/OMIM.tsv` file is present
 
-Check the script's final output for any `MISSING:` sections before running the pipeline, and see
-`resources/.setup_logs/` for per-step logs.
-
-Reference-data and environment paths default to relative paths under `resources/` and `envs/`
-inside the pipeline directory (see `config/config.yaml`), so the whole folder is self-contained
-and relocatable. Point any of them at an absolute path instead if you want to share a copy across
-multiple pipeline checkouts. `gnomad_base`, `clinvar_vcf`, and `cadd_script` can each also be set
-to the literal value `"remote"` to query the public HTTPS source directly instead of a local copy.
+By default, reference-data and environment paths are relative, pointing at `resources/` and `envs/`
+You can set any of these paths to an absolute path instead. `gnomad_base`,
+`clinvar_vcf`, and `cadd_script` can each also be set to the literal value `"remote"`, which tells
+the pipeline to query the public HTTPS source directly instead of using a local copy.
 
 ## Configuration
 
-`config/config.yaml` holds pipeline-wide defaults: reference/database paths, stage on/off flags
-(`longcallr`, `nanots`, `clair3_rna`, `deepvariant`, `compile_variants`, `phase_reads`,
-`ase_analysis`, `junction_analysis`, `cohort_junction_analysis`, `merge_hits`,
-`validate_sample_types`), and filtering thresholds (gnomAD AF, CADD, SpliceAI, ASE p-adj,
-splice-junction padj/delta-PSI, etc.).
+`config/config.yaml` holds the pipeline's global defaults: reference/database paths, on/off switches for each stage, and filtering thresholds
 
-**Per-run sample manifest:** each run additionally needs a YAML file (path passed via
-`--config run=<path>`) defining the samples for that run:
+**Per-run sample list:** each run also needs its own YAML file listing the samples for that run
+(its path is passed via `--config run=<path>`):
 
 ```yaml
 output_dir: "/path/to/output"   # or pass via --config output_dir=<path>
@@ -116,70 +101,52 @@ samples:
   sample1:
     bam: "/path/to/sample1.bam"
     bed: "/path/to/panel.bed"
-    tissues: ["fibroblasts", "wholeblood"]   # GTEx reference tissue(s) to compare against
-    sample_type: "fibroblasts"               # used for grouping in the merge_hits stage
-    # outdir: "/path/to/sample1_output"      # optional: overrides the default
-                                              # {output_dir}/samples/sample1/output for this sample
+    tissues: ["fibroblasts", "wholeblood"]   # GTEx reference tissue(s) to compare this sample against
+    sample_type: "fibroblasts" 
+    # outdir: "/path/to/sample1_output"      # optional: use this instead of the default {output_dir}/samples/sample1/output for this sample
 ```
 
-Samples sharing the same `bed` panel and `sample_type` are grouped together for cross-sample
-merging (`rules/6_merge_hits.smk`) and cohort-level analyses.
+Samples that share the same `bed` panel and `sample_type` are grouped together for cohort-level analyses.
 
 ## Usage
 
-Dry run:
+Dry run (shows what would happen without actually running anything):
 ```bash
 conda activate envs/conda_env
 snakemake -n --config run=/path/to/run_config.yaml
 ```
 
-Run on a SLURM cluster via the bundled profile:
+Run on a SLURM cluster using the included profile:
 ```bash
 snakemake --profile profile/ --use-conda --config run=/path/to/run_config.yaml
 ```
 
-Override any `config.yaml` value at the command line, e.g. to disable a stage:
+Any `config.yaml` value can be overridden on the command line, for example to turn a stage off:
 ```bash
 snakemake --profile profile/ --config run=/path/to/run_config.yaml merge_hits=False
 ```
 
-> Note: several comments in the Snakefile/config reference a `submit_snakemake.sh` wrapper
-> (which would generate the per-run YAML and inject `output_dir` automatically) — that script
-> isn't included in this copy of the repo, so run configs currently need to be written by hand
-> as shown above.
-
 ## Output
 
-Everything lands under the single `output_dir` given in the run config:
+Everything is written under the single `output_dir` set in the run config:
 
 ```
 {output_dir}/
-  samples/{sample}/output/...       -- per-sample stage outputs (variant_calling, phased_reads,
-                                        ase_analysis, junction_analysis)
-  samples/{sample}/logs/...         -- per-sample stage logs
+  samples/{sample}/output/...       -- each sample's own results (variant_calling, phased_reads, ase_analysis, junction_analysis)
+  samples/{sample}/logs/...         -- each sample's own logs
   cohort/{bed_id}/
     output/
-      validate_sample_types/        -- sample-type validation plots (across all sample_types on this panel)
-      cohort_qc/                    -- on-target-rate / read-attribute QC plots (across all sample_types on this panel)
-      merged_all_hits.tsv           -- the final diagnostic output for this BED panel, annotated
-                                        with OMIM phenotype and inheritance information
+      validate_sample_types/        -- sample-identity check plots (covers all sample types on this panel)
+      cohort_qc/                    -- QC plots for on-target rate / read attributes (covers all sample types on this panel)
+      merged_all_hits.tsv           -- the final diagnostic result for this BED panel
       sample_types/{sample_type}/
-        output/...                  -- per-group merged_variant_calling, merged_ase_analysis,
-                                        merged_junction_analysis, merged_hits, cohort_junction_analysis,
-                                        gene_quantification (the "merged_" prefix distinguishes these
-                                        from the per-sample folders of the same base name)
-        logs/...                    -- per-group logs
-    logs/...                        -- bed-panel-level logs (validate_sample_types, cohort_qc, final merge) --
-                                        a sibling of output/ above, not nested inside it
+        output/...                  -- results for this group of samples: merged_variant_calling,
+                                        merged_ase_analysis, merged_junction_analysis, merged_hits,
+                                        cohort_junction_analysis, gene_quantification
+        logs/...                    -- logs for this group
+    logs/...                        -- logs for the whole BED panel
 ```
 
-Every output-producing directory at every level has a sibling `logs/` directory one level up from it
-(samples/{sample}/, cohort/{bed_id}/, and cohort/{bed_id}/output/sample_types/{sample_type}/ each follow
-this same output/ + logs/ sibling pattern).
-
-A sample's `outdir` can be overridden per-sample in the run config (see Configuration above);
-its `logs/` directory always sits next to whatever that resolves to.
-
-## License
-
-[Add license information.]
+Every output folder of results has a matching `logs/` folder next to it, one level up:
+this applies at the sample level (`samples/{sample}/`), the BED-panel level (`cohort/{bed_id}/`),
+and the sample-type group level (`cohort/{bed_id}/output/sample_types/{sample_type}/`).

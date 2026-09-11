@@ -1,32 +1,5 @@
-# ---------------------------------------------------------------------------
 # RNA-Dx Pipeline Configuration
-# Edit paths and thresholds to match your environment. Boolean flags can be
-# overridden at the CLI with --config key=True/False.
-# See docs/general.md for the full stage layout.
-# ---------------------------------------------------------------------------
 
-# Run manifest, injected at runtime by submit_snakemake.sh. Each sample
-# entry provides: bam, bed, tissues, sample_type, and optionally an outdir
-# override (default: {output_dir}/samples/{sample}/output).
-#
-# The same run manifest can also define named cohorts for rules 6-9
-# (merge_hits, cohort_junction_analysis, cohort_qc, quantify_genes) to run
-# over, in addition to "cohort_all" (always runs, always every sample):
-#
-#   cohorts:
-#     cohort_subset:
-#       - SAMPLE_A
-#       - SAMPLE_C
-#
-# Each named cohort gets its own sibling output directory
-# ({output_dir}/cohort_subset/... alongside {output_dir}/cohort_all/...). A
-# sample can belong to any number of named cohorts (or none -- it's always
-# still part of cohort_all regardless). "cohort_all" is reserved and can't
-# be redefined. There's no per-cohort resource/threads override -- cohorts:
-# only controls sample membership; see the groups: override block below for
-# per-group threading (note its keys are now cohort-prefixed, e.g.
-# "cohort_all_IEI422_gene_symbols_fibroblasts" instead of
-# "IEI422_gene_symbols_fibroblasts", to stay unique across cohorts).
 run: ""
 
 # ---------------------------------------------------------------------------
@@ -46,12 +19,9 @@ merge_hits_include_cohort_junctions: true
 cohort_qc:      true
 quantify_genes:              true
 
-# conda_env is used by every rule except compile_variants, 
-# which uses conda_env_compile_variants instead.
 conda_env:        "envs/conda_env"
 conda_env_compile_variants: "envs/conda_env_compile_variants"
 
-# Relative paths below resolve against the pipeline directory
 genome:     "resources/gencode_data/GRCh38.primary_assembly.genome.fa"
 annotation: "resources/gencode_data/gencode.v44.primary_assembly.annotation.gtf"
 
@@ -67,23 +37,20 @@ deepvariant_image: "docker://google/deepvariant:1.6.1"
 
 # ---------------------------------------------------------------------------
 # Variant compilation / annotation (rules/2_compile_variants.smk)
-# Merges the four callers' VCFs, annotates with gnomAD/ClinVar/ANNOVAR/CADD/SpliceAI. 
-# gnomad_base/clinvar_vcf default to local copies (downloaded by setup_resources.sh);
+# Merges the four callers' VCFs, annotates with gnomAD/ClinVar/ANNOVAR/CADD/SpliceAI.
+# gnomad_base/clinvar_vcf default to local copies (downloaded by setup.sh);
 # set to "remote" to use the public URLs instead.
 # ---------------------------------------------------------------------------
 gnomad_base:         "resources/gnomad_data"
 clinvar_vcf:         "resources/clinvar_data/clinvar.vcf.gz"
 annovar_dir:         "resources/annovar"
 amalgam_dir:         "resources/amalgam"
-cadd_script:       "resources/CADD-scripts-1.7.1/CADD_wrapper.sh"   # CADD_wrapper.sh, not CADD.sh -- see docs/setup.md
+cadd_script:       "resources/CADD-scripts-1.7.1/CADD_wrapper.sh"
 cadd_data_dir:       "resources/CADD-scripts-1.7.1/data"
-# Local pre-scored fallback files -- either can be left empty to skip that variant type at this tier.
+# Local pre-scored fallback files -- can be left empty to skip annotating that variant type
 cadd_local_prescored_snv:   "resources/CADD-scripts-1.7.1/data/prescored/GRCh38_v1.7/no_anno/whole_genome_SNVs.tsv.gz"
 cadd_local_prescored_indel: "resources/CADD-scripts-1.7.1/data/prescored/GRCh38_v1.7/no_anno/gnomad.genomes.r4.0.indel.tsv.gz"
 cadd_prescored_url:  "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/whole_genome_SNVs.tsv.gz"
-
-# SpliceAI runs live via bioconda by default.
-# Prescored VCFs below are an optional fallback -- use the MASKED hg38 files.
 spliceai_annotation: "grch38"
 spliceai_prescored_snv_vcf:   ""
 spliceai_prescored_indel_vcf: ""
@@ -116,14 +83,12 @@ gnomad_chroms:
   - chrY
 gnomad_mito_vcf: "resources/gnomad_data/gnomad.genomes.v3.1.sites.chrM.vcf.bgz"   # chrM uses gnomAD v3.1
 
-# CADD/SpliceAI pre-filters (which variants get run through each tool) --
-# independent of the final filter below, defaulted to match it.
+# CADD/SpliceAI pre-filters (which variants get run through each tool) -- defaulted to match the final filter below.
 cadd_gnomad_af_threshold: 0.01
 cadd_clnsig_filter:
   - "Benign"
   - "Likely_benign"
   - "Benign/Likely_benign"
-
 spliceai_gnomad_af_threshold: 0.01
 spliceai_clnsig_filter:
   - "Benign"
@@ -144,18 +109,11 @@ final_af_threshold: ""
 # ---------------------------------------------------------------------------
 # Read phasing (rules/3_phase_reads.smk)
 # ---------------------------------------------------------------------------
-phasing_threshold:      0.5   # min proportion of a read's coverage that must phase to haplotypes to be used
-terminal_variant_proportion: 0.5  # do not phase on variants that appear at the end of a read more frequently thatn this 
+phasing_threshold:      0.5   # min proportion of a read's max coverage that must phase to haplotypes to be used
+terminal_variant_proportion: 0.5  # do not phase on variants that appear at the end of a read more frequently than this
 min_dist_from_read_end_variant_phasing: 20   # min distance (bp) from a read's end for a variant to be used in phasing
 
-# NanoTS's own genotype AND phase (allele order + PS) are both trusted directly --
-# whatshap is only ever used to haplotag reads against them, never to re-derive
-# phase (no `whatshap phase` step at all) -- selected per-gene straight from the
-# raw NanoTS VCF, see scripts/phase_reads.py's module docstring. No AF filter is
-# applied to NanoTS (FILTER=PASS and DP only); phasing_min_af below applies only
-# to candidate (Clair3/DeepVariant-shared) indels, which are only ever used as a
-# fallback single-variant haplotag anchor when a gene has no NanoTS phased block.
-phasing_min_dp: 20    # min DP for a NanoTS variant OR a candidate indel to be selected at all
+phasing_min_dp: 20    # min DP for a NanoTS variant OR a candidate indel (from Clair3-RNA & DeepVariant) to be selected at all
 phasing_min_af: 0.1   # min AF for a candidate indel to be selected -- NOT applied to NanoTS variants
 
 # ---------------------------------------------------------------------------
@@ -164,7 +122,7 @@ phasing_min_af: 0.1   # min AF for a candidate indel to be selected -- NOT appli
 sample_coverage_threshold: 20
 padj_threshold:         0.01
 haplotype_ratio_threshold: 0.2
-ase_phasing_threshold:  0.5   # min fraction of max coverage phased to haplotypes for an ASE call to be trusted
+ase_phasing_threshold:  0.5   # min fraction of max coverage phased to haplotypes for an ASE call to be trusted (at least 50% of max read coverage must be phased)
 
 # ---------------------------------------------------------------------------
 # Splice junction outlier analysis vs. GTEx (rules/5_junction_analysis.smk)
@@ -173,33 +131,13 @@ gtex_data_dir: "resources/gtex_data"
 gtex_coverage_threshold:   20
 gtex_n_threshold:          100
 delta_psi_threshold:    0.1
-jxn_phasing_threshold:  0.8   # min fraction of bulk coverage a junction's hap1+hap2 must reach to be trusted
+jxn_phasing_threshold:  0.8   # min fraction of bulk coverage a junction's hap1+hap2 must reach to be trusted (combined coverage in hap1 and hap2 must be 80% the bulk coverage)
 
 # ---------------------------------------------------------------------------
-# Cohort-level junction outlier analysis (rules/7_cohort_junction_analysis.smk)
-# Compares each sample against its own (bed, sample_type) cohort rather than GTEx.
-# Two methods -- "beta_binomial" (Beta fit + beta-binomial test, FDR-corrected) 
-# or "modified_zscore" (median/MAD-based, no distribution fit).
-# cohort_jxn_method: "auto" picks beta_binomial at/above cohort_jxn_beta_min_samples bulk samples, else modified_zscore; 
-# or force one method for every group. Groups below cohort_jxn_min_samples are skipped entirely.
-# ---------------------------------------------------------------------------
-cohort_jxn_min_samples:        10
-cohort_jxn_method:       "auto"     # "auto", "beta_binomial", or "modified_zscore"
-cohort_jxn_beta_min_samples:   30
-cohort_jxn_beta_padj_threshold: 0.05   # beta_binomial only; deliberately separate from padj_threshold above
-cohort_jxn_z_threshold:       3.5      # modified_zscore only: |modZ| >= this flags an outlier (paired with delta below)
-cohort_jxn_z_delta_threshold: 0.1      # modified_zscore only, paired with modZ above
-cohort_jxn_phasing_threshold: 0.8      # min fraction of bulk coverage a junction's hap1+hap2 must reach to be trusted
-cohort_jxn_beta_n_threshold:     30
-cohort_jxn_zscore_n_threshold:   10
-cohort_jxn_min_reads:          20   # a junction needs >= this many reads in >=1 bulk sample to be tested at all
-
-# ---------------------------------------------------------------------------
-# Top-level output directory (rules/6_merge_hits.smk, rules/7-9)
-# Normally set in the run config YAML or via --config output_dir=<path>.
+# Merging hits across samples (rules/6_merge_hits.smk)
 # ---------------------------------------------------------------------------
 output_dir: ""
-omim_file: "resources/omim_data/OMIM.tsv"
+omim_file: "resources/omim_data/OMIM.tsv"   # included
 
 merge_num_callers_threshold_snv:       2
 merge_num_callers_threshold_indel:     2
@@ -207,9 +145,9 @@ merge_min_dp_snv:                     20
 merge_min_dp_indel:                   20
 merge_variant_sample_fraction:         0.05   # a variant present in > this fraction of a group's samples is dropped
 
-merge_min_haplotype_ratio:             0.1
-merge_delta_haplotype_ratio_threshold: 0.2
+merge_min_haplotype_ratio:             0.1    # a haplotype ratio < 0.1 likely cannot be trusted
 merge_ase_padj_threshold:              0.01
+merge_delta_haplotype_ratio_threshold: 0.2
 merge_ase_sample_fraction:             0.05   # a gene with ASE in > this fraction of a group's samples is dropped
 
 merge_jxn_coverage_threshold:         50
@@ -218,33 +156,43 @@ merge_delta_psi_threshold:             0.1
 merge_jxn_sample_fraction:              0.05  # a junction that's an outlier in > this fraction of a group's samples is dropped
 
 # ---------------------------------------------------------------------------
-# Sample-type validation (rules/8_cohort_qc.smk)
+# Cohort-level junction outlier analysis (rules/7_cohort_junction_analysis.smk)
+# Compares each sample against its own (bed, sample_type) cohort rather than GTEx.
+# Two methods -- "beta_binomial" (Beta fit + beta-binomial test, FDR-corrected)
+# or "modified_zscore" (median/MAD).
+# ---------------------------------------------------------------------------
+cohort_jxn_min_samples:        10
+cohort_jxn_method:       "auto"     # "auto", "beta_binomial", or "modified_zscore"
+cohort_jxn_beta_min_samples:   30
+cohort_jxn_beta_padj_threshold: 0.05
+cohort_jxn_z_threshold:       3.5      # |modZ| >= this flags an outlier
+cohort_jxn_z_delta_threshold: 0.1
+cohort_jxn_phasing_threshold: 0.8 
+cohort_jxn_beta_n_threshold:     30
+cohort_jxn_zscore_n_threshold:   10
+cohort_jxn_min_reads:          20   # a junction needs >= this many reads in >=1 bulk sample to be tested at all
+
+# ---------------------------------------------------------------------------
+# Cohort-wide QC and sample-type validation (rules/8_cohort_qc.smk)
 # ---------------------------------------------------------------------------
 validate_ref_tissues: ["fibroblasts", "lymphocytes", "wholeblood"]
 validate_ref_colors:  ["#D95D5B", "#57AA3E", "#B271AB"]
 
-# Optional per-sample_type plot colors; unlisted types get an auto-assigned color (see sample_type_color() in the Snakefile).
 sample_type_colors:
   fibroblasts: "#D95D5B"
   lymphocytes: "#57AA3E"
   PBMCs: "#4C8FCA"
   wholeblood: "#B271AB"
 
-# ---------------------------------------------------------------------------
-# Cohort-wide QC plots (rules/9_plot_cohort_info.smk)
-# ---------------------------------------------------------------------------
-cohort_qc_title: "Cohort QC"   # shared title for _8A, _8B, and _8D
+cohort_qc_title: "Cohort QC"
 
 # ---------------------------------------------------------------------------
-# Relative gene expression quantification (rules/10_quantify_genes.smk)
-# No external tool -- read count (_10A), max coverage (_10B), or
-# splice-site-sharing read assignment (_10D). CPTM normalization details in
-# rules/10_quantify_genes.smk's module docstring.
+# Relative gene expression quantification (rules/9_quantify_genes.smk)
 # ---------------------------------------------------------------------------
-gene_quant_title: null   # overrides the default title for _10A/_10B/_10D if set
+gene_quant_title: null
 
 # ---------------------------------------------------------------------------
 # Resource defaults (override per rule if needed)
 # ---------------------------------------------------------------------------
 threads: 8
-time:    1440   # default runtime in minutes (resources.runtime), converted to HH:MM:SS for sbatch --time
+time:    1440   # default runtime in minutes

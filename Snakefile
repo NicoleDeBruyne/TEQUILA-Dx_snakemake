@@ -1,8 +1,7 @@
 """
 RNA-Dx Snakemake Pipeline
-Multi-sample wrapper for variant calling, phasing, ASE, and splice junction analysis.
+Runs variant calling, phasing, allele-specific expression (ASE), and splice junction analysis across multiple samples.
 See docs/general.md for an overview of the pipeline structure.
-
 Config is supplied via --config/--configfile on the command line (see README.md).
 """
 
@@ -14,30 +13,22 @@ from collections import defaultdict
 from math import ceil
 import shlex
 
-# Ensure pipe failures aren't masked (e.g. tee's exit status doesn't
-# shadow the real command's).
 shell.prefix("set -euo pipefail;")
 
 
-# ---------------------------------------------------------------------------
 # Load per-run sample config (passed via --config run=<path>)
-# ---------------------------------------------------------------------------
 with open(config["run"]) as fh:
     run_cfg = yaml.safe_load(fh)
 
 SAMPLES = run_cfg["samples"]
 
-# Merge every other top-level run-config key over config.yaml's defaults.
-# samples/output_dir keep their own special-cased handling below.
+# Override the defaults in config.yaml
 for _key, _val in run_cfg.items():
     if _key in ("samples", "output_dir"):
         continue
     config[_key] = _val
 
-# output_dir can be set via --config output_dir=<path> (takes priority) or
-# as a top-level key in the run config YAML. Every other path in the
-# pipeline's output layout (per-sample dirs, cohort/, logs/) is derived from
-# this single directory -- see docs/general.md for the full layout.
+# Get output_dir from the command line (--config output_dir=<path>, highest priority) or from the run config YAML
 if not config.get("output_dir"):
     config["output_dir"] = run_cfg.get("output_dir", "")
 
@@ -48,46 +39,13 @@ if not config.get("output_dir"):
         "for the pipeline to know where to write its output layout."
     )
 
-# Each sample defaults to {output_dir}/samples/{sample}/output, but a run
-# config can override an individual sample's outdir by setting its own
-# 'outdir' key (e.g. to point at pre-existing results on a different
-# filesystem). Every per-sample rule (rules/1-5) reaches that sample's
-# sibling 'logs' directory via the plain string template
-# "{outdir}/../logs/..." rather than a computed helper function -- Snakemake
-# resolves the ".." correctly (and "mkdir -p" harmlessly creates 'outdir'
-# itself as an intermediate when doing so), but critically this has to stay
-# a plain wildcard template, not a callable log: function: Snakemake's
-# wildcard resolution breaks when output: contains a free "outdir" wildcard
-# and log: is a lambda that doesn't itself reference {outdir}.
-# Each sample defaults to {output_dir}/samples/{sample}/output, but a run
-# config can override an individual sample's outdir by setting its own
-# 'outdir' key (e.g. to point at pre-existing results on a different
-# filesystem). Every per-sample rule (rules/1-5) reaches that sample's
-# sibling 'logs' directory via the plain string template
-# "{outdir}/../logs/..." rather than a computed helper function -- Snakemake
-# resolves the ".." correctly (and "mkdir -p" harmlessly creates 'outdir'
-# itself as an intermediate when doing so), but critically this has to stay
-# a plain wildcard template, not a callable log: function: Snakemake's
-# wildcard resolution breaks when output: contains a free "outdir" wildcard
-# and log: is a lambda that doesn't itself reference {outdir}.
-#
-# NOTE: built via string concatenation ("+"), not an f-string. Snakemake's
-# own Snakefile parser corrupts f-string literals -- inserting stray
-# whitespace around the whole string and around each substituted value --
-# even in plain Python code with no rule-block wildcards involved. This is
-# a stronger/broader version of the f-string warning already noted
-# elsewhere in this file and in rules/6-9 for output:/log: templates: avoid
-# f-strings anywhere in the Snakefile/rules/*.smk, not just in path
-# templates containing literal "{wildcard}" placeholders.
+# By default each sample writes to {output_dir}/samples/{sample}/output.
+# A sample can override this with its own 'outdir' key in the run config
 for _sample, _entry in SAMPLES.items():
     if not _entry.get("outdir"):
         _entry["outdir"] = config["output_dir"] + "/samples/" + _sample + "/output"
 
-# ---------------------------------------------------------------------------
-# Resolve pipeline-relative reference-data / environment paths against the
-# pipeline directory itself (workflow.basedir). Absolute paths, remote
-# URLs, and the "remote" sentinel are left untouched. See docs/general.md.
-# ---------------------------------------------------------------------------
+# Turn relative reference-data/environment paths into absolute paths, anchored to the pipeline's own folder
 _BUNDLED_PATH_KEYS = [
     "genome", "annotation",
     "conda_env", "conda_env_compile_variants", "gnomad_base", "clinvar_vcf", "annovar_dir",
@@ -100,8 +58,8 @@ _BUNDLED_PATH_KEYS = [
 _URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 def _is_remote_sentinel(value):
-    """True if a config value is the literal keyword 'remote' -- an explicit
-    request to use the public HTTPS resource instead of a local copy."""
+    """True if a config value is exactly the word 'remote', meaning
+    "use the public online copy of this file instead of a local one"."""
     return isinstance(value, str) and value.strip().lower() == "remote"
 
 for _key in _BUNDLED_PATH_KEYS:
@@ -109,10 +67,7 @@ for _key in _BUNDLED_PATH_KEYS:
     if _val and not os.path.isabs(_val) and not _URL_RE.match(_val) and not _is_remote_sentinel(_val):
         config[_key] = os.path.join(workflow.basedir, _val)
 
-# ---------------------------------------------------------------------------
-# Canonical public HTTPS locations for gnomAD/ClinVar/CADD -- used for the
-# "remote" sentinel, and as compile_variants.py's fallback if a local copy fails.
-# ---------------------------------------------------------------------------
+# Public download links for gnomAD/ClinVar/CADD, used when a config value is set to "remote" instead of a local file path
 _REMOTE_GNOMAD_BASE = "https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/genomes"
 _REMOTE_GNOMAD_MITO_VCF = ("https://storage.googleapis.com/gcp-public-data--gnomad/release/3.1/"
                            "vcf/genomes/gnomad.genomes.v3.1.sites.chrM.vcf.bgz")
@@ -120,35 +75,27 @@ _REMOTE_CLINVAR_VCF = "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinv
 _REMOTE_CADD_PRESCORED_URL = "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/whole_genome_SNVs.tsv.gz"
 
 def _resolved_gnomad_base():
-    """config['gnomad_base'], or the canonical public gnomAD base URL if
-    the config value is the 'remote' sentinel."""
     return _REMOTE_GNOMAD_BASE if _is_remote_sentinel(config["gnomad_base"]) else config["gnomad_base"]
 
 def _resolved_gnomad_mito_vcf():
-    """config['gnomad_mito_vcf'], or the canonical public gnomAD v3.1 mito
-    URL if gnomad_base is the 'remote' sentinel."""
     return _REMOTE_GNOMAD_MITO_VCF if _is_remote_sentinel(config["gnomad_base"]) else config["gnomad_mito_vcf"]
 
 def _resolved_clinvar_vcf():
     return _REMOTE_CLINVAR_VCF if _is_remote_sentinel(config["clinvar_vcf"]) else config["clinvar_vcf"]
 
 def _cadd_use_local():
-    """False if config['cadd_script'] is the 'remote' sentinel (skip the
-    local CADD-scripts install, use the remote pre-scored lookup instead)."""
+    """True unless config['cadd_script'] is set to "remote", in which case
+    CADD scoring is done via the public pre-scored lookup instead of a local install."""
     return not _is_remote_sentinel(config["cadd_script"])
 
-# ---------------------------------------------------------------------------
-# Derive the set of tissues across all samples (for junction outlier rules)
-# ---------------------------------------------------------------------------
 def _parse_tissues(raw):
-    """Normalize a sample's 'tissues' value to a list of tissue names.
-    Accepts either a YAML list or a plain comma-separated string."""
+    """Turn a sample's 'tissues' value into a plain list of tissue names."""
     if isinstance(raw, list):
         return [str(t).strip() for t in raw]
     return [t.strip() for t in str(raw).strip("[]").split(",")]
 
-
 def all_tissues():
+    """All tissue names used by any sample, sorted and without duplicates."""
     tissues = set()
     for s in SAMPLES.values():
         tissues.update(_parse_tissues(s["tissues"]))
@@ -157,29 +104,18 @@ def all_tissues():
 TISSUES = all_tissues()
 
 def sample_tissues(sample):
+    """Tissue names for one sample."""
     return _parse_tissues(SAMPLES[sample]["tissues"])
 
-
-# ---------------------------------------------------------------------------
-# Named cohorts (rules/6-9): "cohort_all" always exists and contains every
-# sample in the run config -- the pipeline's original, only-cohort
-# behavior, just under an explicit name now. Additional cohorts can be
-# declared in the run config to rerun rules 6-9 over an explicit subset of
-# samples, as a sibling output directory:
+# Named cohorts: "cohort_all" always exists and includes every sample,
+# Extra cohorts can be declared in the run config to analyze a chosen subset of samples together, e.g.:
 #
 #   cohorts:
 #     cohort_subset:
 #       - SAMPLE_A
 #       - SAMPLE_C
 #
-# A sample can belong to any number of named cohorts; not being listed
-# anywhere only means it's absent from every *named* cohort -- it's always
-# still part of cohort_all. "cohort_all" is reserved and can't be
-# redefined. Per-cohort resource/threads overrides aren't supported (see
-# _group_threads()'s groups: block for the existing, cohort-agnostic
-# per-group override mechanism) -- cohorts: only controls sample
-# membership.
-# ---------------------------------------------------------------------------
+# A sample can belong to as many cohorts as you like; it is always part of cohort_all regardless. "cohort_all" cannot be redefined.
 COHORTS = {"cohort_all": list(SAMPLES.keys())}
 for _cid, _members in config.get("cohorts", {}).items():
     if _cid == "cohort_all":
@@ -191,35 +127,16 @@ for _cid, _members in config.get("cohorts", {}).items():
                          "config's 'samples:' block: " + str(_unknown))
     COHORTS[_cid] = list(_members)
 
-
-# ---------------------------------------------------------------------------
-# Group samples by (bed, sample_type) for cross-sample merging (rules/6_merge_hits.smk).
-# Each sample's run-config entry must include a "sample_type" field. Samples
-# sharing both the same BED panel and sample_type are merged together.
-# ---------------------------------------------------------------------------
 def _bed_id(bed):
-    """Filesystem-safe identifier for a BED panel, e.g. 'IEI422_gene_symbols'."""
     return Path(bed).stem
 
-
 def _group_id(cohort_id, bed, sample_type):
-    """Filesystem-safe identifier for a (cohort, bed, sample_type) group, e.g.
-    'cohort_all_IEI422_fibroblasts'."""
     return (str(cohort_id) + '_' + str(_bed_id(bed)) + '_' + str(sample_type))
 
-
 def _group_id_from_ids(cohort_id, bed_id, sample_type):
-    """Reconstruct a group_id from its already-split cohort_id/bed_id/sample_type wildcards."""
     return (str(cohort_id) + '_' + str(bed_id) + '_' + str(sample_type))
 
-
 def all_groups():
-    """Return {group_id: [sample, sample, ...]} for every unique (cohort, bed,
-    sample_type) combination present across COHORTS. A sample belonging to
-    N cohorts contributes to N distinct groups (one per cohort). Also
-    populates GROUP_COHORT_ID, GROUP_BED_ID, and GROUP_SAMPLE_TYPE
-    (group_id is a concatenation and shouldn't be re-split, since cohort
-    names, bed stems, or sample_types could themselves contain underscores)."""
     groups = defaultdict(list)
     for cid, members in COHORTS.items():
         for s in members:
@@ -237,43 +154,23 @@ def all_groups():
             GROUP_SAMPLE_TYPE[gid] = sample_type
     return dict(groups)
 
-
 GROUP_COHORT_ID = {}    # {group_id: cohort_id}
 GROUP_BED_ID = {}       # {group_id: bed_id}
 GROUP_SAMPLE_TYPE = {}  # {group_id: sample_type}
 GROUPS = all_groups()  # {group_id: [sample, ...]}
 
-
 def group_tissues(group_id):
-    """Union of tissues across all samples in a group."""
     tissues = set()
     for s in GROUPS[group_id]:
         tissues.update(sample_tissues(s))
     return sorted(tissues)
 
-
 def group_outdir(group_id):
-    """Shared *output* directory for a group's merged results, nested under
-    its cohort's own directory, its BED panel's own output/ dir, and sample_type:
-    {output_dir}/{cohort_id}/{bed_id}/output/sample_types/{sample_type}/output.
-    Sibling 'logs' directory is {output_dir}/{cohort_id}/{bed_id}/output/sample_types/{sample_type}/logs
-    -- built directly in each rules/*.smk file rather than through a helper,
-    since (unlike group_outdir itself) it's only ever needed as a plain
-    string template, not computed per-group in Python."""
     return (str(config['output_dir']) + '/' + str(GROUP_COHORT_ID[group_id]) + '/' + str(GROUP_BED_ID[group_id]) + '/output/sample_types/' + str(GROUP_SAMPLE_TYPE[group_id]) + '/output')
 
-
-# ---------------------------------------------------------------------------
-# rules/7_cohort_junction_analysis.smk's statistical method: forced via
-# config["cohort_jxn_method"] if set to "beta_binomial"/"modified_zscore", or
-# auto-selected per group by cohort size otherwise ("auto", the default) --
-# beta_binomial for groups with >= cohort_jxn_beta_min_samples samples (a
-# per-junction Beta distribution needs enough bulk samples to fit
-# meaningfully), modified_zscore for smaller groups. Used by both
-# all_outputs() below and rules/7_cohort_junction_analysis.smk -- defined
-# here (rather than in that rules file) so all_outputs() can call it too,
-# since rule all's input is evaluated before any include: runs.
 def _cja_method_for_group(group_id):
+    """Return "beta_binomial" or "modified_zscore" for a group, based on
+    config["cohort_jxn_method"] or, if "auto", the group's sample count."""
     method = config.get("cohort_jxn_method", "auto")
     if method in ("beta_binomial", "modified_zscore"):
         return method
@@ -286,113 +183,59 @@ def _cja_method_for_group(group_id):
     min_n = config.get("cohort_jxn_beta_min_samples", 30)
     return "beta_binomial" if n >= min_n else "modified_zscore"
 
-
 def _cja_thr_label(group_id):
-    """Output-subdirectory label for this group's cohort_junction_analysis
-    outlier threshold, e.g. 'padj0.05_delta0.1' or 'z3.5_delta0.1' -- see
-    _cja_method_for_group(). Uses cohort_jxn_beta_padj_threshold, NOT the
-    shared padj_threshold (that key is exclusively ASE/GTEx-junction's
-    per-sample threshold -- see config.yaml's comment on padj_threshold for
-    why these were split apart)."""
+    """Folder-name label for this group's outlier threshold, e.g.
+    'padj0.05_delta0.1' or 'z3.5_delta0.1', depending on the method used."""
     if _cja_method_for_group(group_id) == "beta_binomial":
         return "padj" + str(config["cohort_jxn_beta_padj_threshold"]) + "_delta" + str(config["delta_psi_threshold"])
     z = config.get("cohort_jxn_z_threshold", 3.5)
     d = config.get("cohort_jxn_z_delta_threshold", 0.1)
     return "z" + str(z) + "_delta" + str(d)
 
-
 def _cja_outliers_filtered_path(group_id):
-    """This group's cohort_junction_analysis outliers_filtered.tsv path
-    (rules/7_cohort_junction_analysis.smk's _7B) -- used by rules/6_merge_hits.smk's
-    _6D2 (and opportunistically by _6D1) to pull cohort-comparison junction
-    results into all_hits.tsv."""
     thr_label = _cja_thr_label(group_id)
     return (group_outdir(group_id) + "/cohort_junction_analysis/" + group_id + "_" + thr_label
             + "/" + group_id + "_outliers_filtered.tsv")
 
-
 def _cja_thr_flag(group_id):
-    """--bb-thresholds/--z-thresholds CLI flag for this group's
-    identify_cohort_junction_outliers.py invocation -- see
-    _cja_method_for_group(). Uses cohort_jxn_beta_padj_threshold -- see
-    _cja_thr_label()'s comment."""
     if _cja_method_for_group(group_id) == "beta_binomial":
         return "--bb-thresholds " + str(config["cohort_jxn_beta_padj_threshold"]) + ":" + str(config["delta_psi_threshold"])
     z = config.get("cohort_jxn_z_threshold", 3.5)
     d = config.get("cohort_jxn_z_delta_threshold", 0.1)
     return "--z-thresholds " + str(z) + ":" + str(d)
 
-
 def _cja_n_threshold(group_id):
-    """--n-threshold value for this group's identify_cohort_junction_outliers.py
-    invocation -- the minimum number of bulk samples with usable coverage a
-    junction needs before a reference distribution is fit at all. Kept
-    separate per method (config["cohort_jxn_beta_n_threshold"] /
-    config["cohort_jxn_zscore_n_threshold"]) since modified_zscore groups are,
-    by construction, smaller than cohort_jxn_beta_min_samples -- reusing the
-    beta_binomial default here would make every junction in every
-    modified_zscore group unfittable ("low_n")."""
     if _cja_method_for_group(group_id) == "beta_binomial":
         return config.get("cohort_jxn_beta_n_threshold", 30)
     return config.get("cohort_jxn_zscore_n_threshold", 10)
 
-
-# ---------------------------------------------------------------------------
-# Group (bed, sample_type) groups by BED panel alone, for stages that operate
-# across all sample types on the same panel: validating sample types, and
-# the final cross-sample-type merge of all_hits.
-# ---------------------------------------------------------------------------
 def all_bed_groups():
-    """Return {(cohort_id, bed_id): [group_id, ...]} for every (cohort,
-    BED panel) combination present in the run."""
     groups = defaultdict(list)
     for gid, members in GROUPS.items():
         bed = SAMPLES[members[0]]["bed"]
         groups[(GROUP_COHORT_ID[gid], _bed_id(bed))].append(gid)
     return dict(groups)
 
-
-BED_GROUPS = all_bed_groups()  # {(cohort_id, bed_id): [group_id, ...]}
-
+BED_GROUPS = all_bed_groups()
 
 def bed_path(cohort_id, bed_id):
-    """Actual BED file path for a given (cohort_id, bed_id)."""
     gid = BED_GROUPS[(cohort_id, bed_id)][0]
     return SAMPLES[GROUPS[gid][0]]["bed"]
 
-
 def bed_samples(cohort_id, bed_id):
-    """Every sample using this BED panel within this cohort, across all its
-    sample_types -- used by rules/8_cohort_qc.smk, which (unlike
-    cohort_junction_analysis or merge_hits) pools across sample_type within
-    a bed rather than operating per (bed, sample_type) group."""
     return [s for gid in BED_GROUPS[(cohort_id, bed_id)] for s in GROUPS[gid]]
 
-
 def bed_outdir(cohort_id, bed_id):
-    """Shared *output* directory for a BED panel's cross-sample-type results
-    within one cohort: {output_dir}/{cohort_id}/{bed_id}/output. Contains
-    cohort_qc/, sample_types/, and merged_all_hits.tsv. Sibling 'logs'
-    directory is {output_dir}/{cohort_id}/{bed_id}/logs (a sibling of this
-    output/ dir, not nested inside it) -- built directly as a plain string
-    template in each rules/*.smk file rather than through a helper, same
-    reasoning as group_outdir's own logs dir above."""
     return (str(config['output_dir']) + '/' + str(cohort_id) + '/' + str(bed_id) + '/output')
 
-
 def _quoted(items):
-    """Shell-quote each item in a list (hex colors like '#8BBF9F' would
-    otherwise be treated as a bash comment when unquoted)."""
+    """Shell-quote each item in a list, so values like hex colors ('#8BBF9F') aren't accidentally treated as a bash comment."""
     return [shlex.quote(str(x)) for x in items]
-
 
 _DEFAULT_SAMPLE_TYPE_PALETTE = ["#8BBF9F", "#D27D7D", "#A78BC5", "#E8B04B", "#4A7C9B", "#C46B6B"]
 
-
 def sample_type_color(sample_type):
-    """Color for a sample_type in validate_sample_types plots. Uses
-    config['sample_type_colors'][sample_type] if set, else a deterministic
-    color from a default palette."""
+    """Plot color for a sample_type: uses config['sample_type_colors'] if set, otherwise picks one from a default color palette."""
     configured = config.get("sample_type_colors", {})
     if sample_type in configured:
         return configured[sample_type]
@@ -400,55 +243,18 @@ def sample_type_color(sample_type):
     idx = all_types.index(sample_type) % len(_DEFAULT_SAMPLE_TYPE_PALETTE)
     return _DEFAULT_SAMPLE_TYPE_PALETTE[idx]
 
-
 def sample_fraction_threshold(group_id, fraction):
-    """Round-up sample-count threshold for a given fraction of a group's sample size."""
     return ceil(len(GROUPS[group_id]) * fraction)
 
-
-# ---------------------------------------------------------------------------
-# Helper: booleans from config (default True)
-# ---------------------------------------------------------------------------
 def flag(key):
     return config.get(key, True)
 
-
-# ---------------------------------------------------------------------------
-# Helper: per-sample, per-rule thread count. Rules use:
-#   threads: lambda wc: _rule_threads(wc, "rule_key")
-# Resolution order: run_config.yaml sample entry (e.g. longcallr_threads: 4),
-# else config/config.yaml's global "threads:" default.
-# (detect_ase_outliers and get_junction_counts are always single-threaded
-# and don't use this helper.)
-# ---------------------------------------------------------------------------
 def _rule_threads(wc, rule_key):
     return int(SAMPLES[wc.sample].get((str(rule_key) + '_threads'), config["threads"]))
 
-
-# ---------------------------------------------------------------------------
-# Per-group / per-bed-panel thread overrides, for rules that run once per
-# (bed, sample_type) group or once per bed panel rather than per sample.
-# Set via a top-level `groups:` block in the run config YAML:
-#
-#   groups:
-#     IEI422_gene_symbols_fibroblasts:            # group-level: bed_id_sample_type
-#       build_group_junction_matrix_threads: 1
-#       identify_cohort_junction_outliers_threads: 16
-#
-# Resolution order: groups.<id>.<rule_key>_threads in the run config, else
-# whatever default the rule itself passes in.
-#
-# Memory for these same rules is NOT set here -- it scales automatically
-# with cohort size (samples in the group, or on the bed panel, whichever
-# is relevant to that rule) directly in each rule's `resources:` block.
-# ---------------------------------------------------------------------------
 def _group_threads(group_id, rule_key, default):
     return int(config.get("groups", {}).get(group_id, {}).get((str(rule_key) + '_threads'), default))
 
-
-# ---------------------------------------------------------------------------
-# Collect all final outputs across samples
-# ---------------------------------------------------------------------------
 def all_outputs():
     outs = []
     for s in SAMPLES:
@@ -467,11 +273,6 @@ def all_outputs():
             outs.append((str(od) + '/variant_calling/deepvariant/' + str(s) + '_deepvariant_norm.vcf.gz'))
 
         if flag("compile_variants"):
-            # Request the chain's final output (_2B_filter_variants), not
-            # just _2A's intermediate _compiled_variants.tsv, so this flag
-            # still pulls in the whole rules/2_compile_variants.smk chain
-            # as a unit (matching junction_analysis's pattern below) --
-            # needed since _2A/_2B became separate rules.
             outs.append((str(od) + '/variant_calling/compiled_variants/' + str(s) + '_filtered_variants.tsv'))
 
         if flag("phase_reads"):
@@ -481,37 +282,18 @@ def all_outputs():
             outs.append((str(od) + '/ase_analysis/' + str(s) + '_binomial_ase_results.tsv'))
 
         if flag("junction_analysis"):
-            # Requesting the chain's final output pulls the rest of the
-            # junction_analysis.smk chain along with it.
             for t in sample_tissues(s):
                 outs.append(
                     (str(od) + '/junction_analysis/gtex_' + str(t) + '/' + str(s) + '_gtex_' + str(t) + '_outlier_junctions.tsv')
                 )
 
     if flag("merge_hits"):
-        # Requesting _6F_plot_hits_upset's output pulls in _6A-_6D/_6F_final_merge
-        # (everything _6F_plot_hits_upset actually depends on, including
-        # merged_all_hits.tsv AND merged_all_hits_simplified.tsv -- both are
-        # declared outputs of _6F_final_merge, so requesting either one
-        # builds both). It does NOT pull in _6E_plot_group_hits: that's a
-        # dead-end branch off all_hits.tsv -- nothing downstream consumes
-        # it, so it must be requested explicitly here or Snakemake never
-        # builds it. Which of _6D1/_6D2 the _6F_plot_hits_upset branch
-        # actually runs is controlled by
-        # config['merge_hits_include_cohort_junctions'], not here -- see
-        # rules/6_merge_hits.smk's module docstring.
         for (cid, bid) in BED_GROUPS:
             bod = bed_outdir(cid, bid)
             outs.append((str(bod) + '/hits_upset_density.pdf'))
             outs.append((str(bod) + '/merged_all_hits_simplified.tsv'))
         for gid in GROUPS:
             god = group_outdir(gid)
-            # One representative file per category is enough to pull the
-            # whole rule in -- Snakemake builds every declared output of a
-            # targeted rule in one invocation, not just the one requested
-            # (same pattern as elsewhere in this pipeline, e.g. _2A's
-            # tsv+filtered_tsv). Picked _boxplot.pdf as that representative;
-            # _barplot.pdf for the same category is produced alongside it.
             for fname in ('genes_with_pathogenic_variant_boxplot.pdf', 'genes_with_ASE_boxplot.pdf',
                           'genes_with_outlier_junction_boxplot.pdf', 'genes_with_RNA_dysregulation_boxplot.pdf'):
                 outs.append((str(god) + '/merged_hits/' + fname))
@@ -526,20 +308,14 @@ def all_outputs():
 
     if flag("quantify_genes"):
         for gid in GROUPS:
-            god = group_outdir(gid)  # .../output
+            god = group_outdir(gid)
             outs.append(god + "/gene_quantification/by_count/gene_count_matrix.tsv")
             outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix.tsv")
-            # _9D4_amalgam_annotate_orf's output isn't consumed by anything
-            # downstream (see that rule's docstring in
-            # rules/9_quantify_genes.smk) -- listed explicitly here so it
-            # still gets scheduled/run rather than silently skipped by
-            # Snakemake's pull-based DAG.
             outs.append(god + "/gene_quantification/by_amalgam/annotation/annotated.gtf.gz")
             outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix.tsv")
 
     if flag("cohort_qc"):
-        # Requesting validate_sample_types' output pulls build_group_junction_matrix along with it.
         for (cid, bid) in BED_GROUPS:
             bod = bed_outdir(cid, bid)
             cqd = bod + "/cohort_qc"
@@ -551,15 +327,12 @@ def all_outputs():
 
     return outs
 
-
 rule all:
     input:
         all_outputs()
 
 
-# ---------------------------------------------------------------------------
-# Include modular rule files
-# ---------------------------------------------------------------------------
+# Load the rule definitions
 include: "rules/1_call_variants.smk"
 include: "rules/2_compile_variants.smk"
 include: "rules/3_phase_reads.smk"

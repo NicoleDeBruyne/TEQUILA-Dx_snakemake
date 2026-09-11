@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 #
-# setup_resources.sh
+# setup.sh
 #
-# Builds this pipeline's conda environments and populates snakemake/resources/
-# with everything config/config.yaml expects by default. See docs/setup.md
-# for what each step does and why.
+# Builds this pipeline's conda environments and downloads/prepares everything under resources/ that config/config.yaml expects by default
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # snakemake/
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOURCES_DIR="$SCRIPT_DIR/resources"
 
 mkdir -p "$RESOURCES_DIR"
@@ -16,15 +14,10 @@ mkdir -p "$RESOURCES_DIR"
 log()  { echo -e "\n=== $* ==="; }
 skip() { echo "  [skip] $1 already exists"; }
 error() {
-    # Reports a step failure without aborting the whole script -- set -e
-    # still applies within each step, but the rest of the script proceeds.
     echo -e "\n  ERROR: $* -- see above (and any log file mentioned) for" >&2
     echo -e "  details. Continuing to the next step.\n" >&2
 }
 
-# Prefer mamba over conda for this script's own env-creation calls (faster
-# solver, same envs/channels/behavior). Doesn't affect CADD-scripts' own
-# install.sh, which has its own conda/mamba selection logic.
 if command -v mamba >/dev/null 2>&1; then
     CONDA_BIN=mamba
 else
@@ -32,13 +25,9 @@ else
 fi
 echo "Using '$CONDA_BIN' for this script's own environment creation."
 
-# Works around a libmamba-solver bug on some systems where strict channel
-# priority causes unrelated packages to be reported as mutually
-# unsatisfiable. See docs/setup.md.
 export CONDA_CHANNEL_PRIORITY=flexible
 
 fetch() {
-    # fetch <url> <target_path>
     local url="$1" target="$2"
     if [ -s "$target" ]; then
         skip "$target"
@@ -46,8 +35,6 @@ fetch() {
     fi
     echo "  Downloading $target"
     mkdir -p "$(dirname "$target")"
-    # --progress=dot:giga: periodic lines instead of a carriage-return bar,
-    # readable in a log file and safe with concurrent fetch() calls.
     wget -q --progress=dot:giga -O "$target.partial" "$url"
     mv "$target.partial" "$target"
 }
@@ -56,16 +43,12 @@ export -f fetch skip
 ##############################################################################
 log "Conda environments"
 ##############################################################################
-# Builds both conda environments this pipeline needs -- see docs/setup.md
-# for what each one is for and why they're separate. Both idempotent
-# (skipped if already present), same as every other step in this script.
+# Builds both conda environments this pipeline needs. Skipped if already present.
 CONDA_ENV_LOG="$RESOURCES_DIR/.setup_logs/conda_envs.log"
 mkdir -p "$RESOURCES_DIR/.setup_logs"
 echo "  Progress: tail -f $CONDA_ENV_LOG"
 (
     env_create_or_hint() {
-        # Wraps `$CONDA_BIN env create ...`; on failure, prints a pointer
-        # to the channel-priority workaround above.
         if ! "$CONDA_BIN" env create "$@"; then
             cat <<'EOF'
 
@@ -154,8 +137,6 @@ log "NanoTS"
 ##############################################################################
 log "longcallR v1.12.0"
 ##############################################################################
-# Installed via bioconda as part of the main conda_env -- this just checks
-# it's really there after the "Conda environments" step above.
 (
     CONDA_ENV_DIR="$SCRIPT_DIR/envs/conda_env"
     LONGCALLR_BIN="$CONDA_ENV_DIR/bin/longcallR"
@@ -166,12 +147,10 @@ log "longcallR v1.12.0"
   MISSING: $LONGCALLR_BIN
 
   longcallR should have been installed via bioconda as part of the main
-  conda_env build (see environment.yaml) in the "Conda environments" step
-  above. If that step failed or hasn't been run yet, re-run this script.
+  conda_env build (see environment.yaml) in the "Conda environments" step above.
   If conda_env built successfully but this binary still isn't here, check
   "$CONDA_ENV_DIR/bin/" directly for what conda actually installed it as --
-  update config.yaml's longcallr_bin to match if the name differs from
-  "longcallR".
+  update config.yaml's longcallr_bin to match if the name differs from "longcallR".
 EOF
     fi
 ) || error "longcallR check failed"
@@ -186,8 +165,6 @@ log "GTEx junction count matrices (v11, filtered per sample_type)"
 GTEX_LOG="$RESOURCES_DIR/.setup_logs/gtex.log"
 echo "  Progress: tail -f $GTEX_LOG"
 (
-# Edit this map to add/change which GTEx SMTSD tissue label(s) each
-# sample_type corresponds to. Multiple SMTSD values are comma-separated.
 declare -A GTEX_TISSUE_MAP=(
     ["brain"]="Brain - Amygdala,Brain - Anterior cingulate cortex (BA24),Brain - Caudate (basal ganglia),Brain - Cerebellar Hemisphere,Brain - Cerebellum,Brain - Cortex,Brain - Frontal Cortex (BA9),Brain - Hippocampus,Brain - Hypothalamus,Brain - Nucleus accumbens (basal ganglia),Brain - Putamen (basal ganglia),Brain - Spinal cord (cervical c-1),Brain - Substantia Nigra"
     ["fibroblasts"]="Cells - Cultured fibroblasts"
@@ -205,9 +182,7 @@ SAMPLE_ATTRIBUTES="$GTEX_RAW_DIR/GTEx_Analysis_v11_Annotations_SampleAttributesD
 fetch "https://storage.googleapis.com/adult-gtex/bulk-gex/v11/rna-seq/GTEx_Analysis_2025-08-22_v11_STARv2.7.11b_junctions.gct.gz" "$JUNCTIONS_GZ"
 fetch "https://storage.googleapis.com/adult-gtex/annotations/v11/metadata-files/GTEx_Analysis_v11_Annotations_SampleAttributesDS.txt" "$SAMPLE_ATTRIBUTES"
 
-# Phase 1: identify sample IDs per tissue (cheap -- sample attributes file
-# is tiny compared to the junctions matrix). Builds one combined
-# sample->tissue map so phase 2 reads the huge junctions file only once.
+# Phase 1: identify sample IDs per tissue, building one combined sample->tissue map.
 COMBINED_MAP="$GTEX_RAW_DIR/combined_sample_tissue_map.txt"
 : > "$COMBINED_MAP"
 tissues_to_filter=()
@@ -257,9 +232,7 @@ if [ "${#tissues_to_filter[@]}" -eq 0 ]; then
 else
     echo "  Filtering junction count matrix for ${#tissues_to_filter[@]} tissue(s) in a single pass: ${tissues_to_filter[*]}..."
 
-    # Phase 2: one streaming pass over the (decompressed) junctions file,
-    # streaming the index column + each tissue's columns to that tissue's
-    # temp output file. O(1) memory regardless of how many tissues are filtered.
+    # Phase 2: Write each tissue's columns to its own temp output file
     zcat "$JUNCTIONS_GZ" | tail -n +3 | awk -F'\t' -v OFS='\t' -v idx_name='Name' -v outdir="$GTEX_RAW_DIR" '
         NR==FNR { tissue_of[$1] = $2; next }
         FNR==1 {
@@ -304,8 +277,7 @@ else
         outfile="$GTEX_DIR/gtex_${tissue}_jxn_counts.txt"
         tmpfile="$GTEX_RAW_DIR/gtex_${tissue}_jxn_counts.txt.tmp"
 
-        # The GTEx junction count matrix contains duplicate rows; dedupe,
-        # then check for leftover duplicate junction IDs.
+        # The GTEx junction count matrix has some duplicate rows (unknown reason); dedupe them.
         num_dup_rows=$(sort "$tmpfile" | uniq -d | wc -l)
         if [ "$num_dup_rows" -gt 0 ]; then
             echo "  Removing $num_dup_rows duplicate rows from $tissue junction count matrix..."
@@ -329,17 +301,9 @@ echo "  expect to add more and want to reclaim the disk space.)"
 ##############################################################################
 log "gnomAD"
 ##############################################################################
-# Downloaded locally by default -- see docs/setup.md for why (remote
-# querying needs reliable outbound HTTPS from compute nodes, which has been
-# unreliable in practice).
-#
-#   gnomAD v4.1 genomes sites, chroms below + chrM from v3.1 -> ~300GB+
-#
-# Fetched GNOMAD_PARALLEL files at a time (default 6, override via env var).
-# Safe to re-run/resume. To query the remote HTTPS URL instead, set
-# SKIP_GNOMAD=y and point gnomad_base/gnomad_mito_vcf at their https:// values.
-#
-# Keep in sync with config.yaml's gnomad_chroms list.
+# Downloaded locally by default (gnomAD v4.1 genomes sites, chrM from v3.1 ->).
+# To query the remote HTTPS URL instead, set SKIP_GNOMAD=y and point gnomad_base/
+# gnomad_mito_vcf at their https:// values in config.yaml.
 GNOMAD_LOG="$RESOURCES_DIR/.setup_logs/gnomad.log"
 echo "  Progress: tail -f $GNOMAD_LOG"
 GNOMAD_CHROMS=(chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 \
@@ -370,10 +334,8 @@ GNOMAD_PARALLEL="${GNOMAD_PARALLEL:-6}"
 ##############################################################################
 log "ClinVar"
 ##############################################################################
-# Downloaded locally by default, same reasoning as gnomAD above. Set
-# SKIP_CLINVAR=y to skip and keep clinvar_vcf's https:// value in config.yaml.
-#
-#   ClinVar (GRCh38 VCF) -> ~200MB
+# Downloaded locally by default (GRCh38 VCF, ~200MB).
+# Set SKIP_CLINVAR=y to skip and keep clinvar_vcf's https:// value in config.yaml.
 CLINVAR_LOG="$RESOURCES_DIR/.setup_logs/clinvar.log"
 echo "  Progress: tail -f $CLINVAR_LOG"
 (
@@ -393,13 +355,7 @@ echo "  Progress: tail -f $CLINVAR_LOG"
 ##############################################################################
 log "CADD-scripts v1.7.1"
 ##############################################################################
-# CADD.sh -m needs a `snakemake` >=8.25.2 binary on PATH (this pipeline's
-# main env runs Snakemake 7.x). A shim directory is built below containing
-# only a symlink to conda_env_compile_variants's snakemake, kept off the
-# rest of that env's PATH to avoid leaking its `perl` into CADD.sh's
-# per-rule conda environments. See docs/setup.md for the full explanation,
-# and why config.yaml's cadd_script should point at the generated
-# CADD_wrapper.sh rather than CADD.sh directly.
+# CADD.sh -m needs a `snakemake` >=8.25.2 binary on PATH (this pipeline's main env runs Snakemake 7.x).
 COMPILE_VARIANTS_ENV_DIR="$SCRIPT_DIR/envs/conda_env_compile_variants"
 CADD_SNAKEMAKE_SHIM_DIR="$RESOURCES_DIR/.cadd_snakemake_shim"
 mkdir -p "$CADD_SNAKEMAKE_SHIM_DIR"
@@ -407,10 +363,6 @@ ln -sf "$COMPILE_VARIANTS_ENV_DIR/bin/snakemake" "$CADD_SNAKEMAKE_SHIM_DIR/snake
 CADD_LOG="$RESOURCES_DIR/.setup_logs/cadd_install.log"
 echo "  Progress: tail -f $CADD_LOG"
 
-# Asked here, before the log-redirected subshell below, so the prompt and
-# response actually reach/read from the real terminal (that subshell's
-# stdout/stderr get redirected to $CADD_LOG, so anything printed inside it
-# wouldn't be visible to a person watching this run live).
 RUN_CADD_TEST=y
 if [ -t 0 ] && [ -t 1 ]; then
     echo ""
@@ -434,11 +386,8 @@ fi
 (
     export PATH="$CADD_SNAKEMAKE_SHIM_DIR:$PATH"
 
-    # Same libmamba-solver workaround as the envs/ build above -- also
-    # needed for CADD's own internal conda env builds.
     export CONDA_CHANNEL_PRIORITY=flexible
 
-    # Count complete conda envs: dir + .yaml + .env_setup_done all present.
     count_complete_cadd_envs() {
         n=0
         for envdir in "$CADD_DIR"/envs/conda/*/; do
@@ -457,11 +406,7 @@ fi
         skip "$CADD_DIR/CADD.sh (repo already cloned)"
     fi
 
-    # CADD-scripts' own regulatory-sequence env pins an old TensorFlow
-    # without a compatible protobuf pin, which breaks at runtime on a
-    # fresh solve. Patched here idempotently -- see docs/setup.md for the
-    # full explanation, including why this is keyed off the known filename
-    # rather than a content grep (envs/mmsplice.yml also mentions tensorflow).
+    # CADD-scripts' own regulatory-sequence env pins an old TensorFlow which breaks at runtime. Patched here.
     REGSEQ_YML="$CADD_DIR/envs/regulatorySequence.yml"
     if [ ! -f "$REGSEQ_YML" ]; then
         echo "  WARNING: could not find CADD-scripts' regulatory-sequence env yaml"
@@ -483,7 +428,7 @@ path = sys.argv[1]
 with open(path) as f:
     spec = yaml.safe_load(f)
 deps = spec.setdefault('dependencies', [])
-# Prefer an existing pip: sub-list if present, else add a plain conda dependency.
+# Add to an existing pip: sub-list if present, else as a plain conda dependency.
 pip_list = None
 for d in deps:
     if isinstance(d, dict) and 'pip' in d:
@@ -497,11 +442,9 @@ with open(path, 'w') as f:
     yaml.safe_dump(spec, f, default_flow_style=False, sort_keys=False)
 PYEOF
         else
-            echo "  WARNING: python3's yaml module isn't available to safely edit"
-            echo "  $REGSEQ_YML -- falling back to a plain text append (assumes"
-            echo "  standard 2-space YAML list indentation; verify $REGSEQ_YML"
-            echo "  by hand if CADD-scripts' own formatting differs)."
-            printf '\n# Pinned by setup_resources.sh -- works around a TensorFlow/protobuf\n# version mismatch (see setup_resources.sh CADD-scripts section comment).\n  - protobuf<3.20\n' >> "$REGSEQ_YML"
+            echo "  WARNING: python3's yaml module isn't available -- falling back to a"
+            echo "  plain text append. Verify $REGSEQ_YML by hand if the formatting looks off."
+            printf '\n# Pinned by setup.sh -- works around a TensorFlow/protobuf version mismatch.\n  - protobuf<3.20\n' >> "$REGSEQ_YML"
         fi
     fi
 
@@ -542,24 +485,15 @@ PYEOF
     echo "       and cancel the install)"
     echo "    9. Ready to continue?                   -> y"
     if [ "$pre_answer" = "y" ]; then
-        # Prompt 5=y -> install.sh also asks 6, 7, 8 -> 9 prompts total.
         printf 'y\nn\ny\n%s\ny\nn\ny\ny\ny\n' "$ann_answer" | \
             ( cd "$CADD_DIR" && bash install.sh )
     else
-        # Prompt 5=n -> install.sh skips 6, 7, 8 entirely -> only 6 prompts total.
         printf 'y\nn\ny\n%s\nn\ny\n' "$ann_answer" | \
             ( cd "$CADD_DIR" && bash install.sh )
     fi
     echo "  CADD-scripts install.sh step done."
     chmod +x "$CADD_DIR/CADD.sh"
 
-    # If the regulatory-sequence env was already built before the yaml pin
-    # above existed, the patch doesn't retroactively fix it (Snakemake only
-    # rebuilds an env if its yaml hash changes) -- so also patch any
-    # already-built env directly. Matched by content against $REGSEQ_YML
-    # (or its .orig backup, if present) rather than by grepping for
-    # "tensorflow", to avoid mismatching mmsplice.yml's built copy. See
-    # docs/setup.md for details.
     REGSEQ_YML_FOR_MATCH="$REGSEQ_YML"
     [ -f "$REGSEQ_YML.orig" ] && REGSEQ_YML_FOR_MATCH="$REGSEQ_YML.orig"
 
@@ -577,31 +511,26 @@ PYEOF
         BUILT_REGSEQ_ENV_DIR="${BUILT_REGSEQ_YAML%.yaml}"
         if [ -x "$BUILT_REGSEQ_ENV_DIR/bin/pip" ]; then
             CURRENT_PROTOBUF="$("$BUILT_REGSEQ_ENV_DIR/bin/pip" show protobuf 2>/dev/null | awk '/^Version:/{print $2}')"
-            # Only the major.minor matters here (3.20 is the first
-            # incompatible release), so a simple string comparison suffices.
+            # 3.20 is the first incompatible release, so a string comparison is enough.
             case "$CURRENT_PROTOBUF" in
                 ""|3.19.*|3.1[0-8].*|3.[0-9].*|2.*)
                     ;;  # already <3.20 (or pip show failed) -- nothing to do
                 *)
                     echo "  Downgrading protobuf ($CURRENT_PROTOBUF -> <3.20) in the already-built"
-                    echo "  regulatory-sequence env ($BUILT_REGSEQ_ENV_DIR) -- see the protobuf"
-                    echo "  pin comment above for why."
+                    echo "  regulatory-sequence env ($BUILT_REGSEQ_ENV_DIR)."
                     "$BUILT_REGSEQ_ENV_DIR/bin/pip" install "protobuf<3.20" --quiet
                     ;;
             esac
         fi
     fi
 
-    # Generate CADD_wrapper.sh -- this, not CADD.sh directly, is what
-    # config.yaml's cadd_script should point to. Self-contained (builds its
-    # own clean PATH, stripping conda_env_compile_variants's bin/ to avoid
-    # leaking its `perl` into CADD.sh's per-rule conda environments) so
-    # compile_variants.py can invoke it directly. See docs/setup.md.
+    # Generate CADD_wrapper.sh -- what config.yaml's cadd_script should point to. 
+    # It builds its own clean PATH (stripping conda_env_compile_variants's bin/, so its `perl`
+    # doesn't leak into CADD.sh's per-rule conda environments).
     CADD_WRAPPER="$CADD_DIR/CADD_wrapper.sh"
     cat > "$CADD_WRAPPER" <<WRAPPER_EOF
 #!/bin/bash
-# Auto-generated by setup_resources.sh -- do not edit directly; rerun
-# setup_resources.sh to regenerate. See docs/setup.md.
+# Auto-generated by setup.sh -- do not edit directly; rerun setup.sh to regenerate.
 set -euo pipefail
 SHIM_DIR="$CADD_SNAKEMAKE_SHIM_DIR"
 STRIP_DIR="$COMPILE_VARIANTS_ENV_DIR/bin"
@@ -618,17 +547,9 @@ WRAPPER_EOF
     chmod +x "$CADD_WRAPPER"
     echo "  Generated $CADD_WRAPPER (point config.yaml's cadd_script here, not at CADD.sh)."
 
-    # Force a real scoring pass here, once, serially, against CADD-scripts'
-    # bundled test VCF -- builds every conda env CADD.sh actually needs
-    # (beyond install.sh's own narrower env-build target) and confirms
-    # scoring works before any real sample touches it, avoiding a race if
-    # multiple concurrent compile_variants.py runs each try to build the
-    # same missing env. Goes through the wrapper, not CADD.sh directly, so
-    # this exercises exactly what compile_variants.py invokes at runtime.
-    # See docs/setup.md. RUN_CADD_TEST is set above, before this
-    # log-redirected subshell, from an interactive prompt when a real
-    # terminal is attached (defaults to running it otherwise, e.g. in a
-    # non-interactive/scripted/cron invocation of this script).
+    # Run a real scoring pass against CADD-scripts' bundled test VCF, once, -- this builds every conda env
+    # CADD.sh needs and confirms scoring works before any real sample touches it, avoiding a race between concurrent
+    # compile_variants.py runs each trying to build the same missing env.
     if [ "$RUN_CADD_TEST" = "n" ]; then
         echo "  Skipping the real scoring pass (user chose to trust the installation)."
         echo "  Conda envs will instead get built/finished on first real use."
@@ -680,8 +601,7 @@ EOF
 ##############################################################################
 log "SpliceAI precomputed scores (requires a free BaseSpace account -- cannot be auto-downloaded)"
 ##############################################################################
-# Masked (not raw) is the right choice -- matches this pipeline's live
-# `spliceai -M 1` invocation. See docs/setup.md for why.
+# Masked (not raw) is the right choice -- matches this pipeline's live `spliceai -M 1` invocation.
 (
     SPLICEAI_DIR="$RESOURCES_DIR/spliceai_data"
     SPLICEAI_SNV="$SPLICEAI_DIR/spliceai_scores.masked.snv.hg38.vcf.gz"
@@ -720,9 +640,8 @@ EOF
 ##############################################################################
 log "OMIM (bundled with this repo -- see below for how to refresh it)"
 ##############################################################################
-# OMIM.tsv is small enough to ship as part of this repo directly rather
-# than being fetched by this script -- this section just checks it's
-# present and reminds how to refresh it later. See docs/setup.md.
+# OMIM.tsv ships with this repo directly rather than being downloaded by
+# this script; this section just checks it's present.
 (
     OMIM_FILE="$RESOURCES_DIR/omim_data/OMIM.tsv"
     if [ -s "$OMIM_FILE" ]; then
@@ -743,8 +662,7 @@ log "OMIM (bundled with this repo -- see below for how to refresh it)"
     $OMIM_FILE
 
   Whatever you put there must be a tab-separated file containing (at least)
-  these four columns -- scripts/merge_hits.py reads only these, any others
-  are ignored:
+  these four columns -- scripts/merge_hits.py reads only these, any others are ignored:
     approved_gene_symbol   Gene symbol -- joined against this pipeline's own
                             ANNOVAR-derived gene symbols (ANNOVAR_Gene.refGene),
                             so naming convention/casing needs to match those.
@@ -752,39 +670,18 @@ log "OMIM (bundled with this repo -- see below for how to refresh it)"
                             as-is into the final merged output.
     inheritance_patterns    Associated inheritance pattern(s) (e.g. autosomal
                             recessive), passed through as-is.
-    haploinsufficient       TRUE/FALSE. Only affects tiering for AD/XLD genes:
-                            for a haploinsufficient gene, ASE (one allele
-                            fully silenced) is treated as strong,
-                            near-diagnostic evidence on its own, on par with
-                            a Strong junction outlier. For a non-
-                            haploinsufficient AD/XLD gene, the same ASE
-                            call is weaker evidence (the gene tolerates
-                            reduced dosage from one silenced allele), so it's
-                            ranked lower -- see the tier decision tree in
-                            merge_hits.py's build_hit_table() docstring.
+    haploinsufficient       TRUE/FALSE. Only affects tiering for AD/XLD genes.
                             Empty/missing is treated the same as FALSE.
 EOF
     fi
 ) || error "OMIM check failed"
 
 ##############################################################################
-log "AMALGAM (used by rules _10C1-_10C6)"
+log "AMALGAM (used by rules/9_quantify_genes.smk)"
 ##############################################################################
-# Isoform discovery/quantification pipeline (github.com/RNA-ROB/amalgam),
-# invoked by rules/10_quantify_genes.smk's _10C1-_10C6 rule chain.
-#
-# No tagged releases exist upstream, so this clones `main` directly
-# (same convention as the NanoTS step above) rather than pinning a
-# version tag the way CADD-scripts does.
-#
-# AMALGAM ships its own conda_requirements.txt and documents its own
-# create/activate/install sequence in its README -- this mirrors that
-# exactly, in its own dedicated env (same pattern as
-# conda_env_compile_variants above: a separate env, not folded into the
-# main conda_env, so its pinned dependency versions can't conflict with
-# the rest of the pipeline's). conda_requirements.txt alone covers every
-# dependency AMALGAM needs (including StringTie and GffCompare) -- nothing
-# else to install separately.
+# Isoform discovery/quantification pipeline (github.com/RNA-ROB/amalgam).
+# Gets its own dedicated conda env (same pattern as conda_env_compile_variants) so its pinned dependencies can't conflict
+# with the rest of the pipeline's.
 AMALGAM_LOG="$RESOURCES_DIR/.setup_logs/amalgam.log"
 (
     AMALGAM_DIR="$RESOURCES_DIR/amalgam"
@@ -796,11 +693,9 @@ AMALGAM_LOG="$RESOURCES_DIR/.setup_logs/amalgam.log"
             || git clone git@github.com:RNA-ROB/amalgam.git "$AMALGAM_DIR"
     fi
 
-    # AMALGAM's own conda_requirements.txt hard-pins several packages with
-    # "==" at versions that don't actually solve together against
-    # python=3.11 (e.g. biopython==1.78 only has conda-forge builds for
-    # Python 3.6-3.9) -- a bug in that file, not this pipeline. Rather than
-    # use it as-is, write our own known-solvable pin set here instead.
+    # AMALGAM's own conda_requirements.txt hard-pins some packages to
+    # versions that don't actually solve together against python=3.11, so
+    # write a known-solvable pin set here instead of using it as-is.
     AMALGAM_REQ_CUSTOM="$AMALGAM_DIR/conda_requirements_custom.txt"
     cat > "$AMALGAM_REQ_CUSTOM" <<'REQEOF'
 biopython>=1.79,<2
