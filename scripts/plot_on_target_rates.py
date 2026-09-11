@@ -2,7 +2,7 @@
 """
 scripts/plot_on_target_rates.py
 Computes per-sample mapping and on-target rates from BAM(+BED) pairs and plots
-them across the cohort. Invoked by rules/9_plot_cohort_info.smk (_9A).
+them across the cohort. Invoked by rules/8_cohort_qc.smk (_8A).
 
 Adapted from a script pulled from Github 2026.04.08.
 """

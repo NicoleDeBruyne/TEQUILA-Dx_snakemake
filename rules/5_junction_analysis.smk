@@ -101,7 +101,7 @@ rule _5C_identify_junction_outliers:
         padj_thr   = config["padj_threshold"],
         dpsi_thr   = config["delta_psi_threshold"],
         script     = workflow.basedir + "/scripts/identify_splice_junction_outliers.py",
-    threads: lambda wc: _rule_threads(wc, "identify_junction_outliers")
+    threads: 1   # single vectorized pandas filter, no per-item work to parallelize -- see the script's own header comment
     resources:
         mem_mb     = lambda wc, attempt: max(4096, attempt * 4 * 1024),
         runtime    = config["time"],
@@ -114,6 +114,5 @@ rule _5C_identify_junction_outliers:
             --outfile            {output.outliers} \\
             --padj-threshold     {params.padj_thr} \\
             --delta-PSI-threshold {params.dpsi_thr} \\
-            --threads            {threads} \\
         2>&1 | tee {log}
         """

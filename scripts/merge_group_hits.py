@@ -50,7 +50,7 @@ def parse_args():
     parser.add_argument("--omim", required=False, default=None,
         help="Path to OMIM data. If omitted, phenotypes/inheritance_patterns/haploinsufficient are filled with '.'/False.")
     parser.add_argument("--gene-expression-matrix", required=False, default=None,
-        help="Group-level targeted-panel CPTM matrix (rule _10D's <outprefix>_matrix.tsv, from "
+        help="Group-level targeted-panel CPTM matrix (rule _9C's <outprefix>_matrix.tsv, from "
              "quantify_gene_by_assignment.py) -- one row per gene, one column per sample in this "
              "(bed_id, sample_type) group. If omitted/missing, relative_gene_expression/"
              "cohort_relative_gene_expression/n_cohort are filled with '.' (merge_hits.build_hit_table's "

@@ -8,6 +8,25 @@
 # Run manifest, injected at runtime by submit_snakemake.sh. Each sample
 # entry provides: bam, bed, tissues, sample_type, and optionally an outdir
 # override (default: {output_dir}/samples/{sample}/output).
+#
+# The same run manifest can also define named cohorts for rules 6-9
+# (merge_hits, cohort_junction_analysis, cohort_qc, quantify_genes) to run
+# over, in addition to "cohort_all" (always runs, always every sample):
+#
+#   cohorts:
+#     cohort_subset:
+#       - SAMPLE_A
+#       - SAMPLE_C
+#
+# Each named cohort gets its own sibling output directory
+# ({output_dir}/cohort_subset/... alongside {output_dir}/cohort_all/...). A
+# sample can belong to any number of named cohorts (or none -- it's always
+# still part of cohort_all regardless). "cohort_all" is reserved and can't
+# be redefined. There's no per-cohort resource/threads override -- cohorts:
+# only controls sample membership; see the groups: override block below for
+# per-group threading (note its keys are now cohort-prefixed, e.g.
+# "cohort_all_IEI422_gene_symbols_fibroblasts" instead of
+# "IEI422_gene_symbols_fibroblasts", to stay unique across cohorts).
 run: ""
 
 # ---------------------------------------------------------------------------
@@ -24,8 +43,7 @@ junction_analysis:          true
 cohort_junction_analysis:   true
 merge_hits:                 true
 merge_hits_include_cohort_junctions: true
-validate_sample_types:      true
-plot_cohort_qc:              true
+cohort_qc:      true
 quantify_genes:              true
 
 # conda_env is used by every rule except compile_variants, 
@@ -130,6 +148,16 @@ phasing_threshold:      0.5   # min proportion of a read's coverage that must ph
 terminal_variant_proportion: 0.5  # do not phase on variants that appear at the end of a read more frequently thatn this 
 min_dist_from_read_end_variant_phasing: 20   # min distance (bp) from a read's end for a variant to be used in phasing
 
+# NanoTS's own genotype AND phase (allele order + PS) are both trusted directly --
+# whatshap is only ever used to haplotag reads against them, never to re-derive
+# phase (no `whatshap phase` step at all) -- selected per-gene straight from the
+# raw NanoTS VCF, see scripts/phase_reads.py's module docstring. No AF filter is
+# applied to NanoTS (FILTER=PASS and DP only); phasing_min_af below applies only
+# to candidate (Clair3/DeepVariant-shared) indels, which are only ever used as a
+# fallback single-variant haplotag anchor when a gene has no NanoTS phased block.
+phasing_min_dp: 20    # min DP for a NanoTS variant OR a candidate indel to be selected at all
+phasing_min_af: 0.1   # min AF for a candidate indel to be selected -- NOT applied to NanoTS variants
+
 # ---------------------------------------------------------------------------
 # Allele-specific expression (rules/4_ase_analysis.smk)
 # ---------------------------------------------------------------------------
@@ -190,7 +218,7 @@ merge_delta_psi_threshold:             0.1
 merge_jxn_sample_fraction:              0.05  # a junction that's an outlier in > this fraction of a group's samples is dropped
 
 # ---------------------------------------------------------------------------
-# Sample-type validation (rules/8_validate_sample_types.smk)
+# Sample-type validation (rules/8_cohort_qc.smk)
 # ---------------------------------------------------------------------------
 validate_ref_tissues: ["fibroblasts", "lymphocytes", "wholeblood"]
 validate_ref_colors:  ["#D95D5B", "#57AA3E", "#B271AB"]
@@ -205,7 +233,7 @@ sample_type_colors:
 # ---------------------------------------------------------------------------
 # Cohort-wide QC plots (rules/9_plot_cohort_info.smk)
 # ---------------------------------------------------------------------------
-cohort_qc_title: "Cohort QC"   # shared title for both _9A and _9B
+cohort_qc_title: "Cohort QC"   # shared title for _8A, _8B, and _8D
 
 # ---------------------------------------------------------------------------
 # Relative gene expression quantification (rules/10_quantify_genes.smk)

@@ -1,56 +1,37 @@
 """
 rules/3_phase_reads.smk
-Builds a merged VCF for phasing, then runs whatshap-based read phasing per
-gene. See docs/rules/3_phase_reads.md for details.
+Runs whatshap-based read phasing per gene, directly from the raw caller
+VCFs -- no more build_vcf_for_phasing.py / separate merged-VCF-building
+rule. For each gene, phase_reads.py selects its own trusted, heterozygous
+NanoTS variant set (PASS/DP-filtered, no AF filter -- genotype AND phase
+trusted directly, whatshap only ever haplotags reads against it, never
+re-derives phase) and its own candidate-indels set (Clair3/DeepVariant-
+shared, PASS/DP/AF-filtered) straight from the sample-wide caller VCFs --
+see phase_reads.py's module docstring for the full selection and phased-
+block-vs-fallback logic (including the phase-set/PS extension used to pull
+in NanoTS variants outside the gene's own region). See
+docs/rules/3_phase_reads.md for details.
 """
 
-rule _3A_build_vcf_for_phasing:
+rule _3A_phase_reads:
     input:
-        longcallr = "{outdir}/variant_calling/longcallR/{sample}_longcallR_norm.vcf.gz",
-        nanots    = "{outdir}/variant_calling/nanoTS/{sample}_nanoTS_norm.vcf.gz",
-        clair3    = "{outdir}/variant_calling/clair3_rna/{sample}_clair3_rna_norm.vcf.gz",
-        deepvar   = "{outdir}/variant_calling/deepvariant/{sample}_deepvariant_norm.vcf.gz",
-    output:
-        vcf_gz  = "{outdir}/phased_reads/{sample}_for_phasing.vcf.gz",
-        vcf_tbi = "{outdir}/phased_reads/{sample}_for_phasing.vcf.gz.tbi",
-    params:
-        script    = workflow.basedir + "/scripts/build_vcf_for_phasing.py",
-    threads: 1
-    resources:
-        mem_mb     = lambda wc, attempt: max(4096, attempt * 8 * 1024),
-        runtime    = config["time"],
-    log:
-        "{outdir}/../logs/{sample}_build_vcf_for_phasing.log"
-    shell:
-        """
-        mkdir -p $(dirname {output.vcf_gz})
-        python -u {params.script} \\
-            --longcallR-vcf  {input.longcallr} \\
-            --nanoTS-vcf     {input.nanots} \\
-            --clair3-vcf     {input.clair3} \\
-            --deepvariant-vcf {input.deepvar} \\
-            --outfile        {output.vcf_gz} \\
-            --sample-name    {wildcards.sample} \\
-        2>&1 | tee {log}
-        tabix -f -p vcf {output.vcf_gz}
-        """
-
-
-rule _3B_phase_reads:
-    input:
-        bam = lambda wc: SAMPLES[wc.sample]["bam"],
-        vcf = "{outdir}/phased_reads/{sample}_for_phasing.vcf.gz",
-        bed = lambda wc: SAMPLES[wc.sample]["bed"],
+        bam     = lambda wc: SAMPLES[wc.sample]["bam"],
+        nanots  = "{outdir}/variant_calling/nanoTS/{sample}_nanoTS_norm.vcf.gz",
+        clair3  = "{outdir}/variant_calling/clair3_rna/{sample}_clair3_rna_norm.vcf.gz",
+        deepvar = "{outdir}/variant_calling/deepvariant/{sample}_deepvariant_norm.vcf.gz",
+        bed     = lambda wc: SAMPLES[wc.sample]["bed"],
     output:
         ase_infile = "{outdir}/phased_reads/{sample}_phasing_summary.tsv",
         mapping    = "{outdir}/phased_reads/{sample}_gene_bam_mapping_file.tsv",
     params:
-        genome         = config["genome"],
-        phased_dir     = "{outdir}/phased_reads",
-        phasing_thr    = config["phasing_threshold"],
-        terminal_prop  = config["terminal_variant_proportion"],
-        min_dist       = config["min_dist_from_read_end_variant_phasing"],
-        script         = workflow.basedir + "/scripts/phase_reads.py",
+        genome              = config["genome"],
+        phased_dir          = "{outdir}/phased_reads",
+        min_dp              = config["phasing_min_dp"],
+        min_af              = config["phasing_min_af"],
+        phasing_thr         = config["phasing_threshold"],
+        terminal_prop       = config["terminal_variant_proportion"],
+        min_dist            = config["min_dist_from_read_end_variant_phasing"],
+        script              = workflow.basedir + "/scripts/phase_reads.py",
     threads: lambda wc: _rule_threads(wc, "phase_reads")
     resources:
         mem_mb     = lambda wc, threads, attempt: max(4096, attempt * threads * 1024),
@@ -63,7 +44,11 @@ rule _3B_phase_reads:
         python -u {params.script} \\
             --bam        {input.bam} \\
             --bed        {input.bed} \\
-            --vcf        {input.vcf} \\
+            --nanoTS-vcf       {input.nanots} \\
+            --clair3-vcf       {input.clair3} \\
+            --deepvariant-vcf  {input.deepvar} \\
+            --min-dp     {params.min_dp} \\
+            --min-af     {params.min_af} \\
             --genome     {params.genome} \\
             --outdir     {params.phased_dir} \\
             --name       {wildcards.sample} \\

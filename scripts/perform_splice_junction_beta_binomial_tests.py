@@ -502,6 +502,21 @@ def main():
     regions = jxn_info_df['region'].unique()
     print(f"\nBegin processing {len(regions)} regions using {args.threads} threads. This may take a while...")
 
+    # GTEx junction IDs are formatted "chr:start-end:strand" (e.g. "chr1:11212-12009:+"),
+    # unlike every other junction ID in this pipeline (get_splice_junction_counts_by_region.py,
+    # make_junction_count_matrix.py, merge_and_filter_junction_results.py), which all use
+    # "chr_start_end". Strand is ignored -- start is always < end regardless of strand.
+    # Parsed ONCE here (not per-region -- gtex_df.index itself never changes across regions,
+    # only the boolean mask selecting which rows belong to a given region does), since this
+    # can be a large index (especially for tissues like brain) and previously got re-split/
+    # re-parsed from scratch inside the per-region loop below -- O(n_regions) redundant work
+    # over the *entire* GTEx reference, dominating runtime on panels with many genes.
+    idx_chrom_coord = gtex_df.index.str.split(':')
+    gtex_chrom = idx_chrom_coord.map(lambda p: p[0])
+    idx_coords = idx_chrom_coord.map(lambda p: p[1]).str.split('-')
+    gtex_start = idx_coords.map(lambda p: int(p[0]))
+    gtex_end = idx_coords.map(lambda p: int(p[1]))
+
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.threads) as executor:
         futures = []
         for region in regions:
@@ -511,15 +526,6 @@ def main():
             # Pre-parse region components for the GTEx filter — avoids per-row lambda parsing
             reg_chrom, reg_coords = region.split(':')
             reg_start, reg_end = map(int, reg_coords.split('-'))
-            # GTEx junction IDs are formatted "chr:start-end:strand" (e.g. "chr1:11212-12009:+"),
-            # unlike every other junction ID in this pipeline (get_splice_junction_counts_by_region.py,
-            # make_junction_count_matrix.py, merge_and_filter_junction_results.py), which all use
-            # "chr_start_end". Strand is ignored -- start is always < end regardless of strand.
-            idx_chrom_coord = gtex_df.index.str.split(':')
-            gtex_chrom = idx_chrom_coord.map(lambda p: p[0])
-            idx_coords = idx_chrom_coord.map(lambda p: p[1]).str.split('-')
-            gtex_start = idx_coords.map(lambda p: int(p[0]))
-            gtex_end = idx_coords.map(lambda p: int(p[1]))
             gtex_mask = (
                 (gtex_chrom == reg_chrom) &
                 (gtex_start >= reg_start) &

@@ -12,7 +12,7 @@ were flagged for this gene/sample at all", not which specific tier/phasing/
 GTEx-tissue-comparison flagged each one separately -- that detail is still
 available in merged_all_hits.tsv itself.
 
-Invoked by rules/6_merge_hits.smk (_6F2, right after _6F_final_merge).
+Invoked by rules/6_merge_hits.smk, as part of _6F_final_merge (right after it writes merged_all_hits.tsv).
 """
 
 import argparse

@@ -53,7 +53,7 @@ def main():
     # because the job died with zero "Processed <sample>" lines printed,
     # meaning it never even reached pass 2). transcript_id/gene_id are
     # strings duplicated identically across nearly every sample (same
-    # shared reference transcriptome from _10C3's filtered.gtf), so
+    # shared reference transcriptome from _9D3's filtered.gtf), so
     # holding N samples' worth of them at once is what actually exceeded
     # the job's memory limit -- not the final matrix-assembly step.
     #

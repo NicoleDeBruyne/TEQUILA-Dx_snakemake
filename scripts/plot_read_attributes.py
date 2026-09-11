@@ -2,7 +2,7 @@
 """
 scripts/plot_read_attributes.py
 Plots per-read length distributions across the cohort, split by on-target /
-off-target / unmapped status. Invoked by rules/9_plot_cohort_info.smk (_9B).
+off-target / unmapped status. Invoked by rules/8_cohort_qc.smk (_8B).
 
 Adapted from a FASTQ-based script pulled from Github 2026.04.08. This version
 reads directly from BAM files instead of requiring a paired FASTQ (samples in

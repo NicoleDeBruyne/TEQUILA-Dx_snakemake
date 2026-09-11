@@ -161,6 +161,38 @@ def sample_tissues(sample):
 
 
 # ---------------------------------------------------------------------------
+# Named cohorts (rules/6-9): "cohort_all" always exists and contains every
+# sample in the run config -- the pipeline's original, only-cohort
+# behavior, just under an explicit name now. Additional cohorts can be
+# declared in the run config to rerun rules 6-9 over an explicit subset of
+# samples, as a sibling output directory:
+#
+#   cohorts:
+#     cohort_subset:
+#       - SAMPLE_A
+#       - SAMPLE_C
+#
+# A sample can belong to any number of named cohorts; not being listed
+# anywhere only means it's absent from every *named* cohort -- it's always
+# still part of cohort_all. "cohort_all" is reserved and can't be
+# redefined. Per-cohort resource/threads overrides aren't supported (see
+# _group_threads()'s groups: block for the existing, cohort-agnostic
+# per-group override mechanism) -- cohorts: only controls sample
+# membership.
+# ---------------------------------------------------------------------------
+COHORTS = {"cohort_all": list(SAMPLES.keys())}
+for _cid, _members in config.get("cohorts", {}).items():
+    if _cid == "cohort_all":
+        raise ValueError("'cohort_all' is a reserved cohort name (it always contains every sample "
+                         "in the run config) and can't be redefined under config['cohorts'].")
+    _unknown = [m for m in _members if m not in SAMPLES]
+    if _unknown:
+        raise ValueError("cohorts['" + str(_cid) + "'] references sample(s) not present in this run "
+                         "config's 'samples:' block: " + str(_unknown))
+    COHORTS[_cid] = list(_members)
+
+
+# ---------------------------------------------------------------------------
 # Group samples by (bed, sample_type) for cross-sample merging (rules/6_merge_hits.smk).
 # Each sample's run-config entry must include a "sample_type" field. Samples
 # sharing both the same BED panel and sample_type are merged together.
@@ -170,37 +202,43 @@ def _bed_id(bed):
     return Path(bed).stem
 
 
-def _group_id(bed, sample_type):
-    """Filesystem-safe identifier for a (bed, sample_type) group, e.g. 'IEI422_fibroblasts'."""
-    return (str(_bed_id(bed)) + '_' + str(sample_type))
+def _group_id(cohort_id, bed, sample_type):
+    """Filesystem-safe identifier for a (cohort, bed, sample_type) group, e.g.
+    'cohort_all_IEI422_fibroblasts'."""
+    return (str(cohort_id) + '_' + str(_bed_id(bed)) + '_' + str(sample_type))
 
 
-def _group_id_from_ids(bed_id, sample_type):
-    """Reconstruct a group_id from its already-split bed_id/sample_type wildcards."""
-    return (str(bed_id) + '_' + str(sample_type))
+def _group_id_from_ids(cohort_id, bed_id, sample_type):
+    """Reconstruct a group_id from its already-split cohort_id/bed_id/sample_type wildcards."""
+    return (str(cohort_id) + '_' + str(bed_id) + '_' + str(sample_type))
 
 
 def all_groups():
-    """Return {group_id: [sample, sample, ...]} for every unique (bed, sample_type)
-    combination present in the run config. Also populates GROUP_BED_ID and
-    GROUP_SAMPLE_TYPE (group_id is a concatenation and shouldn't be re-split,
-    since bed stems or sample_types could themselves contain underscores)."""
+    """Return {group_id: [sample, sample, ...]} for every unique (cohort, bed,
+    sample_type) combination present across COHORTS. A sample belonging to
+    N cohorts contributes to N distinct groups (one per cohort). Also
+    populates GROUP_COHORT_ID, GROUP_BED_ID, and GROUP_SAMPLE_TYPE
+    (group_id is a concatenation and shouldn't be re-split, since cohort
+    names, bed stems, or sample_types could themselves contain underscores)."""
     groups = defaultdict(list)
-    for s in SAMPLES:
-        if "sample_type" not in SAMPLES[s]:
-            raise ValueError(
-                ("Sample '" + str(s) + "' is missing a 'sample_type' field in the run config, ")
-                + 'required for grouping samples during the merge_hits stage.'
-            )
-        bed = SAMPLES[s]["bed"]
-        sample_type = SAMPLES[s]["sample_type"]
-        gid = _group_id(bed, sample_type)
-        groups[gid].append(s)
-        GROUP_BED_ID[gid] = _bed_id(bed)
-        GROUP_SAMPLE_TYPE[gid] = sample_type
+    for cid, members in COHORTS.items():
+        for s in members:
+            if "sample_type" not in SAMPLES[s]:
+                raise ValueError(
+                    ("Sample '" + str(s) + "' is missing a 'sample_type' field in the run config, ")
+                    + 'required for grouping samples during the merge_hits stage.'
+                )
+            bed = SAMPLES[s]["bed"]
+            sample_type = SAMPLES[s]["sample_type"]
+            gid = _group_id(cid, bed, sample_type)
+            groups[gid].append(s)
+            GROUP_COHORT_ID[gid] = cid
+            GROUP_BED_ID[gid] = _bed_id(bed)
+            GROUP_SAMPLE_TYPE[gid] = sample_type
     return dict(groups)
 
 
+GROUP_COHORT_ID = {}    # {group_id: cohort_id}
 GROUP_BED_ID = {}       # {group_id: bed_id}
 GROUP_SAMPLE_TYPE = {}  # {group_id: sample_type}
 GROUPS = all_groups()  # {group_id: [sample, ...]}
@@ -216,13 +254,13 @@ def group_tissues(group_id):
 
 def group_outdir(group_id):
     """Shared *output* directory for a group's merged results, nested under
-    its BED panel's own output/ dir and sample_type:
-    {output_dir}/cohort/{bed_id}/output/sample_types/{sample_type}/output.
-    Sibling 'logs' directory is {output_dir}/cohort/{bed_id}/output/sample_types/{sample_type}/logs
+    its cohort's own directory, its BED panel's own output/ dir, and sample_type:
+    {output_dir}/{cohort_id}/{bed_id}/output/sample_types/{sample_type}/output.
+    Sibling 'logs' directory is {output_dir}/{cohort_id}/{bed_id}/output/sample_types/{sample_type}/logs
     -- built directly in each rules/*.smk file rather than through a helper,
     since (unlike group_outdir itself) it's only ever needed as a plain
     string template, not computed per-group in Python."""
-    return (str(config['output_dir']) + '/cohort/' + str(GROUP_BED_ID[group_id]) + '/output/sample_types/' + str(GROUP_SAMPLE_TYPE[group_id]) + '/output')
+    return (str(config['output_dir']) + '/' + str(GROUP_COHORT_ID[group_id]) + '/' + str(GROUP_BED_ID[group_id]) + '/output/sample_types/' + str(GROUP_SAMPLE_TYPE[group_id]) + '/output')
 
 
 # ---------------------------------------------------------------------------
@@ -305,40 +343,41 @@ def _cja_n_threshold(group_id):
 # the final cross-sample-type merge of all_hits.
 # ---------------------------------------------------------------------------
 def all_bed_groups():
-    """Return {bed_id: [group_id, ...]} for every BED panel present in the run."""
+    """Return {(cohort_id, bed_id): [group_id, ...]} for every (cohort,
+    BED panel) combination present in the run."""
     groups = defaultdict(list)
     for gid, members in GROUPS.items():
         bed = SAMPLES[members[0]]["bed"]
-        groups[_bed_id(bed)].append(gid)
+        groups[(GROUP_COHORT_ID[gid], _bed_id(bed))].append(gid)
     return dict(groups)
 
 
-BED_GROUPS = all_bed_groups()  # {bed_id: [group_id, ...]}
+BED_GROUPS = all_bed_groups()  # {(cohort_id, bed_id): [group_id, ...]}
 
 
-def bed_path(bed_id):
-    """Actual BED file path for a given bed_id."""
-    gid = BED_GROUPS[bed_id][0]
+def bed_path(cohort_id, bed_id):
+    """Actual BED file path for a given (cohort_id, bed_id)."""
+    gid = BED_GROUPS[(cohort_id, bed_id)][0]
     return SAMPLES[GROUPS[gid][0]]["bed"]
 
 
-def bed_samples(bed_id):
-    """Every sample using this BED panel, across all its sample_types --
-    used by rules/9_plot_cohort_info.smk, which (unlike cohort_junction_analysis
-    or merge_hits) pools across sample_type within a bed rather than
-    operating per (bed, sample_type) group."""
-    return [s for gid in BED_GROUPS[bed_id] for s in GROUPS[gid]]
+def bed_samples(cohort_id, bed_id):
+    """Every sample using this BED panel within this cohort, across all its
+    sample_types -- used by rules/8_cohort_qc.smk, which (unlike
+    cohort_junction_analysis or merge_hits) pools across sample_type within
+    a bed rather than operating per (bed, sample_type) group."""
+    return [s for gid in BED_GROUPS[(cohort_id, bed_id)] for s in GROUPS[gid]]
 
 
-def bed_outdir(bed_id):
-    """Shared *output* directory for a BED panel's cross-sample-type results:
-    {output_dir}/cohort/{bed_id}/output. Contains validate_sample_types/,
+def bed_outdir(cohort_id, bed_id):
+    """Shared *output* directory for a BED panel's cross-sample-type results
+    within one cohort: {output_dir}/{cohort_id}/{bed_id}/output. Contains
     cohort_qc/, sample_types/, and merged_all_hits.tsv. Sibling 'logs'
-    directory is {output_dir}/cohort/{bed_id}/logs (a sibling of this
+    directory is {output_dir}/{cohort_id}/{bed_id}/logs (a sibling of this
     output/ dir, not nested inside it) -- built directly as a plain string
     template in each rules/*.smk file rather than through a helper, same
     reasoning as group_outdir's own logs dir above."""
-    return (str(config['output_dir']) + '/cohort/' + str(bed_id) + '/output')
+    return (str(config['output_dir']) + '/' + str(cohort_id) + '/' + str(bed_id) + '/output')
 
 
 def _quoted(items):
@@ -450,17 +489,19 @@ def all_outputs():
                 )
 
     if flag("merge_hits"):
-        # Requesting _6G's output pulls in _6A-_6D/_6F (everything _6G
-        # actually depends on, including merged_all_hits.tsv). It does NOT
-        # pull in _6E_plot_group_hits or _6F2_simplify_all_hits: those are
-        # dead-end branches off all_hits.tsv/merged_all_hits.tsv --
-        # nothing downstream (_6F/_6G) consumes them, so they must be
-        # requested explicitly here or Snakemake never builds them. Which
-        # of _6D1/_6D2 the _6G branch actually runs is controlled by
+        # Requesting _6F_plot_hits_upset's output pulls in _6A-_6D/_6F_final_merge
+        # (everything _6F_plot_hits_upset actually depends on, including
+        # merged_all_hits.tsv AND merged_all_hits_simplified.tsv -- both are
+        # declared outputs of _6F_final_merge, so requesting either one
+        # builds both). It does NOT pull in _6E_plot_group_hits: that's a
+        # dead-end branch off all_hits.tsv -- nothing downstream consumes
+        # it, so it must be requested explicitly here or Snakemake never
+        # builds it. Which of _6D1/_6D2 the _6F_plot_hits_upset branch
+        # actually runs is controlled by
         # config['merge_hits_include_cohort_junctions'], not here -- see
         # rules/6_merge_hits.smk's module docstring.
-        for bid in BED_GROUPS:
-            bod = bed_outdir(bid)
+        for (cid, bid) in BED_GROUPS:
+            bod = bed_outdir(cid, bid)
             outs.append((str(bod) + '/hits_upset_density.pdf'))
             outs.append((str(bod) + '/merged_all_hits_simplified.tsv'))
         for gid in GROUPS:
@@ -489,25 +530,24 @@ def all_outputs():
             outs.append(god + "/gene_quantification/by_count/gene_count_matrix.tsv")
             outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix.tsv")
-            # _10C4_amalgam_annotate_orf's output isn't consumed by anything
+            # _9D4_amalgam_annotate_orf's output isn't consumed by anything
             # downstream (see that rule's docstring in
-            # rules/10_quantify_genes.smk) -- listed explicitly here so it
+            # rules/9_quantify_genes.smk) -- listed explicitly here so it
             # still gets scheduled/run rather than silently skipped by
             # Snakemake's pull-based DAG.
             outs.append(god + "/gene_quantification/by_amalgam/annotation/annotated.gtf.gz")
             outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix.tsv")
 
-    if flag("validate_sample_types"):
+    if flag("cohort_qc"):
         # Requesting validate_sample_types' output pulls build_group_junction_matrix along with it.
-        for bid in BED_GROUPS:
-            bod = bed_outdir(bid)
-            outs.append((str(bod) + '/validate_sample_types/' + str(bid) + '_distance_heatmap.pdf'))
-
-    if flag("plot_cohort_qc"):
-        for bid in BED_GROUPS:
-            cqd = bed_outdir(bid) + "/cohort_qc"
+        for (cid, bid) in BED_GROUPS:
+            bod = bed_outdir(cid, bid)
+            cqd = bod + "/cohort_qc"
+            outs.append((str(bod) + '/cohort_qc/validate_sample_types/' + str(bid) + '_distance_heatmap.pdf'))
             outs.append((str(cqd) + '/on_target_rates/' + str(bid) + '_on_target_rates_ontarget.pdf'))
             outs.append((str(cqd) + '/read_attributes/' + str(bid) + '_read_attributes_read_lengths_violin.pdf'))
+            outs.append((str(cqd) + '/full_length_ratio/' + str(bid) + '_full_length_ratio_matrix.tsv'))
+            outs.append((str(cqd) + '/full_length_ratio/' + str(bid) + '_full_length_ratio_heatmap.pdf'))
 
     return outs
 
@@ -527,6 +567,5 @@ include: "rules/4_ase_analysis.smk"
 include: "rules/5_junction_analysis.smk"
 include: "rules/6_merge_hits.smk"
 include: "rules/7_cohort_junction_analysis.smk"
-include: "rules/8_validate_sample_types.smk"
-include: "rules/9_plot_cohort_info.smk"
-include: "rules/10_quantify_genes.smk"
+include: "rules/8_cohort_qc.smk"
+include: "rules/9_quantify_genes.smk"

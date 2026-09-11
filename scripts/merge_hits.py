@@ -393,7 +393,7 @@ def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
 
 
 def load_gene_expression_df(path):
-    """Read the CPTM matrix from rule _10D (quantify_gene_by_assignment.py's
+    """Read the CPTM matrix from rule _9C (quantify_gene_by_assignment.py's
     <outprefix>_matrix.tsv) -- one row per targeted-panel gene, one column
     per sample in that (bed_id, sample_type) cohort. Since this matrix is
     already scoped to exactly one (panel, sample_type) group, every
@@ -886,7 +886,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     hit_df.drop(columns=['_tb_n_pathogenic', '_tb_clnsig_rank', '_tb_max_bulk_delta', '_tb_max_cadd'], inplace=True)
     hit_df['ranking'] = np.arange(1, len(hit_df) + 1)
 
-    # Gene expression (rule _10D's targeted-panel CPTM matrix, one row per
+    # Gene expression (rule _9C's targeted-panel CPTM matrix, one row per
     # gene / one column per sample in this exact (bed_id, sample_type)
     # cohort -- see load_gene_expression_df()). relative_gene_expression is
     # this sample's own CPTM value for the gene; cohort_relative_gene_expression

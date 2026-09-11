@@ -3,6 +3,47 @@
 # Author: Nicole DeBruyne (Lin Lab)
 # Date: 2025.01.24
 # Optimized: 2025
+# Revised: 2026 -- read phasing now trusts NanoTS's genotypes AND its own
+# phase directly, and selects its own per-gene variant set straight from
+# --nanoTS-vcf (no more build_vcf_for_phasing.py / separate merged-VCF-
+# building rule). Per gene, select_nanoTS_variants_for_gene() takes every
+# PASS/DP-filtered, heterozygous NanoTS variant overlapping the gene
+# region, PLUS every PASS/DP-filtered heterozygous NanoTS variant anywhere
+# else in the VCF sharing a phase set (PS) with one of those -- NanoTS
+# phases its own calls internally (its own output is literally named
+# phased_predict.pass.vcf), so a shared PS means NanoTS already established
+# two variants are on the same haplotype block even when one sits outside
+# the gene's own boundaries. No AF filter is applied to NanoTS (FILTER=PASS
+# and DP only) -- its genotype is trusted directly.
+#
+# Whatever VCF ends up used for haplotag is written to (and persists at)
+# {outdir}/phased_reads/{gene}/{gene}_phased.vcf.gz -- not a scratch/temp
+# file -- so it's always available to inspect after the fact, whichever of
+# the cases below actually produced it.
+#
+# Whatshap is used ONLY to haplotag reads (assign each read to whichever
+# haplotype its alleles match), NEVER to phase (`whatshap phase` is not run
+# anywhere in this script). Per gene, phase_reads() first computes BAM-
+# recomputed coverage (samtools depth over the filtered BAM, not each
+# source's self-reported DP) over the WHOLE pool of selected NanoTS
+# variants and candidate (Clair3/DeepVariant-shared) indels, tracking
+# whichever single site has the highest coverage -- unconditionally, not
+# just as a fallback, since it's also used as a sanity check below. Then:
+#   - If 2+ of the gene's selected NanoTS variants share a real PS (a
+#     genuine NanoTS-derived phased block), that block's variants are
+#     written with their exact NanoTS phase (allele order + PS) preserved
+#     -- write_nanoTS_vcf() -- and haplotagged directly (run_haplotag()).
+#     If fewer reads end up phased this way than the single max-coverage
+#     variant's own coverage, the block result is discarded and haplotag
+#     is redone using just that one max-coverage variant instead -- a
+#     multi-site block isn't assumed to always beat a single well-covered
+#     site.
+#   - Otherwise (no shared-PS block), haplotag runs directly against the
+#     single max-coverage variant from the pool (NanoTS or candidate indel,
+#     whichever it is). A candidate indel is only ever used this way, as
+#     one option in a coverage-ranked pool -- never assigned to or tested
+#     against an already-established NanoTS haplotype. If the pool is
+#     empty, the gene simply isn't phased.
 
 import argparse
 import os
@@ -19,14 +60,34 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Phases reads from an RNA-seq BAM file that cover gene regions of interest.")
     parser.add_argument("--bam", type=str, required=True)
-    parser.add_argument("--vcf", type=str, required=True)
+    parser.add_argument("--nanoTS-vcf", type=str, required=True,
+        help="NanoTS VCF (already internally phased -- has its own GT/PS). Per gene, the trusted "
+             "variant set is selected directly from here: every PASS/DP-filtered variant overlapping "
+             "the gene region, PLUS every PASS/DP-filtered variant anywhere else in this VCF that "
+             "shares a phase set (PS) with one of those -- see select_nanoTS_variants_for_gene(). No AF "
+             "filter is applied to NanoTS -- its genotypes are trusted directly, not used as a "
+             "confidence-scored candidate the way Clair3/DeepVariant indels still are.")
+    parser.add_argument("--clair3-vcf", type=str, required=True,
+        help="Clair3 VCF, used only for indels shared with --deepvariant-vcf that NanoTS didn't already "
+             "call -- see select_candidate_indels_for_gene(). Whatshap never sees these directly; they're "
+             "only used as fallback single-variant haplotag anchors when a gene has no NanoTS phased "
+             "block -- see phase_reads().")
+    parser.add_argument("--deepvariant-vcf", type=str, required=True,
+        help="DeepVariant VCF, used the same way as --clair3-vcf (indel agreement partner).")
     parser.add_argument("--region", type=str)
     parser.add_argument("--bed", type=str)
     parser.add_argument("--genome", type=str, required=True)
     parser.add_argument("--outdir", type=str, required=True)
     parser.add_argument("--name", type=str, default="SAMPLE")
     parser.add_argument("--threads", type=int, default=1)
-    parser.add_argument('--snvs-only', action='store_true')
+    parser.add_argument('--snvs-only', action='store_true',
+        help="Exclude NanoTS indels from the trusted set (SNVs only). Candidate indels (Clair3/"
+             "DeepVariant-shared) are unaffected by this flag.")
+    parser.add_argument('--min-dp', type=int, default=20,
+        help="Minimum DP for a NanoTS or candidate-indel variant to be selected at all. Default: 20")
+    parser.add_argument('--min-af', type=float, default=0.1,
+        help="Minimum AF for a candidate indel (Clair3/DeepVariant-shared) to be selected. NOT applied "
+             "to NanoTS variants, which are trusted directly regardless of AF. Default: 0.1")
     parser.add_argument('--terminal-variant-proportion', type=float, default=0.5)
     parser.add_argument('--min-distance-from-read-end', type=int, default=20)
     parser.add_argument('--phasing-threshold', type=float, default=0.5)
@@ -87,36 +148,217 @@ def remove_monoexonic_reads(inbam, outbam, threads=1):
     return outbam
 
 
-def filter_vcf(invcf, outvcf, region, snvs_only=False, ignore_variants_bed=None):
-    """Filter a VCF file for bi-allelic heterozygous variants in a specific region."""
-    if outvcf.endswith('.gz'):
-        outvcf = outvcf[:-3]
+def _load_ignore_positions(ignore_variants_bed):
+    """Returns a set of (chrom, pos) 1-based positions to exclude from
+    variant selection, or None if no bed was given."""
+    if not ignore_variants_bed:
+        return None
+    positions = set()
+    with open(ignore_variants_bed) as f:
+        for line in f:
+            if not line.strip() or line.startswith('#'):
+                continue
+            fields = line.rstrip('\n').split('\t')
+            chrom, start, end = fields[0], int(fields[1]), int(fields[2])
+            for p in range(start + 1, end + 1):  # BED 0-based half-open -> 1-based positions
+                positions.add((chrom, p))
+    return positions
 
-    if ignore_variants_bed:
-        tempvcf = os.path.join(os.path.dirname(outvcf), "temp.vcf")
-        subprocess.run([bcftools_exec, 'view', '-T', f'^{ignore_variants_bed}', '-Oz', '-o', tempvcf, invcf],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        subprocess.run([bcftools_exec, 'sort', '-Oz', '-o', f"{tempvcf}.gz", tempvcf],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        subprocess.run([tabix_exec, '-f', '-p', 'vcf', f"{tempvcf}.gz"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        invcf = f"{tempvcf}.gz"
 
-    if snvs_only:
-        cmd = [bcftools_exec, 'view', '-m2', '-M2', '-v', 'snps', '--regions', region, '-Oz', '-o', outvcf, invcf]
-    else:
-        cmd = [bcftools_exec, 'view', '-m2', '-M2', '--regions', region, '-Oz', '-o', outvcf, invcf]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    subprocess.run([bcftools_exec, 'sort', '-Oz', '-o', f"{outvcf}.gz", outvcf],
+def write_variants_vcf(outfile, variants, sample_name, contigs):
+    """Writes a minimal plain-text VCF for candidate indels
+    ({(chrom,pos,ref,alt): (GT, DP)}), bgzip+tabix'd in place. GT is always
+    written with '/' (unphased) -- candidate indels' own reported genotype
+    is irrelevant downstream: they're only ever used for BAM-recomputed-
+    coverage ranking as one option in phase_reads()'s single-variant
+    fallback pool, which doesn't look at this GT field at all. See
+    write_nanoTS_vcf() for the trusted NanoTS set, which -- unlike this --
+    preserves real phase."""
+    if outfile.endswith(".gz"):
+        outfile = outfile[:-3]
+    sorted_variants = sorted(variants.items())
+    with open(outfile, "w") as f:
+        f.write("##fileformat=VCFv4.2\n")
+        for c in contigs:
+            f.write(f"##contig=<ID={c}>\n")
+        f.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
+        f.write('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">\n')
+        f.write(f"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{sample_name}\n")
+        for (chrom, pos, ref, alt), (GT, DP) in sorted_variants:
+            gt_str = "/".join(map(str, GT)) if GT else "./."
+            f.write(f"{chrom}\t{pos}\t.\t{ref}\t{alt}\t.\tPASS\t.\tGT:DP\t{gt_str}:{DP}\n")
+    subprocess.run([bcftools_exec, "sort", "-Oz", "-o", f"{outfile}.gz", outfile],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    subprocess.run([tabix_exec, '-f', '-p', 'vcf', f"{outvcf}.gz"],
+    os.remove(outfile)
+    subprocess.run([tabix_exec, "-f", "-p", "vcf", f"{outfile}.gz"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    os.remove(outvcf)
 
-    if ignore_variants_bed:
-        os.remove(tempvcf)
-        os.remove(f"{tempvcf}.gz")
-        os.remove(f"{tempvcf}.gz.tbi")
+
+def write_nanoTS_vcf(outfile, variants, sample_name, contigs):
+    """Writes a minimal plain-text VCF for the trusted NanoTS set
+    ({(chrom,pos,ref,alt): (GT, phased, PS, DP)}), bgzip+tabix'd in place.
+    Unlike write_variants_vcf(), this PRESERVES NanoTS's own phase exactly
+    as reported -- allele order ('|' vs '/') and PS -- since whatshap is
+    only ever used downstream to haplotag reads against this VCF, never to
+    re-derive phase (see this script's module docstring). PS is always
+    written (as "." when NanoTS didn't report one) so every record has a
+    consistent FORMAT column."""
+    if outfile.endswith(".gz"):
+        outfile = outfile[:-3]
+    sorted_variants = sorted(variants.items())
+    with open(outfile, "w") as f:
+        f.write("##fileformat=VCFv4.2\n")
+        for c in contigs:
+            f.write(f"##contig=<ID={c}>\n")
+        f.write('##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n')
+        f.write('##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read Depth">\n')
+        f.write('##FORMAT=<ID=PS,Number=1,Type=String,Description="Phase set">\n')
+        f.write(f"#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{sample_name}\n")
+        for (chrom, pos, ref, alt), (GT, phased, PS, DP) in sorted_variants:
+            if not GT:
+                gt_str = "./."
+            else:
+                sep = "|" if phased else "/"
+                gt_str = sep.join(map(str, GT))
+            ps_str = str(PS) if PS not in (None, "") else "."
+            f.write(f"{chrom}\t{pos}\t.\t{ref}\t{alt}\t.\tPASS\t.\tGT:DP:PS\t{gt_str}:{DP}:{ps_str}\n")
+    subprocess.run([bcftools_exec, "sort", "-Oz", "-o", f"{outfile}.gz", outfile],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    os.remove(outfile)
+    subprocess.run([tabix_exec, "-f", "-p", "vcf", f"{outfile}.gz"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+
+
+def read_nanoTS_vcf(vcf_path):
+    """Reverse of write_nanoTS_vcf(): reads a VCF written by it (or passed
+    through remove_end_variants(), which preserves FORMAT fields via the
+    same header) back into {(chrom,pos,ref,alt): (GT, phased, PS, DP)}.
+    Used after remove_end_variants() to resume working with the filtered
+    variant set as a plain dict again."""
+    variants = {}
+    with pysam.VariantFile(vcf_path) as vcf:
+        for rec in vcf.fetch():
+            if not rec.alts:
+                continue
+            s = rec.samples[0]
+            PS = s.get("PS")
+            if PS in (".", "", 0, "0"):
+                PS = None
+            variants[(rec.chrom, rec.pos, rec.ref, rec.alts[0])] = (
+                s.get("GT"), s.phased, PS, s.get("DP") or 0)
+    return variants
+
+
+def select_nanoTS_variants_for_gene(nanoTS_vcf_path, chrom, start, end, min_dp,
+                                     snvs_only=False, ignore_positions=None):
+    """Selects the trusted, heterozygous NanoTS variant set for one gene:
+    every PASS/DP-filtered heterozygous variant overlapping the gene
+    region, PLUS every PASS/DP-filtered heterozygous variant anywhere else
+    in the VCF that shares a phase set (PS) with one of those. NanoTS
+    phases its own calls internally (its output is literally named
+    phased_predict.pass.vcf -- see rules/1_call_variants.smk), so a shared
+    PS means NanoTS already established two variants are on the same
+    haplotype block, even when one of them sits outside the gene's own
+    boundaries. No AF filter -- NanoTS's genotypes are trusted directly
+    here, not treated as a confidence-scored candidate the way Clair3/
+    DeepVariant indels still are in select_candidate_indels_for_gene().
+
+    NanoTS's own phase (GT allele order + PS) is preserved exactly as
+    reported, not discarded -- see this script's module docstring for why
+    whatshap is only ever used to haplotag reads against this, never to
+    re-derive phase itself. Returns {(chrom,pos,ref,alt): (GT, phased, PS, DP)}."""
+    def _passes(rec):
+        if rec.filter.keys() != ["PASS"]:
+            return None
+        if len(rec.alts) != 1:
+            return None
+        ref, alt = rec.ref, rec.alts[0]
+        if snvs_only and len(ref) == 1 and len(alt) == 1:
+            pass  # SNV, allowed
+        elif snvs_only:
+            return None  # indel, excluded when snvs_only
+        if ignore_positions and (rec.chrom, rec.pos) in ignore_positions:
+            return None
+        s = rec.samples[0]
+        GT = s.get("GT")
+        if not GT or None in GT or len(set(GT)) < 2:
+            return None  # missing or homozygous -- not heterozygous
+        DP = s.get("DP") or 0
+        if DP < min_dp:
+            return None
+        return s
+
+    variants = {}
+    phase_sets = set()
+
+    with pysam.VariantFile(nanoTS_vcf_path) as vcf:
+        for rec in vcf.fetch(chrom, start, end):
+            s = _passes(rec)
+            if s is None:
+                continue
+            key = (rec.chrom, rec.pos, rec.ref, rec.alts[0])
+            PS = s.get("PS")
+            variants[key] = (s.get("GT"), s.phased, PS, s.get("DP") or 0)
+            if PS not in (None, ".", 0, "0"):
+                phase_sets.add(PS)
+
+        # Second pass, unrestricted by region: NanoTS is a targeted-panel
+        # caller, so its whole per-sample VCF is small -- a full scan here
+        # (once per gene, in parallel with other genes) is cheap, and is
+        # the only way to correctly pull in same-PS variants that sit
+        # outside this gene's own region.
+        if phase_sets:
+            for rec in vcf.fetch():
+                if not rec.alts:
+                    continue
+                key = (rec.chrom, rec.pos, rec.ref, rec.alts[0])
+                if key in variants:
+                    continue
+                s = _passes(rec)
+                if s is None:
+                    continue
+                if s.get("PS") in phase_sets:
+                    variants[key] = (s.get("GT"), s.phased, s.get("PS"), s.get("DP") or 0)
+
+    return variants
+
+
+def select_candidate_indels_for_gene(clair3_vcf_path, deepvariant_vcf_path, chrom, start, end,
+                                      min_dp, min_af, exclude_keys, ignore_positions=None):
+    """Selects candidate indels for one gene: biallelic PASS indels called
+    by BOTH Clair3 and DeepVariant (PASS/DP/AF-filtered independently in
+    each), restricted to this gene's region, excluding anything already in
+    `exclude_keys` (the gene's trusted NanoTS set from
+    select_nanoTS_variants_for_gene() -- those don't need separate post-hoc
+    phasing, they're already trusted and already whatshap-phased). Returns
+    {(chrom,pos,ref,alt): (GT, DP)}."""
+    def _get(vcf_path):
+        out = {}
+        with pysam.VariantFile(vcf_path) as vcf:
+            for rec in vcf.fetch(chrom, start, end):
+                if rec.filter.keys() != ["PASS"]:
+                    continue
+                if len(rec.alts) != 1:
+                    continue
+                ref, alt = rec.ref, rec.alts[0]
+                if len(ref) == 1 and len(alt) == 1:
+                    continue  # indels only
+                if ignore_positions and (rec.chrom, rec.pos) in ignore_positions:
+                    continue
+                s = rec.samples[0]
+                DP = s.get("DP") or 0
+                AF = s.get("AF") or s.get("VAF") or (0,)
+                if isinstance(AF, (list, tuple)):
+                    AF = AF[0]
+                if DP < min_dp or AF < min_af:
+                    continue
+                out[(rec.chrom, rec.pos, ref, alt)] = (s.get("GT"), DP)
+        return out
+
+    clair3 = _get(clair3_vcf_path)
+    deepvariant = _get(deepvariant_vcf_path)
+    shared = {k: clair3[k] for k in clair3.keys() & deepvariant.keys()}
+    return {k: v for k, v in shared.items() if k not in exclude_keys}
 
 
 def remove_end_variants(invcf, outvcf, bam, min_distance_from_read_end=10, terminal_variant_proportion=0.5):
@@ -173,25 +415,14 @@ def remove_end_variants(invcf, outvcf, bam, min_distance_from_read_end=10, termi
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 
-def phase_variants(bam, genome, vcf, tempdir):
-    """Phase variants in a BAM file using WhatsHap."""
-    subprocess.run(
-        [whatshap_exec, 'phase', '-o', os.path.join(tempdir, 'whatshap.vcf'),
-         '--reference', genome, '--mapping-quality', '0', '--ignore-read-groups',
-         '--distrust-genotypes', vcf, bam],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    subprocess.run(
-        [bcftools_exec, 'sort', '-Oz', '-o', os.path.join(tempdir, 'whatshap.vcf.gz'),
-         os.path.join(tempdir, 'whatshap.vcf')],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    subprocess.run(
-        [tabix_exec, '-p', 'vcf', os.path.join(tempdir, 'whatshap.vcf.gz')],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-
-
-def annotate_read_depth(whatshapvcf, bam, outvcf, tempdir):
-    """Annotate a WhatsHap VCF file with read depth information."""
-    with pysam.VariantFile(whatshapvcf) as v, \
+def annotate_read_depth(invcf, bam, outvcf, tempdir):
+    """Re-annotates a VCF's DP with BAM-recomputed coverage (samtools depth
+    over `bam`), overwriting whatever DP the source caller(s) reported.
+    Despite the old name, `invcf` is no longer necessarily whatshap output
+    -- it's just any VCF (e.g. the trusted NanoTS set, or the gene-scoped
+    candidate indels) needing coverage recomputed on equal footing with
+    another VCF being compared against it."""
+    with pysam.VariantFile(invcf) as v, \
          open(os.path.join(tempdir, 'variants.bed'), 'w') as bedfile:
         for record in v.fetch():
             bedfile.write(f'{record.chrom}\t{record.pos - 1}\t{record.pos}\n')
@@ -199,9 +430,9 @@ def annotate_read_depth(whatshapvcf, bam, outvcf, tempdir):
     with open(os.path.join(tempdir, 'variant_coverage.tsv'), 'w') as f:
         subprocess.run([samtools_exec, 'depth', '-b', os.path.join(tempdir, 'variants.bed'), bam],
                        stdout=f, stderr=subprocess.DEVNULL, check=True)
-    subprocess.run([bgzip_exec, os.path.join(tempdir, 'variant_coverage.tsv')],
+    subprocess.run([bgzip_exec, '-f', os.path.join(tempdir, 'variant_coverage.tsv')],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    subprocess.run([tabix_exec, '-s', '1', '-b', '2', '-e', '2',
+    subprocess.run([tabix_exec, '-f', '-s', '1', '-b', '2', '-e', '2',
                     os.path.join(tempdir, 'variant_coverage.tsv.gz')],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
@@ -211,9 +442,9 @@ def annotate_read_depth(whatshapvcf, bam, outvcf, tempdir):
         [bcftools_exec, 'annotate',
          '-a', os.path.join(tempdir, 'variant_coverage.tsv.gz'),
          '-h', os.path.join(tempdir, 'header.txt'),
-         '-c', 'CHROM,POS,FORMAT/DP', whatshapvcf, '-Oz', '-o', outvcf],
+         '-c', 'CHROM,POS,FORMAT/DP', invcf, '-Oz', '-o', outvcf],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-    subprocess.run([tabix_exec, '-p', 'vcf', outvcf],
+    subprocess.run([tabix_exec, '-f', '-p', 'vcf', outvcf],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
 
@@ -233,45 +464,19 @@ def get_phased_coverage(bam_path, hap1_bam_path, hap2_bam_path, region):
     return total_max, phased_max
 
 
-def create_haplotype_specific_bams(filtered_bam, genome, gene_outdir, tempdir, name, gene,
-                                    region, phasing_threshold, threads, remove_monoexonic):
-    """Haplotag reads using phased VCF."""
-    report_message = ""
-
-    phased_vcf = os.path.join(gene_outdir, 'phased.vcf.gz')
-    gt_filter = 'GT="0|1" || GT="1|0"'
-    subprocess.run([bcftools_exec, "view", "-i", gt_filter, "-Oz", "-o", phased_vcf,
-                    os.path.join(gene_outdir, 'whatshap_annotated.vcf.gz')], check=True)
-    subprocess.run([tabix_exec, '-f', '-p', 'vcf', phased_vcf],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-
-    result = subprocess.run([bcftools_exec, 'view', '-H', phased_vcf],
-                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode()
-    has_phased = any(line.strip() for line in result.splitlines())
-
-    if not has_phased:
-        gt_filter = 'GT="0/1" || GT="1/0"'
-        het_output = subprocess.run(
-            [bcftools_exec, 'query', '-f', '%CHROM\t%POS\t%REF\t%ALT\t[%DP]\n',
-             '-i', gt_filter, os.path.join(gene_outdir, 'whatshap_annotated.vcf.gz')],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode()
-        if het_output:
-            best_line = max(het_output.splitlines(), key=lambda x: int(x.split('\t')[4]))
-            chrom, pos, ref, alt, dp = best_line.split('\t')
-            synthetic_vcf = os.path.join(gene_outdir, 'phased.vcf')
-            header = subprocess.run([bcftools_exec, 'view', '-h', phased_vcf],
-                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode()
-            with open(synthetic_vcf, "w") as f:
-                f.write(header)
-                f.write(f"{chrom}\t{pos}\t.\t{ref}\t{alt}\t.\tPASS\t.\tGT:PS\t0|1:{pos}\n")
-            phased_vcf = synthetic_vcf + ".gz"
-            subprocess.run([bgzip_exec, '-f', synthetic_vcf],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            subprocess.run([tabix_exec, '-f', '-p', 'vcf', phased_vcf],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            report_message += (f"\n    Phasing reads based on a single heterozygous variant with "
-                                f"the highest coverage at {chrom}:{pos} {ref}>{alt} (DP={dp})")
-
+def run_haplotag(phased_vcf, filtered_bam, genome, gene_outdir):
+    """Runs `whatshap haplotag` against `phased_vcf` and returns
+    (hap1_reads, hap2_reads, unassigned_reads) as lists of read names --
+    just the read-name-to-haplotype assignment, no BAM writing. Cheap
+    enough to call more than once per gene (phase_reads() does, when a
+    NanoTS phased block's own haplotag result underperforms the single
+    max-coverage-variant fallback and needs redoing with that instead) --
+    unlike whatshap split, which actually writes and indexes BAM files and
+    is only worth doing once the final phased_vcf choice is settled. No
+    `whatshap phase` is run anywhere in this pipeline; NanoTS already
+    phases its own calls internally (its own output is literally named
+    phased_predict.pass.vcf -- see rules/1_call_variants.smk), so whichever
+    phase phase_reads() decided on is what haplotag uses directly."""
     haplotag_outfile = os.path.join(gene_outdir, 'whatshap_haplotag.tsv')
     subprocess.run(
         [whatshap_exec, "haplotag", "--reference", genome, "--output", "/dev/null",
@@ -292,6 +497,18 @@ def create_haplotype_specific_bams(filtered_bam, genome, gene_outdir, tempdir, n
             else:
                 unassigned_reads.append(cols[0])
 
+    return hap1_reads, hap2_reads, unassigned_reads
+
+
+def finalize_haplotype_bams(filtered_bam, gene_outdir, name, gene, region, phasing_threshold, threads,
+                             remove_monoexonic, phased_vcf, hap1_reads, hap2_reads, unassigned_reads):
+    """Given the final (hap1_reads, hap2_reads, unassigned_reads) from
+    run_haplotag() against the settled `phased_vcf`, writes/indexes hap1/
+    hap2/unassigned BAMs (`whatshap split`), applies the phasing_threshold
+    gate, and writes the per-gene summary."""
+    report_message = ""
+
+    haplotag_outfile = os.path.join(gene_outdir, 'whatshap_haplotag.tsv')
     hap1_bam = os.path.join(gene_outdir, f'{name}_{gene}_hap1.bam')
     hap2_bam = os.path.join(gene_outdir, f'{name}_{gene}_hap2.bam')
     unassigned_bam = os.path.join(gene_outdir, f'{name}_{gene}_unassigned.bam')
@@ -313,7 +530,7 @@ def create_haplotype_specific_bams(filtered_bam, genome, gene_outdir, tempdir, n
         f"\n    Max overall coverage: {max_coverage}"
     )
 
-    if max_phased_coverage < phasing_threshold * max_coverage:
+    if max_coverage == 0 or max_phased_coverage < phasing_threshold * max_coverage:
         for fp in [hap1_bam, hap1_bam + ".bai", hap2_bam, hap2_bam + ".bai",
                    unassigned_bam, unassigned_bam + ".bai"]:
             if os.path.exists(fp):
@@ -350,7 +567,8 @@ def create_haplotype_specific_bams(filtered_bam, genome, gene_outdir, tempdir, n
 # Main function for phasing reads
 ########################################################################################################################
 
-def phase_reads(bam, gene, region, vcf, min_distance_from_read_end, terminal_variant_proportion,
+def phase_reads(bam, gene, region, nanoTS_vcf, clair3_vcf, deepvariant_vcf, min_dp, min_af,
+                min_distance_from_read_end, terminal_variant_proportion,
                 ignore_variants_bed, snvs_only, phasing_threshold, name, genome, outdir, threads, remove_monoexonic):
 
     gene_outdir = os.path.join(outdir, gene)
@@ -358,6 +576,10 @@ def phase_reads(bam, gene, region, vcf, min_distance_from_read_end, terminal_var
     os.makedirs(tempdir, exist_ok=True)
     if remove_monoexonic:
         os.makedirs(os.path.join(gene_outdir, 'multiexonic_bams'), exist_ok=True)
+
+    chrom, positions = region.split(":")
+    region_start, region_end = map(int, positions.split("-"))
+    ignore_positions = _load_ignore_positions(ignore_variants_bed)
 
     report = os.path.join(gene_outdir, f'{name}_{gene}_phasing_report.txt')
     with open(report, 'w') as report_file:
@@ -386,52 +608,132 @@ def phase_reads(bam, gene, region, vcf, min_distance_from_read_end, terminal_var
         report_file.write(f"    {total_read_count} primary/supplementary alignments found.")
         report_file.flush()
 
-        report_file.write(f"\nFiltering VCF file for variants in {gene} ({region})...")
+        report_file.write(f"\nSelecting trusted, heterozygous NanoTS variants for {gene} ({region})...")
         report_file.flush()
-        gene_vcf = os.path.join(tempdir, f'{gene}.vcf.gz')
-        filter_vcf(vcf, gene_vcf, region, snvs_only, ignore_variants_bed)
-        num_variants = int(
-            subprocess.run([bcftools_exec, 'index', '-n', gene_vcf],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode())
+        nanoTS_variants = select_nanoTS_variants_for_gene(
+            nanoTS_vcf, chrom, region_start, region_end, min_dp, snvs_only, ignore_positions)
+        report_file.write(f"\n    {len(nanoTS_variants)} trusted NanoTS variant(s) selected (overlapping "
+                          f"the gene region, or sharing a phase set with one that does).")
+        report_file.flush()
 
-        report_file.write(f"\n    {num_variants} variants found.")
+        report_file.write(f"\nSelecting candidate (Clair3/DeepVariant-shared) indels for {gene} ({region})...")
         report_file.flush()
-        if num_variants == 0:
-            report_file.write(f"\n    No variants found in {gene} ({region}). Exiting without phasing {name}...\n")
+        candidate_indels = select_candidate_indels_for_gene(
+            clair3_vcf, deepvariant_vcf, chrom, region_start, region_end, min_dp, min_af,
+            set(nanoTS_variants.keys()), ignore_positions)
+        report_file.write(f"\n    {len(candidate_indels)} candidate indel(s) selected (not already in the "
+                          f"trusted NanoTS set).")
+        report_file.flush()
+
+        if nanoTS_variants:
+            gene_vcf = os.path.join(tempdir, f'{gene}.vcf.gz')
+            write_nanoTS_vcf(gene_vcf, nanoTS_variants, name, [chrom])
+
+            if min_distance_from_read_end > 0 and terminal_variant_proportion < 1:
+                report_file.write(
+                    f"\nRemoving variants that occur within {min_distance_from_read_end}nt of the "
+                    f"end of a read more than {terminal_variant_proportion*100}% of the time...")
+                report_file.flush()
+                filtered_gene_vcf = os.path.join(tempdir, f'filtered_{gene}.vcf.gz')
+                remove_end_variants(gene_vcf, filtered_gene_vcf, filtered_bam,
+                                     min_distance_from_read_end, terminal_variant_proportion)
+                nanoTS_variants = read_nanoTS_vcf(filtered_gene_vcf)
+                report_file.write(f"\n    {len(nanoTS_variants)} variant(s) remain.")
+                report_file.flush()
+
+        # Coverage (BAM-recomputed via samtools depth, not each source's
+        # self-reported DP) is computed over the WHOLE pool -- every
+        # surviving NanoTS variant plus every candidate indel -- regardless
+        # of whether a NanoTS phased block exists, since it's needed either
+        # way: as the sole basis for haplotagging when there's no block, or
+        # as a sanity check against the block's own haplotag result when
+        # there is one (see below).
+        pool_keys = list(nanoTS_variants.keys()) + list(candidate_indels.keys())
+        best_key, best_dp = None, -1
+        if pool_keys:
+            report_file.write(f"\nComputing BAM-recomputed coverage over all {len(pool_keys)} "
+                              f"NanoTS variant(s) and candidate indel(s) for {gene}...")
+            report_file.flush()
+            pool_vcf = os.path.join(tempdir, f'{gene}_pool.vcf.gz')
+            write_variants_vcf(pool_vcf, {k: (None, 0) for k in pool_keys}, name, [chrom])
+            pool_annotated = os.path.join(tempdir, f'{gene}_pool_annotated.vcf.gz')
+            annotate_read_depth(pool_vcf, filtered_bam, pool_annotated, tempdir)
+            with pysam.VariantFile(pool_annotated) as vcf:
+                for rec in vcf.fetch():
+                    if not rec.alts:
+                        continue
+                    dp = rec.samples[0].get("DP") or 0
+                    if dp > best_dp:
+                        best_dp = dp
+                        best_key = (rec.chrom, rec.pos, rec.ref, rec.alts[0])
+            chrom_b, pos_b, ref_b, alt_b = best_key
+            source = "NanoTS variant" if best_key in nanoTS_variants else "candidate indel"
+            report_file.write(f"\n    Highest-coverage variant: a {source} at "
+                              f"{chrom_b}:{pos_b} {ref_b}>{alt_b} (DP={best_dp}).")
+            report_file.flush()
+
+        def _single_variant_vcf():
+            out = os.path.join(gene_outdir, f'{gene}_phased.vcf.gz')
+            chrom_b, pos_b, ref_b, alt_b = best_key
+            write_nanoTS_vcf(out, {best_key: ((0, 1), True, str(pos_b), best_dp)}, name, [chrom])
+            return out
+
+        # A phased block exists if 2+ of the (surviving) NanoTS variants
+        # share a real PS -- that's NanoTS's own phasing, established
+        # independently of this BAM.
+        ps_counts = {}
+        for _, phased_flag, PS, _ in nanoTS_variants.values():
+            if PS is not None:
+                ps_counts[PS] = ps_counts.get(PS, 0) + 1
+        phased_block_ps = {ps for ps, n in ps_counts.items() if n >= 2}
+
+        if phased_block_ps:
+            block_variants = {k: v for k, v in nanoTS_variants.items() if v[2] in phased_block_ps}
+            phased_vcf = os.path.join(gene_outdir, f'{gene}_phased.vcf.gz')
+            write_nanoTS_vcf(phased_vcf, block_variants, name, [chrom])
+            report_file.write(f"\nUsing NanoTS's own phased block ({len(block_variants)} variant(s), "
+                              f"{len(phased_block_ps)} phase set(s)) for whatshap haplotag...")
+            report_file.flush()
+            hap1_reads, hap2_reads, unassigned_reads = run_haplotag(phased_vcf, filtered_bam, genome, gene_outdir)
+            n_block_phased = len(hap1_reads) + len(hap2_reads)
+            report_file.write(f"\n    {n_block_phased} read(s) phased from the block.")
+            report_file.flush()
+
+            if best_key is not None and n_block_phased < best_dp:
+                report_file.write(f"\n    Fewer reads phased ({n_block_phased}) than the max single-variant "
+                                  f"coverage ({best_dp}); falling back to that single variant and redoing "
+                                  f"haplotag...")
+                report_file.flush()
+                phased_vcf = _single_variant_vcf()
+                hap1_reads, hap2_reads, unassigned_reads = run_haplotag(phased_vcf, filtered_bam, genome, gene_outdir)
+        elif best_key is not None:
+            phased_vcf = _single_variant_vcf()
+            report_file.write(f"\nNo NanoTS phased block found; phasing reads based on the single "
+                              f"highest-(BAM-recomputed)-coverage variant above for whatshap haplotag...")
+            report_file.flush()
+            hap1_reads, hap2_reads, unassigned_reads = run_haplotag(phased_vcf, filtered_bam, genome, gene_outdir)
+        else:
+            # Nothing at all to anchor on -- there's no variant to build a
+            # haplotype split from, so skip haplotagging entirely rather
+            # than running it against an empty VCF (which would always
+            # phase 0 reads, and -- since 0 coverage trivially satisfies
+            # the phasing_threshold ratio check in finalize_haplotype_bams,
+            # 0 < threshold * 0 is False -- could get misreported as a
+            # "successful" 0-read phasing instead of being cleanly skipped).
+            # filtered_bam (bulk) is kept, same as any other gene that fails
+            # to phase -- only hap1/hap2/unassigned BAMs are ever skipped.
+            report_file.write(f"\nNo NanoTS variants or candidate indels found for {gene} ({region}); "
+                              f"nothing to phase reads on. Exiting without attempting to haplotag...")
             report_file.write(f"\nFinished processing {name} over {gene} ({region}).")
             report_file.flush()
             shutil.rmtree(tempdir)
             return None
 
-        if min_distance_from_read_end > 0 and terminal_variant_proportion < 1:
-            report_file.write(
-                f"\nRemoving variants that occur within {min_distance_from_read_end}nt of the "
-                f"end of a read more than {terminal_variant_proportion*100}% of the time...")
-            report_file.flush()
-            filtered_gene_vcf = os.path.join(tempdir, f'filtered_{gene}.vcf.gz')
-            remove_end_variants(gene_vcf, filtered_gene_vcf, filtered_bam,
-                                 min_distance_from_read_end, terminal_variant_proportion)
-            num_variants = int(
-                subprocess.run([bcftools_exec, 'index', '-n', filtered_gene_vcf],
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode())
-            report_file.write(f"\n    {num_variants} variants remain.")
-            report_file.flush()
-            gene_vcf = filtered_gene_vcf
-
-        report_file.write(f"\nPhasing variants with whatshap...")
-        report_file.flush()
-        phase_variants(filtered_bam, genome, gene_vcf, tempdir)
-
-        report_file.write(f"\nAnnotating phased variants with read depth information...")
-        report_file.flush()
-        annotate_read_depth(os.path.join(tempdir, 'whatshap.vcf.gz'), filtered_bam,
-                            os.path.join(gene_outdir, 'whatshap_annotated.vcf.gz'), tempdir)
-
         report_file.write(f"\nCreating haplotype-specific BAM files...")
         report_file.flush()
-        report_message, summary_row = create_haplotype_specific_bams(
-            filtered_bam, genome, gene_outdir, tempdir, name, gene, region,
-            phasing_threshold, threads, remove_monoexonic)
+        report_message, summary_row = finalize_haplotype_bams(
+            filtered_bam, gene_outdir, name, gene, region, phasing_threshold, threads, remove_monoexonic,
+            phased_vcf, hap1_reads, hap2_reads, unassigned_reads)
         report_file.write(report_message)
 
         report_file.write(f"\nFinished processing {name} over {gene} ({region}).")
@@ -469,8 +771,12 @@ def main():
         raise FileNotFoundError(f"Genome file {args.genome} not found.")
     if args.bed and not os.path.exists(args.bed):
         raise FileNotFoundError(f"BED file {args.bed} not found.")
-    if not os.path.exists(args.vcf):
-        raise FileNotFoundError(f"VCF file {args.vcf} not found.")
+    if not os.path.exists(args.nanoTS_vcf):
+        raise FileNotFoundError(f"NanoTS VCF file {args.nanoTS_vcf} not found.")
+    if not os.path.exists(args.clair3_vcf):
+        raise FileNotFoundError(f"Clair3 VCF file {args.clair3_vcf} not found.")
+    if not os.path.exists(args.deepvariant_vcf):
+        raise FileNotFoundError(f"DeepVariant VCF file {args.deepvariant_vcf} not found.")
     if args.ignore_variants_bed and not os.path.exists(args.ignore_variants_bed):
         raise FileNotFoundError(f"BED file containing variants to ignore ({args.ignore_variants_bed}) not found.")
     if not args.region and not args.bed:
@@ -502,7 +808,8 @@ def main():
         with concurrent.futures.ProcessPoolExecutor(max_workers=threads) as executor:
             futures = {
                 executor.submit(
-                    phase_reads, args.bam, gene, f"{chrom}:{start}-{end}", args.vcf,
+                    phase_reads, args.bam, gene, f"{chrom}:{start}-{end}",
+                    args.nanoTS_vcf, args.clair3_vcf, args.deepvariant_vcf, args.min_dp, args.min_af,
                     args.min_distance_from_read_end, args.terminal_variant_proportion,
                     ignore_variants_bed, snvs_only, args.phasing_threshold, args.name,
                     args.genome, args.outdir, threads_per_process, args.remove_monoexonic): gene
@@ -518,10 +825,11 @@ def main():
                 print(f"Error encountered while phasing {gene}: {e}")
                 traceback.print_exc()
     else:
-        row = phase_reads(args.bam, args.name, args.region, args.vcf,
+        row = phase_reads(args.bam, args.name, args.region,
+                    args.nanoTS_vcf, args.clair3_vcf, args.deepvariant_vcf, args.min_dp, args.min_af,
                     args.min_distance_from_read_end, args.terminal_variant_proportion,
                     ignore_variants_bed, snvs_only, args.phasing_threshold, args.name,
-                    args.genome, args.outdir, args.threads)
+                    args.genome, args.outdir, args.threads, args.remove_monoexonic)
         if row is not None:
             summary_rows.append(row)
 

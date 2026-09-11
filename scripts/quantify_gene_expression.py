@@ -15,7 +15,7 @@ tool):
                         than to overall transcript abundance, but included
                         as an alternative/sanity-check view).
 
-Invoked by rules/10_quantify_genes.smk (_10A for count, _10B for coverage).
+Invoked by rules/9_quantify_genes.smk (_9A for count, _9B for coverage).
 
 Both metrics are reported two ways in the output matrix:
   - the raw value (read count, or max depth)

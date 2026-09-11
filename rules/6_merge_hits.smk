@@ -15,7 +15,7 @@ exclusive rules:
 
 config['merge_hits_include_cohort_junctions'] (default True) controls which
 one produces all_hits.tsv (and therefore everything chained after it --
-_6E/_6F/merged_all_hits.tsv) -- see the `subdir`/output path picked in each
+_6E/_6F_final_merge/merged_all_hits.tsv) -- see the `subdir`/output path picked in each
 rule below. Only the selected branch is ever requested, so only it ever
 runs; the two are never both computed in the same run. Flip the config
 value and rerun snakemake to switch which one all_hits.tsv is built from
@@ -32,9 +32,9 @@ served no purpose once _6A/_6B/_6C already merge across the whole group --
 see git history / conversation notes if you need the old per-sample
 version for reference.)
 
-_6G pools every all_hits.tsv across sample_types (via _6F's
-merged_all_hits.tsv) into an UpSet-style category-combination plot -- see
-that rule's docstring.
+_6F_plot_hits_upset pools every all_hits.tsv across sample_types (via
+_6F_final_merge's merged_all_hits.tsv) into an UpSet-style
+category-combination plot -- see that rule's docstring.
 """
 
 from math import ceil
@@ -46,7 +46,7 @@ from math import ceil
 # parsing and raises a NameError at load time. Paths reused across more than
 # one rule (e.g. all_candidate_variants.tsv, an output of _6A and an input
 # of _6D1) are also factored out here so both rules stay in sync.
-_cohort_outdir  = config["output_dir"] + "/cohort"
+_cohort_outdir  = config["output_dir"] + "/{cohort_id}"
 _variant_tsv    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_variant_calling/all_candidate_variants.tsv"
 _ase_tsv        = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_ase_analysis/outlier_ase.tsv"
 _junction_final = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_junction_analysis/gtex_{tissue}/outlier_junctions_gtex_{tissue}_final.tsv"
@@ -94,12 +94,12 @@ def _group_junction_source_glob(group_id, tissue):
 # ---------------------------------------------------------------------------
 rule _6A_merge_group_variants:
     input:
-        variant_files = lambda wc: _group_variant_files(_group_id_from_ids(wc.bed_id, wc.sample_type)),
+        variant_files = lambda wc: _group_variant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
     output:
         tsv = _variant_tsv,
     params:
-        group_id     = lambda wc: _group_id_from_ids(wc.bed_id, wc.sample_type),
-        n            = lambda wc: ceil(len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])
+        group_id     = lambda wc: _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type),
+        n            = lambda wc: ceil(len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])
                                         * config["merge_variant_sample_fraction"]),
         outprefix    = lambda wc, output: output.tsv[:-len(".tsv")],
         num_callers_snv   = config["merge_num_callers_threshold_snv"],
@@ -107,9 +107,9 @@ rule _6A_merge_group_variants:
         min_dp_snv        = config["merge_min_dp_snv"],
         min_dp_indel      = config["merge_min_dp_indel"],
         script       = workflow.basedir + "/scripts/merge_and_filter_variants.py",
-    threads: lambda wc: _group_threads(_group_id_from_ids(wc.bed_id, wc.sample_type), "merge_group_variants", 1)
+    threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "merge_group_variants", 1)
     resources:
-        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]) // 8),
+        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)]) // 8),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_variants.log"
@@ -136,21 +136,21 @@ rule _6A_merge_group_variants:
 # ---------------------------------------------------------------------------
 rule _6B_merge_group_ase:
     input:
-        ase_files = lambda wc: _group_ase_files(_group_id_from_ids(wc.bed_id, wc.sample_type)),
+        ase_files = lambda wc: _group_ase_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
     output:
         tsv = _ase_tsv,
     params:
-        group_id     = lambda wc: _group_id_from_ids(wc.bed_id, wc.sample_type),
-        n            = lambda wc: ceil(len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)])
+        group_id     = lambda wc: _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type),
+        n            = lambda wc: ceil(len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])
                                         * config["merge_ase_sample_fraction"]),
         outprefix    = lambda wc, output: output.tsv[:-len(".tsv")],
         min_hap_ratio       = config["merge_min_haplotype_ratio"],
         delta_hap_ratio_thr = config["merge_delta_haplotype_ratio_threshold"],
         ase_padj_thr        = config["merge_ase_padj_threshold"],
         script       = workflow.basedir + "/scripts/merge_and_filter_ase_results.py",
-    threads: lambda wc: _group_threads(_group_id_from_ids(wc.bed_id, wc.sample_type), "merge_group_ase", 1)
+    threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "merge_group_ase", 1)
     resources:
-        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)]) // 8),
+        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)]) // 8),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_ase.log"
@@ -176,24 +176,24 @@ rule _6B_merge_group_ase:
 rule _6C_merge_group_junctions:
     input:
         junction_files = lambda wc: _group_tissue_junction_files(
-            _group_id_from_ids(wc.bed_id, wc.sample_type), wc.tissue),
+            _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue),
     output:
         # Static, wildcard-only path -- the dynamically-named file the
         # script actually produces gets cp'd here at the end of the shell block.
         tsv = _junction_final,
     params:
-        group_id  = lambda wc: _group_id_from_ids(wc.bed_id, wc.sample_type),
-        n         = lambda wc: ceil(len(_group_tissue_samples(_group_id_from_ids(wc.bed_id, wc.sample_type), wc.tissue))
+        group_id  = lambda wc: _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type),
+        n         = lambda wc: ceil(len(_group_tissue_samples(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue))
                                      * config["merge_jxn_sample_fraction"]),
-        outprefix = lambda wc: _group_junction_outprefix(_group_id_from_ids(wc.bed_id, wc.sample_type), wc.tissue),
-        source_glob = lambda wc: _group_junction_source_glob(_group_id_from_ids(wc.bed_id, wc.sample_type), wc.tissue),
+        outprefix = lambda wc: _group_junction_outprefix(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue),
+        source_glob = lambda wc: _group_junction_source_glob(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue),
         jxn_cov_thr   = config["merge_jxn_coverage_threshold"],
         jxn_padj_thr  = config["merge_jxn_padj_threshold"],
         delta_psi_thr = config["merge_delta_psi_threshold"],
         script    = workflow.basedir + "/scripts/merge_and_filter_junction_results.py",
-    threads: lambda wc: _group_threads(_group_id_from_ids(wc.bed_id, wc.sample_type), "merge_group_junctions", 1)
+    threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "merge_group_junctions", 1)
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(_group_tissue_samples(_group_id_from_ids(wc.bed_id, wc.sample_type), wc.tissue)) // 8),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(_group_tissue_samples(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue)) // 8),
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_junctions_{tissue}.log"
@@ -245,17 +245,17 @@ rule _6D1_merge_group_hits_preliminary:
         variant_tsv    = _variant_tsv,
         ase_tsv        = _ase_tsv,
         junction_files = lambda wc: [
-            _group_junction_final_path(_group_id_from_ids(wc.bed_id, wc.sample_type), t)
-            for t in group_tissues(_group_id_from_ids(wc.bed_id, wc.sample_type))
+            _group_junction_final_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), t)
+            for t in group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))
         ],
     output:
         all_hits = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/all_hits_preliminary.tsv",
     params:
-        samples      = lambda wc: GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)],
-        tissues      = lambda wc: group_tissues(_group_id_from_ids(wc.bed_id, wc.sample_type)),
+        samples      = lambda wc: GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)],
+        tissues      = lambda wc: group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
         # Not a Snakemake input: see the rule docstring above -- used only if
         # it already happens to exist when this rule actually runs.
-        cohort_junction_tsv = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.bed_id, wc.sample_type)),
+        cohort_junction_tsv = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
         # Empty string when omim_file isn't configured, so the --omim flag
         # is simply omitted from the shell command below (merge_group_hits.py
         # treats a missing --omim as "skip phenotype/inheritance annotation"
@@ -300,19 +300,19 @@ rule _6D2_merge_group_hits_with_cohort_junctions:
         variant_tsv    = _variant_tsv,
         ase_tsv        = _ase_tsv,
         junction_files = lambda wc: [
-            _group_junction_final_path(_group_id_from_ids(wc.bed_id, wc.sample_type), t)
-            for t in group_tissues(_group_id_from_ids(wc.bed_id, wc.sample_type))
+            _group_junction_final_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), t)
+            for t in group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))
         ],
-        cohort_junction_tsv = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.bed_id, wc.sample_type)),
+        cohort_junction_tsv = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
         gene_expression_matrix = lambda wc: (
-            _cohort_outdir + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
+            config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
             + "/output/gene_quantification/by_assignment/gene_assignment_matrix.tsv"
         ) if config.get("quantify_genes") else [],
     output:
         all_hits = _all_hits_tsv,
     params:
-        samples      = lambda wc: GROUPS[_group_id_from_ids(wc.bed_id, wc.sample_type)],
-        tissues      = lambda wc: group_tissues(_group_id_from_ids(wc.bed_id, wc.sample_type)),
+        samples      = lambda wc: GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)],
+        tissues      = lambda wc: group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
         omim_flag    = ("--omim " + config["omim_file"]) if config.get("omim_file") else "",
         gene_expression_flag = lambda wc, input: (
             "--gene-expression-matrix " + str(input.gene_expression_matrix)
@@ -385,17 +385,25 @@ rule _6E_plot_group_hits:
 
 
 # ---------------------------------------------------------------------------
-# 6F. Final merge across all sample types sharing a BED panel (unchanged).
-#    (Formerly _6G -- shifted down a letter, see _6E's comment above.)
+# 6F. Final merge across all sample types sharing a BED panel, plus a
+#    simplified companion file -- core columns only, plus every *_jxns
+#    column merged and deduplicated into one "jxns" column -- written
+#    right after, in the same rule (formerly its own _6F2 step; folded in
+#    here since it's always run immediately after the merge and just as
+#    cheap). See scripts/simplify_all_hits.py's module docstring for the
+#    simplification rules.
 # ---------------------------------------------------------------------------
 rule _6F_final_merge:
     input:
-        all_hits = lambda wc: [(str(group_outdir(gid)) + '/merged_hits/all_hits.tsv') for gid in BED_GROUPS[wc.bed_id]],
+        all_hits = lambda wc: [(str(group_outdir(gid)) + '/merged_hits/all_hits.tsv') for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]],
     output:
-        merged = _cohort_outdir + "/{bed_id}/output/merged_all_hits.tsv",
-    threads: lambda wc: _group_threads(wc.bed_id, "final_merge", 1)
+        merged     = _cohort_outdir + "/{bed_id}/output/merged_all_hits.tsv",
+        simplified = _cohort_outdir + "/{bed_id}/output/merged_all_hits_simplified.tsv",
+    params:
+        script = workflow.basedir + "/scripts/simplify_all_hits.py",
+    threads: lambda wc: _group_threads(str(wc.cohort_id) + "_" + str(wc.bed_id), "final_merge", 1)
     resources:
-        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(bed_samples(wc.bed_id)) // 8),
+        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(bed_samples(wc.cohort_id, wc.bed_id)) // 8),
         runtime = 60,
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_final_merge.log"
@@ -404,59 +412,37 @@ rule _6F_final_merge:
         mkdir -p $(dirname {log})
         awk 'FNR==1 && NR!=1 {{next}} {{print}}' {input.all_hits} > {output.merged} 2> {log}
         echo "Finished final merge to {output.merged}." >> {log}
-        """
 
-
-# ---------------------------------------------------------------------------
-# 6F2. Simplified companion to merged_all_hits.tsv -- core columns only,
-#    plus every *_jxns column merged and deduplicated into one "jxns"
-#    column. Dead-end branch (nothing downstream consumes it), so it must
-#    be requested explicitly in the Snakefile's final-target list, same as
-#    _6E's PDFs above.
-# ---------------------------------------------------------------------------
-rule _6F2_simplify_all_hits:
-    input:
-        merged = _cohort_outdir + "/{bed_id}/output/merged_all_hits.tsv",
-    output:
-        simplified = _cohort_outdir + "/{bed_id}/output/merged_all_hits_simplified.tsv",
-    params:
-        script = workflow.basedir + "/scripts/simplify_all_hits.py",
-    threads: 1
-    resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * max(4, len(bed_samples(wc.bed_id)) // 16),
-        runtime = 30,
-    log:
-        _cohort_outdir + "/{bed_id}/logs/{bed_id}_simplify_all_hits.log"
-    shell:
-        """
-        mkdir -p $(dirname {log})
         python -u {params.script} \\
-            --infile  {input.merged} \\
+            --infile  {output.merged} \\
             --outfile {output.simplified} \\
-        2>&1 | tee {log}
+        2>&1 | tee -a {log}
         """
 
 
 # ---------------------------------------------------------------------------
-# 6G. UpSet-style boxplot of merged_all_hits.tsv's four hit categories
+# 6F. UpSet-style boxplot of merged_all_hits.tsv's four hit categories
 #    (variant, ASE, outlier_junction, cohort_outlier_junction): for every
 #    non-empty combination of those categories, a boxplot of "how many
 #    genes did this sample have in exactly this combination", one dot per
 #    sample colored by sample_type, plus the standard UpSet
 #    combination-membership matrix underneath. Pools across every
 #    sample_type sharing this BED panel, same scope as merged_all_hits.tsv
-#    itself (bed_samples(), not group-scoped -- see rules/9_plot_cohort_info.smk
+#    itself (bed_samples(), not group-scoped -- see rules/8_cohort_qc.smk
 #    for the same pooling pattern).
+#    (Formerly _6G -- shifted down a letter now that _6F2 was folded into
+#    _6F_final_merge above.)
 # ---------------------------------------------------------------------------
-rule _6G_plot_hits_upset:
+rule _6F_plot_hits_upset:
     input:
         all_hits = _cohort_outdir + "/{bed_id}/output/merged_all_hits.tsv",
     output:
-        pdf_density = _cohort_outdir + "/{bed_id}/output/hits_upset_density.pdf",
+        pdf_density     = _cohort_outdir + "/{bed_id}/output/hits_upset_density.pdf",
+        pdf_density_log = _cohort_outdir + "/{bed_id}/output/hits_upset_density_log.pdf",
         tsv = _cohort_outdir + "/{bed_id}/output/hits_upset_counts.tsv",
     params:
-        samples      = lambda wc: bed_samples(wc.bed_id),
-        sample_types = lambda wc: [SAMPLES[s]["sample_type"] for s in bed_samples(wc.bed_id)],
+        samples      = lambda wc: bed_samples(wc.cohort_id, wc.bed_id),
+        sample_types = lambda wc: [SAMPLES[s]["sample_type"] for s in bed_samples(wc.cohort_id, wc.bed_id)],
         outdir       = _cohort_outdir + "/{bed_id}/output",
         title        = lambda wc: f"{wc.bed_id}: Candidate Gene Hit Categories by Sample",
         script       = workflow.basedir + "/scripts/plot_hits_upset.py",

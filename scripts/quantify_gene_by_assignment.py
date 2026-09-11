@@ -56,7 +56,7 @@ assigned-read signal -- the same convention --metric count/coverage use --
 since a genome-wide CPTM denominator (~every GTF gene) would not be
 meaningful for a targeted panel.
 
-Invoked by rules/10_quantify_genes.smk (_10D).
+Invoked by rules/9_quantify_genes.smk (_9C).
 """
 
 import argparse
