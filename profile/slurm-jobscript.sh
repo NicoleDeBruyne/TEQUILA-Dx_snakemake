@@ -1,4 +1,5 @@
 #!/bin/bash
+# properties = {properties}
 # profile/slurm-jobscript.sh
 # Standard Snakemake jobscript template
 

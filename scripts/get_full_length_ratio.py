@@ -306,10 +306,10 @@ def _process_sample(sample, bam_path, transcripts):
 
 def _panel_height(flr_df):
     """Height (inches) _draw_heatmap_panel will need for this gene set --
-    computed upfront (pure function of gene count) so the outer figure's
-    gridspec can be given correct height_ratios before any subplot exists,
-    rather than resizing after the fact (which would leave the actual
-    per-panel gridspec proportions wrong)."""
+    computed upfront (pure function of gene count) so make_combined_heatmap
+    can lay out both panels' absolute inch positions before any subplot
+    exists. Includes the fixed row gaps below, so this is the panel's true
+    total footprint, not just its content rows summed."""
     n_genes = len(flr_df.index)
     box_h = 1.6   # per-sample avgFLR boxplot row
     bar_h = 1.2   # per-sample total-read-count bar row
@@ -317,30 +317,54 @@ def _panel_height(flr_df):
         return 1.5
     row_height = 0.22 if n_genes <= 60 else max(0.05, 0.22 * (60 / n_genes))
     heat_h = min(max(4, row_height * n_genes), 36)
-    return heat_h + box_h + bar_h + 1.2
+    return heat_h + _ROW_GAP + box_h + _ROW_GAP + bar_h
 
 
-def _draw_heatmap_panel(fig, outer_spec, flr_df, gene_median_reads, sample_total_reads,
-                         sample_colors, panel_title, heat_w):
+# Fixed, absolute (inches) gaps -- deliberately NOT expressed as a GridSpec
+# hspace/wspace fraction. This panel mixes one huge row (the heatmap, up to
+# 36in tall) with two small fixed-height rows (the boxplot and reads bar,
+# 1.6in/1.2in): a fractional hspace is a fraction of the *average* row
+# height across the whole grid, so with one giant row in the mix that
+# average is dominated by the heatmap, and the same fraction blows up into
+# a huge absolute gap between the two small rows -- which is what produced
+# the excessive whitespace this layout replaces. Positioning every axes by
+# its own absolute inch coordinates keeps every gap the same fixed size
+# regardless of how tall the heatmap row ends up being.
+_ROW_GAP = 0.15    # between heat/box and box/bar, inches
+_COL_GAP = 0.15    # between heat/bar and bar/cbar, inches
+_OUTER_GAP_MIN = 0.3   # between the two stacked (high/low) panels when no sample labels are drawn, inches
+_BAR_W = 1.6       # right (gene median reads) bar width, inches
+_CBAR_W = 0.25     # colorbar width, inches
+_MARGIN = 0.15     # figure margin on each side, inches (bbox_inches="tight" trims any excess)
+_TOP_MARGIN = 0.75 # figure top margin, inches -- reserves room for the suptitle + legend, which both
+                   # sit in figure-level space above the top panel's own axes
+
+
+def _draw_heatmap_panel(fig, x0, y_top, flr_df, gene_median_reads, sample_total_reads,
+                         sample_colors, panel_title, heat_w, full_w, full_h):
     """Draws one avgFLR heatmap, a per-sample avgFLR boxplot (this panel's
     own genes, points colored by sample_type), and a per-sample total-
-    read-count bar (also colored by sample_type) into `outer_spec` (a
-    SubplotSpec carved out of `fig`'s outer gridspec). `outer_spec`'s own
-    height is assumed to already match _panel_height(flr_df) -- see
-    make_combined_heatmap, which sizes the outer gridspec's row before
-    calling this. `sample_total_reads` and `sample_colors` are expected to
-    already cover every sample (not just the ones in `flr_df`'s columns),
-    so they read the same across every panel."""
+    read-count bar (also colored by sample_type), placed via absolute-inch
+    axes positions rooted at (x0, y_top) -- see the gap constants above for
+    why this isn't done via GridSpec height/width ratios. `x0`/`y_top` are
+    in inches from the figure's bottom-left corner; `full_w`/`full_h` are
+    the whole figure's size in inches, used to convert to the [0, 1]
+    figure-fraction coordinates fig.add_axes() expects. `sample_total_reads`
+    and `sample_colors` are expected to already cover every sample (not
+    just the ones in `flr_df`'s columns), so they read the same across
+    every panel."""
     n_genes = len(flr_df.index)
-    bar_w = 1.6    # right (gene median reads) bar width, inches
-    box_h = 1.6    # avgFLR boxplot row height, inches
-    bar_h = 1.2    # total-reads bar row height, inches
+    box_h = 1.6
+    bar_h = 1.2
+
+    def rect(x, y, w, h):
+        return [x / full_w, y / full_h, w / full_w, h / full_h]
 
     if flr_df.empty:
         # Still draw something -- this panel is part of a declared
         # Snakemake output, so the figure must exist even when a run's gene
         # panel happens to have nothing in this read-count bucket.
-        ax = fig.add_subplot(outer_spec)
+        ax = fig.add_axes(rect(x0, y_top - 1.5, heat_w + _COL_GAP + _BAR_W, 1.5))
         ax.axis("off")
         ax.text(0.5, 0.5, "No genes in this group.", ha="center", va="center")
         ax.set_title(panel_title)
@@ -370,17 +394,17 @@ def _draw_heatmap_panel(fig, outer_spec, flr_df, gene_median_reads, sample_total
     show_sample_labels = (heat_w / max(n_samples, 1)) * 72 >= 5
     sample_fontsize = min(7, max(3, (heat_w * 72) / max(n_samples, 1) - 1))
 
-    inner = outer_spec.subgridspec(
-        3, 3,
-        width_ratios=[heat_w, bar_w, 0.25],
-        height_ratios=[heat_h, box_h, bar_h],
-        wspace=0.08, hspace=0.08,
-    )
-    ax_heat = fig.add_subplot(inner[0, 0])
-    ax_gbar = fig.add_subplot(inner[0, 1], sharey=ax_heat)
-    ax_cbar = fig.add_subplot(inner[0, 2])
-    ax_box  = fig.add_subplot(inner[1, 0], sharex=ax_heat)
-    ax_sbar = fig.add_subplot(inner[2, 0], sharex=ax_heat)
+    y_heat_bottom = y_top - heat_h
+    y_box_bottom = y_heat_bottom - _ROW_GAP - box_h
+    y_bar_bottom = y_box_bottom - _ROW_GAP - bar_h
+    x_bar = x0 + heat_w + _COL_GAP
+    x_cbar = x_bar + _BAR_W + _COL_GAP
+
+    ax_heat = fig.add_axes(rect(x0, y_heat_bottom, heat_w, heat_h))
+    ax_gbar = fig.add_axes(rect(x_bar, y_heat_bottom, _BAR_W, heat_h), sharey=ax_heat)
+    ax_cbar = fig.add_axes(rect(x_cbar, y_heat_bottom, _CBAR_W, heat_h))
+    ax_box  = fig.add_axes(rect(x0, y_box_bottom, heat_w, box_h), sharex=ax_heat)
+    ax_sbar = fig.add_axes(rect(x0, y_bar_bottom, heat_w, bar_h), sharex=ax_heat)
 
     sns.heatmap(ordered, ax=ax_heat, cmap="viridis", vmin=0, vmax=1,
                 cbar=True, cbar_ax=ax_cbar, cbar_kws={"label": "avgFLR"},
@@ -402,21 +426,24 @@ def _draw_heatmap_panel(fig, outer_spec, flr_df, gene_median_reads, sample_total
     ax_gbar.tick_params(axis="y", left=False, labelleft=False)
     ax_gbar.set_ylim(ax_heat.get_ylim())
 
-    # Per-sample avgFLR distribution across this panel's own genes -- box
-    # outline in black/gray, one jittered point per gene colored by that
-    # sample's sample_type. Column positions (x = i+0.5) match the heatmap
-    # above it exactly, same convention as every other row in this panel.
+    # Per-sample avgFLR distribution across this panel's own genes -- one
+    # jittered point per gene colored by that sample's sample_type, with
+    # the box outline drawn ON TOP of those points (zorder=3 vs the
+    # scatter's zorder=2) so the box/whiskers/median stay visible even
+    # where points are dense, rather than being buried under them. Column
+    # positions (x = i+0.5) match the heatmap above it exactly, same
+    # convention as every other row in this panel.
     x = np.arange(n_samples) + 0.5
     box_data = [ordered[s].dropna().to_numpy() for s in sample_order]
-    _black = dict(color="black", linewidth=0.7)
-    bp = ax_box.boxplot(box_data, positions=x, widths=0.6, showfliers=False,
-                         boxprops=_black, whiskerprops=_black, capprops=_black, medianprops=_black)
     rng = np.random.RandomState(0)
     for xi, vals, c in zip(x, box_data, scolors):
         if len(vals) == 0:
             continue
         jitter = (rng.rand(len(vals)) - 0.5) * 0.35
-        ax_box.scatter(np.full(len(vals), xi) + jitter, vals, color=c, s=6, zorder=3, edgecolors="none")
+        ax_box.scatter(np.full(len(vals), xi) + jitter, vals, color=c, s=6, zorder=2, edgecolors="none")
+    _black = dict(color="black", linewidth=0.7, zorder=3)
+    bp = ax_box.boxplot(box_data, positions=x, widths=0.6, showfliers=False,
+                         boxprops=_black, whiskerprops=_black, capprops=_black, medianprops=_black)
     ax_box.set_ylim(-0.02, 1.02)
     ax_box.set_ylabel("avgFLR", fontsize=7)
     ax_box.tick_params(axis="x", labelbottom=False, bottom=False)
@@ -437,43 +464,61 @@ def _draw_heatmap_panel(fig, outer_spec, flr_df, gene_median_reads, sample_total
 def make_combined_heatmap(flr_high, flr_low, gene_median_reads, sample_total_reads,
                            sample_type_map, sample_colors, out_pdf, title_high, title_low,
                            suptitle, n_samples):
-    """One figure, two stacked subplots (high-read-count panel on top,
-    low-read-count panel below), each built by _draw_heatmap_panel. Panel
-    heights are computed upfront so the outer gridspec's row proportions
-    (and therefore the overall figure size) are correct on the first and
-    only draw -- no resize-after-the-fact, which would leave the actual
-    row split wrong relative to each panel's true gene count.
+    """One figure, two stacked panels (high-read-count panel on top,
+    low-read-count panel below), each built by _draw_heatmap_panel via
+    absolute-inch axes positions -- see the gap constants above
+    _draw_heatmap_panel for why this isn't GridSpec height/width ratios.
 
     Column width shrinks as sample count grows (same idea as the row-height
     shrink for genes) and the total width is capped, so a ~200-sample
     cohort gets a print-friendly figure instead of a many-foot-wide PDF."""
     col_width = 0.28 if n_samples <= 50 else max(0.05, 0.28 * (50 / n_samples))
     heat_w = min(max(5, col_width * n_samples + 1), 20)
-    full_w = heat_w + 1.6 + 1.0   # heat_w + bar_w + margin, matches _draw_heatmap_panel's inner layout
+    full_w = _MARGIN + heat_w + _COL_GAP + _BAR_W + _COL_GAP + _CBAR_W + _MARGIN
 
     h_high = _panel_height(flr_high)
     h_low = _panel_height(flr_low)
 
-    fig = plt.figure(figsize=(full_w, h_high + h_low + 1.0))
-    outer = fig.add_gridspec(2, 1, height_ratios=[h_high, h_low], hspace=0.4)
+    # The top panel's own rotated sample-name labels hang below its reads
+    # bar, into the gap above the next panel -- estimate their height so
+    # the outer gap is big enough to clear them (rather than a small fixed
+    # gap that the labels then overlap into the next panel's title).
+    show_sample_labels = (heat_w / max(n_samples, 1)) * 72 >= 5
+    outer_gap = _OUTER_GAP_MIN
+    if show_sample_labels:
+        sample_fontsize = min(7, max(3, (heat_w * 72) / max(n_samples, 1) - 1))
+        samples = list(flr_high.columns) or list(flr_low.columns)
+        max_label_len = max((len(s) for s in samples), default=0)
+        # Rough estimate of a 90-degree-rotated label's height: average
+        # character width ~0.6x font size, plus a little padding.
+        label_h = max_label_len * 0.6 * sample_fontsize / 72 + 0.25
+        outer_gap = max(outer_gap, label_h)
 
-    _draw_heatmap_panel(fig, outer[0, 0], flr_high, gene_median_reads, sample_total_reads,
-                         sample_colors, title_high, heat_w)
-    _draw_heatmap_panel(fig, outer[1, 0], flr_low, gene_median_reads, sample_total_reads,
-                         sample_colors, title_low, heat_w)
+    full_h = _TOP_MARGIN + h_high + outer_gap + h_low + _MARGIN
+
+    fig = plt.figure(figsize=(full_w, full_h))
+
+    y_top_high = full_h - _TOP_MARGIN
+    y_top_low = y_top_high - h_high - outer_gap
+
+    _draw_heatmap_panel(fig, _MARGIN, y_top_high, flr_high, gene_median_reads, sample_total_reads,
+                         sample_colors, title_high, heat_w, full_w, full_h)
+    _draw_heatmap_panel(fig, _MARGIN, y_top_low, flr_low, gene_median_reads, sample_total_reads,
+                         sample_colors, title_low, heat_w, full_w, full_h)
 
     # One legend for the whole figure -- sample_type -> color is the same
     # in both panels (and matches rules/8_cohort_qc.smk's
     # _8C2_validate_sample_types, which resolves colors via the Snakefile's
-    # own sample_type_color()).
+    # own sample_type_color()). Placed in the reserved top margin, above
+    # the top panel's own axes, rather than overlapping it.
     seen = {}
     for s, t in sample_type_map.items():
         seen.setdefault(t, sample_colors.get(s, "#555555"))
     legend_handles = [matplotlib.patches.Patch(color=c, label=t) for t, c in seen.items()]
-    fig.legend(handles=legend_handles, loc="upper right", title="sample_type",
+    fig.legend(handles=legend_handles, loc="upper right", bbox_to_anchor=(1, 1), title="sample_type",
                fontsize=7, title_fontsize=7, frameon=False)
 
-    fig.suptitle(suptitle)
+    fig.suptitle(suptitle, y=1 - (_TOP_MARGIN / full_h) * 0.35)
     fig.savefig(out_pdf, bbox_inches="tight")
     plt.close(fig)
 
