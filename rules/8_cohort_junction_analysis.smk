@@ -1,5 +1,5 @@
 """
-rules/7_cohort_junction_analysis.smk
+rules/8_cohort_junction_analysis.smk
 Cohort-level splice junction outlier analysis: for each (bed, sample_type) group
 (see GROUPS in the Snakefile), combines every sample's own
 {sample}_gene_bam_mapping_file.tsv (written by phase_reads.py -- see
@@ -17,12 +17,12 @@ modified_zscore for smaller groups -- or force one method for every group via
 once GROUPS is built, and Snakemake output: paths must be static wildcard
 templates (not a value chosen per-group at parse time), the outlier output
 path below uses an extra {thr_label} wildcard rather than picking between two
-different literal path templates; _7B's own params re-derive the method from
+different literal path templates; _8B's own params re-derive the method from
 {bed_id}/output/sample_types/{sample_type} directly (not by inspecting {thr_label}) to keep a
 single source of truth with the Snakefile's target-building in all_outputs().
 
 Split into two rules:
-  1. _7A_cohort_junction_analysis          -- per-gene metric computation
+  1. _8A_cohort_junction_analysis          -- per-gene metric computation
                                              (BAM reading, no statistics),
                                              via scripts/cohort_junction_analysis.py.
                                              Writes one raw TSV per gene plus
@@ -32,7 +32,7 @@ Split into two rules:
                                              config["cohort_jxn_min_samples"]
                                              samples are skipped entirely
                                              (see output.note for why).
-  2. _7B_identify_cohort_junction_outliers -- reads the manifest, fits a
+  2. _8B_identify_cohort_junction_outliers -- reads the manifest, fits a
                                              per-junction reference
                                              distribution per gene and scores
                                              every sample against it, then
@@ -42,7 +42,8 @@ Split into two rules:
                                              scripts/identify_cohort_junction_outliers.py.
 
 Only depends on phasing having finished for every sample in the group -- not on
-merge_hits or the per-sample GTEx-based junction analysis.
+rules/9_merge_results.smk's hit-ranking or the per-sample GTEx-based junction
+analysis (rules/5_junction_analysis.smk).
 """
 
 # NOTE: output:/input:/log: path templates below use string concatenation,
@@ -59,7 +60,7 @@ def _group_gene_bam_mapping_files(group_id):
 _cja_manifest_path = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{bed_id}_{sample_type}_gene_manifest.tsv"
 
 
-rule _7A_cohort_junction_analysis:
+rule _8A_cohort_junction_analysis:
     input:
         mapping_files = lambda wc: _group_gene_bam_mapping_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
         bed           = lambda wc: bed_path(wc.cohort_id, wc.bed_id),
@@ -119,7 +120,7 @@ rule _7A_cohort_junction_analysis:
         """
 
 
-rule _7B_identify_cohort_junction_outliers:
+rule _8B_identify_cohort_junction_outliers:
     input:
         manifest = _cja_manifest_path,
         bed      = lambda wc: bed_path(wc.cohort_id, wc.bed_id),
@@ -140,19 +141,24 @@ rule _7B_identify_cohort_junction_outliers:
         # stay in lockstep, or Snakemake will report this rule's own output
         # as never having been produced even though it ran successfully.
         outliers          = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{cohort_id}_{bed_id}_{sample_type}_{thr_label}/{cohort_id}_{bed_id}_{sample_type}_outliers.tsv",
-        # Also tracked (not just outliers itself) so rules/6_merge_hits.smk's
-        # _6D can depend on it directly to pull cohort-comparison junction
-        # results into merged_hits.tsv, rather than relying on an
+        # Also tracked (not just outliers itself) so rules/9_merge_results.smk's
+        # hit-ranking merge can depend on it directly to pull cohort-comparison
+        # junction results into merged_hits.tsv, rather than relying on an
         # undeclared side-effect file.
         outliers_filtered = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{cohort_id}_{bed_id}_{sample_type}_{thr_label}/{cohort_id}_{bed_id}_{sample_type}_outliers_filtered.tsv",
+        # Always produced alongside `outliers` (mirrors it verbatim when no
+        # sample in this group has an alias configured); only actually
+        # *requested* by rule all via all_outputs() when group_has_alias() is true.
+        outliers_alias    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{cohort_id}_{bed_id}_{sample_type}_{thr_label}/{cohort_id}_{bed_id}_{sample_type}_outliers_alias.tsv",
     params:
-        outprefix = lambda wc: (str(group_outdir(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))) + '/cohort_junction_analysis/' + str(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))),
-        has_ipa   = "--has-ipa" if config["genome"] else "",
-        thr_flag  = lambda wc: _cja_thr_flag(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-        gtf       = config["annotation"],
-        cov_thr   = config["sample_coverage_threshold"],
-        n_thr     = lambda wc: _cja_n_threshold(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-        script    = workflow.basedir + "/scripts/identify_cohort_junction_outliers.py",
+        outprefix  = lambda wc: (str(group_outdir(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))) + '/cohort_junction_analysis/' + str(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))),
+        has_ipa    = "--has-ipa" if config["genome"] else "",
+        thr_flag   = lambda wc: _cja_thr_flag(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
+        gtf        = config["annotation"],
+        cov_thr    = config["sample_coverage_threshold"],
+        n_thr      = lambda wc: _cja_n_threshold(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
+        alias_args = lambda wc: _quoted(alias_map_args(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])),
+        script     = workflow.basedir + "/scripts/identify_cohort_junction_outliers.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "identify_cohort_junction_outliers", config["threads"])
     resources:
         mem_mb     = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])),
@@ -172,6 +178,7 @@ rule _7B_identify_cohort_junction_outliers:
             --gtf                {params.gtf} \\
             --coverage-threshold {params.cov_thr} \\
             --n-threshold        {params.n_thr} \\
+            --alias-map          {params.alias_args} \\
             --threads            {threads} \\
         2>&1 | tee {log}
         """

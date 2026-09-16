@@ -18,6 +18,8 @@ from scipy.spatial.distance import pdist
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
+from sample_alias import add_alias_map_arg, parse_alias_map, resolve
+
 warnings.filterwarnings("ignore")
 
 
@@ -78,6 +80,7 @@ def parse_args():
         help="Override automatic elbow detection and use exactly this many "
              "top-variance junctions (0 = auto-detect via elbow, default: 0)"
     )
+    add_alias_map_arg(parser)
     args = parser.parse_args()
 
     if len(args.matrix_refs) != len(args.ref_names):
@@ -670,7 +673,8 @@ def plot_distance_heatmap(score_df: pd.DataFrame,
                           query_names: list,
                           outprefix: str,
                           query_colors: list | None = None,
-                          n_variable_jxns: int = 0):
+                          n_variable_jxns: int = 0,
+                          out_suffix: str = ""):
     """
     Heatmap: rows = query samples (grouped + clustered by source matrix),
     cols = reference tissues.  A color sidebar identifies each group.
@@ -767,7 +771,7 @@ def plot_distance_heatmap(score_df: pd.DataFrame,
     )
 
     fig.tight_layout()
-    path = f"{outprefix}_distance_heatmap.pdf"
+    path = f"{outprefix}_distance_heatmap{out_suffix}.pdf"
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {path}")
@@ -879,6 +883,20 @@ def main():
         score_df, sample_to_query, args.query_names, args.outprefix,
         query_colors=args.query_colors,
         n_variable_jxns=len(variable_jxns),
+    )
+
+    # Alias-labeled copy: always produced (mirrors the real-ID heatmap
+    # verbatim when --alias-map is empty), so the rule's declared output
+    # exists regardless of whether this bed panel actually has any aliases.
+    alias_map = parse_alias_map(args.alias_map)
+    alias_score_df = score_df.rename(index=lambda s: resolve(s, alias_map))
+    alias_sample_to_query = {resolve(s, alias_map): q for s, q in sample_to_query.items()}
+    print("\nGenerating alias-labeled heatmap...")
+    plot_distance_heatmap(
+        alias_score_df, alias_sample_to_query, args.query_names, args.outprefix,
+        query_colors=args.query_colors,
+        n_variable_jxns=len(variable_jxns),
+        out_suffix="_alias",
     )
 
     print("\nDone.")

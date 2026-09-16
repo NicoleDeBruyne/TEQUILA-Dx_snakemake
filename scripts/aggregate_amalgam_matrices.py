@@ -16,6 +16,8 @@ import argparse
 
 import pandas as pd
 
+from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -27,6 +29,7 @@ def parse_args():
         help="Sample name for each --infiles entry, same order/length.")
     parser.add_argument('--outprefix', required=True,
         help="Writes <outprefix>_transcript_matrix.tsv and <outprefix>_gene_matrix.tsv.")
+    add_alias_map_arg(parser)
     args = parser.parse_args()
     if len(args.infiles) != len(args.samples):
         parser.error("--infiles and --samples must have the same number of entries")
@@ -87,6 +90,17 @@ def main():
     transcript_matrix.to_csv(out_transcript, sep='\t', index=False)
     gene_matrix.to_csv(out_gene, sep='\t')
     print(f"Done: {out_transcript} and {out_gene} written.", flush=True)
+
+    # Alias-labeled copy of the gene matrix: always produced (mirrors the
+    # real-ID matrix verbatim when --alias-map is empty), so the rule's
+    # declared output exists regardless of whether this group actually has
+    # any aliases.
+    alias_map = parse_alias_map(args.alias_map)
+    alias_gene_matrix = gene_matrix.copy()
+    alias_gene_matrix.columns = resolve_all(alias_gene_matrix.columns, alias_map)
+    out_gene_alias = args.outprefix + '_gene_matrix_alias.tsv'
+    alias_gene_matrix.to_csv(out_gene_alias, sep='\t')
+    print(f"Done: {out_gene_alias} written.", flush=True)
 
 
 if __name__ == '__main__':

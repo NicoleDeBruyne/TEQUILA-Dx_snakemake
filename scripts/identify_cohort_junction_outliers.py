@@ -27,6 +27,8 @@ import math
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
+from sample_alias import add_alias_map_arg, parse_alias_map, resolve
+
 import numpy as np
 import pandas as pd
 import concurrent.futures
@@ -72,6 +74,7 @@ def parse_args() -> argparse.Namespace:
                    help="gene -> result-file manifest TSV from cohort_junction_analysis.py.")
     p.add_argument("--bed",                        required=True)
     p.add_argument("--outprefix",                  required=True)
+    add_alias_map_arg(p)
     p.add_argument("--approx",                     action="store_true")
     p.add_argument("--has-ipa",                     action="store_true",
                    help="Set if --genome was provided to cohort_junction_analysis.py "
@@ -1600,6 +1603,7 @@ def main() -> None:
 
     print(f"Method: {method}")
 
+    alias_map     = parse_alias_map(args.alias_map)
     prefix        = args.outprefix.rstrip("/")
     outdir        = os.path.dirname(os.path.abspath(prefix))
     prefix_name   = os.path.basename(prefix)
@@ -1677,9 +1681,9 @@ def main() -> None:
     def _write_tsv(df, path): df.to_csv(path, sep="\t", index=False)
 
     def _empty_outlier_outputs(reason: str) -> None:
-        """Writes an empty (header-only) outliers.tsv / outliers_filtered.tsv for
-        every requested threshold, so Snakemake's declared output file exists
-        even when there was nothing to analyze."""
+        """Writes an empty (header-only) outliers.tsv / outliers_filtered.tsv /
+        outliers_alias.tsv for every requested threshold, so Snakemake's
+        declared output file exists even when there was nothing to analyze."""
         print(f"\n[WARNING] {reason}")
         empty_cols = _OUTPUT_COLS + ["event_type"]
         for thr in threshold_specs:
@@ -1687,6 +1691,7 @@ def main() -> None:
             empty_df = pd.DataFrame(columns=empty_cols)
             empty_df.to_csv(os.path.join(thr_dir, f"{prefix_name}_outliers.tsv"), sep="\t", index=False)
             empty_df.to_csv(os.path.join(thr_dir, f"{prefix_name}_outliers_filtered.tsv"), sep="\t", index=False)
+            empty_df.to_csv(os.path.join(thr_dir, f"{prefix_name}_outliers_alias.tsv"), sep="\t", index=False)
         print("  Wrote empty outlier file(s) so downstream outputs still exist.")
 
     if n_genes == 0:
@@ -2165,6 +2170,15 @@ def main() -> None:
             data.to_csv(out_filt, sep="\t", index=False)
             print(f"  Outliers (filtered) → {out_filt} ({time.time()-t0:.2f}s)")
 
+        def _write_outliers_alias(data=_outliers_data):
+            t0 = time.time()
+            out_alias = os.path.join(thr_dir, f"{prefix_name}_outliers_alias.tsv")
+            alias_data = data.copy()
+            if "sample" in alias_data.columns:
+                alias_data["sample"] = alias_data["sample"].apply(lambda s: resolve(s, alias_map))
+            alias_data.to_csv(out_alias, sep="\t", index=False)
+            print(f"  Outliers (alias) → {out_alias} ({time.time()-t0:.2f}s)")
+
 
         # ---- Build outlier_map for box plots ----
         # Built from filt (outliers_filtered rows: event_type != "none", outlier_{mc} True),
@@ -2185,6 +2199,7 @@ def main() -> None:
 
         out_jobs.append(_write_outliers)
         out_jobs.append(_write_outliers_filtered)
+        out_jobs.append(_write_outliers_alias)
 
         # Heatmap + box plot jobs per metric — pre-slice to only needed columns/rows
         if n_sig > 0:

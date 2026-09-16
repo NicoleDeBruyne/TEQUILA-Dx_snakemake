@@ -20,6 +20,8 @@ import re
 
 import pandas as pd
 
+from sample_alias import add_alias_map_arg, parse_alias_map, resolve
+
 _KEPT_COLUMNS = [
     'sample', 'gene', 'phenotypes', 'inheritance_patterns', 'haploinsufficient',
     'ranking', 'tier', 'variant', 'pathogenic_variant', 'ASE', 'outlier_junction',
@@ -39,6 +41,11 @@ def parse_args():
         description="Write a simplified companion to merged_all_hits.tsv, with a single deduplicated jxns column.")
     parser.add_argument('--infile', required=True, help="Path to merged_all_hits.tsv")
     parser.add_argument('--outfile', required=True, help="Path to write merged_all_hits_simplified.tsv")
+    parser.add_argument('--alias-outfile',
+        help="If given, also write an alias-labeled copy here, with the 'sample' "
+             "column resolved through --alias-map (falling back to the real sample "
+             "ID for any sample with no alias configured).")
+    add_alias_map_arg(parser)
     return parser.parse_args()
 
 
@@ -87,6 +94,13 @@ def main():
     out_df = df[_KEPT_COLUMNS + ['jxns']]
     out_df.to_csv(args.outfile, sep='\t', index=False)
     print(f"Saved simplified hits table ({len(out_df)} rows) to {args.outfile}")
+
+    if args.alias_outfile:
+        alias_map = parse_alias_map(args.alias_map)
+        alias_df = out_df.copy()
+        alias_df['sample'] = alias_df['sample'].apply(lambda s: resolve(s, alias_map))
+        alias_df.to_csv(args.alias_outfile, sep='\t', index=False)
+        print(f"Saved alias-labeled simplified hits table ({len(alias_df)} rows) to {args.alias_outfile}")
 
 
 if __name__ == "__main__":

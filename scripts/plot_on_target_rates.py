@@ -1,66 +1,40 @@
 #!/usr/bin/env python3
 """
 scripts/plot_on_target_rates.py
-Computes per-sample mapping and on-target rates from BAM(+BED) pairs and plots
-them across the cohort. Invoked by rules/8_cohort_qc.smk (_8A).
+Cohort-level merge step: combines every sample's own {sample}_on_target.tsv
+(written per-sample by scripts/get_on_target_rate.py via rules/6_sample_qc.smk's
+_6A) into one cohort table, derives mapping_rate/on_target_rate from the raw
+total/mapped/target counts, and plots them across the cohort. No BAM access
+here -- adding/removing a sample from a cohort only reruns this cheap merge,
+not the per-sample BAM scan. Invoked by rules/9_merge_results.smk's _9G.
 
-Adapted from a script pulled from Github 2026.04.08.
+Writes {outprefix}_on_target_rates.tsv, {outprefix}_mapping_rates.pdf, and
+{outprefix}_on_target_rates.pdf (+ an alias-labeled copy of the latter).
 """
 
 import argparse
-import os
-import concurrent.futures
 
 import pandas as pd
-import pysam
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 rcParams['pdf.fonttype'] = 42
 
+from sample_alias import add_alias_map_arg, parse_alias_map, resolve
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Get mapping and on-target rates for each sample')
-    parser.add_argument(
-        "--mapping-file",
-        required=True,
-        help=("TSV file without a header and with the columns:"
-              " name, bam, bed, group. The group column is optional"))
-    parser.add_argument(
-        "--outprefix",
-        required=True,
-        help="Prefix for output files .tsv and _mapping.pdf and _ontarget.pdf")
+    parser = argparse.ArgumentParser(description="Merge per-sample on-target TSVs and plot mapping/on-target rates across a cohort")
+    parser.add_argument("--infiles", nargs="+", required=True,
+        help="Every sample's {sample}_on_target.tsv, in the desired plot order")
+    parser.add_argument("--groups", nargs="*", default=[],
+        help="Optional per-sample group/sample_type label (same order as --infiles) for bar coloring")
+    parser.add_argument("--outprefix", required=True,
+        help="Prefix for output files: <outprefix>_on_target_rates.tsv, _mapping_rates.pdf, _on_target_rates.pdf")
     parser.add_argument('--title')
-    parser.add_argument("--threads", type=int, default=1, help="Number of parallel threads")
+    add_alias_map_arg(parser)
     return parser.parse_args()
-
-
-def count_reads(bam, bed):
-    ids = set()
-    with pysam.AlignmentFile(bam, "rb") as f:
-        with open(bed) as b:
-            for line in b:
-                if line.strip() and not line.startswith('#'):
-                    c, s, e = line.split()[:3]
-                    for r in f.fetch(c, int(s), int(e)):
-                        if not r.is_unmapped and not r.is_secondary:
-                            ids.add(r.query_name)
-    return len(ids)
-
-
-def count_mapped(bam):
-    m, u = set(), set()
-    with pysam.AlignmentFile(bam, "rb") as f:
-        for r in f.fetch(until_eof=True):
-            (u if r.is_unmapped else m).add(r.query_name)
-    return len(m), len(u)
-
-
-def get_counts(sample, group, bam, bed):
-    m, u = count_mapped(bam)
-    t = count_reads(bam, bed)
-    return sample, group, m + u, m, u, t
 
 
 def fmt(n):
@@ -71,62 +45,7 @@ def rate_label(r):
     return '100%' if r == 100 else '>99%' if r >= 99 else f"{r:.0f}%" if r >= 10 else f"{r:.1f}%" if r >= 0.1 else '<0.1%'
 
 
-def main():
-    args = parse_args()
-
-    df = pd.read_csv(args.mapping_file, sep="\t", header=None)
-    while df.shape[1] < 4:
-        df[df.shape[1]] = None
-    df.columns = ["sample", "bam", "bed", "group"]
-    df["_order"] = range(len(df))
-
-    missing = [f for f in df['bam'] if not os.path.exists(f)]
-    if missing:
-        raise FileNotFoundError("Missing BAM files:\n" + "\n".join(missing))
-
-    df = df.assign(_s=df['bam'].map(os.path.getsize)).sort_values('_s', ascending=False).drop(columns='_s')
-
-    print(f"Processing {len(df)} samples using {args.threads} threads...")
-
-    results = []
-    with concurrent.futures.ProcessPoolExecutor(max_workers=args.threads) as ex:
-        futures = {ex.submit(get_counts, r['sample'], r['group'], r['bam'], r['bed']): idx
-                   for idx, r in df.iterrows()}
-
-        for f in concurrent.futures.as_completed(futures):
-            res = f.result()
-            idx = futures[f]
-            results.append((idx, *res))  # prepend index
-            sample, group, total, mapped, unmapped, target = res
-            print(f"Finished: {sample} | total={total}, mapped={mapped}, target={target}")
-
-    results.sort(key=lambda x: x[0])
-    df = pd.DataFrame([r[1:] for r in results], columns=['sample', 'group', 'total', 'mapped', 'unmapped', 'target'])
-
-    df['mapping_rate'] = df['mapped'] / df['total'] * 100
-    df['on_target_rate'] = df['target'] / df['mapped'] * 100
-
-    out_tsv = f"{args.outprefix}.tsv"
-    df.to_csv(out_tsv, sep="\t", index=False)
-    print(f"Saved TSV: {out_tsv}")
-
-    groups = list(df['group'].dropna().unique())
-    colors = [
-        '#6997B9',  # blue
-        '#BB6A68',  # red
-        '#70A677',  # green
-        '#D48653',  # orange
-        '#A783A3',  # purple
-    ]
-    color_dict = {g: colors[i % len(colors)] for i, g in enumerate(groups)} if groups else {}
-    bar_colors = df['group'].map(color_dict).fillna('#6997B9')  # blue
-
-    # Linear scaling: reserve a fixed amount of horizontal space per sample so
-    # labels don't overlap, with a floor for small cohorts. No upper cap —
-    # large cohorts (e.g. AGS390 has ~200 samples) need a genuinely wide PDF.
-    width = max(10, 0.22 * len(df))
-
-    # -------- FIGURE 1 --------
+def plot_mapping_figure(df, outprefix, width, title):
     fig, ax = plt.subplots(2, figsize=(width, 10))
 
     ax[0].bar(range(len(df)), df['mapping_rate'], color="#FFD676")  # yellow
@@ -149,14 +68,15 @@ def main():
     ax[1].set_xticks(range(len(df)))
     ax[1].set_xticklabels(df['sample'], rotation=45, ha='right')
 
-    if args.title:
-        fig.suptitle(args.title)
+    if title:
+        fig.suptitle(title)
     plt.tight_layout()
-    out1 = f"{args.outprefix}_mapping.pdf"
-    plt.savefig(out1, bbox_inches='tight')
-    print(f"Saved figure: {out1}")
+    out = f"{outprefix}_mapping_rates.pdf"
+    plt.savefig(out, bbox_inches='tight')
+    print(f"Saved figure: {out}")
 
-    # -------- FIGURE 2 --------
+
+def plot_ontarget_figure(df, bar_colors, outprefix, suffix, width, title):
     fig, ax = plt.subplots(2, figsize=(width, 10))
 
     ax[0].bar(range(len(df)), df['on_target_rate'], color=bar_colors)
@@ -180,12 +100,60 @@ def main():
     ax[1].set_xticks(range(len(df)))
     ax[1].set_xticklabels(df['sample'], rotation=45, ha='right')
 
-    if args.title:
-        fig.suptitle(args.title)
+    if title:
+        fig.suptitle(title)
     plt.tight_layout()
-    out2 = f"{args.outprefix}_ontarget.pdf"
-    plt.savefig(out2, bbox_inches='tight')
-    print(f"Saved figure: {out2}")
+    out = f"{outprefix}_on_target_rates{suffix}.pdf"
+    plt.savefig(out, bbox_inches='tight')
+    print(f"Saved figure: {out}")
+
+
+def main():
+    args = parse_args()
+
+    per_sample_dfs = [pd.read_csv(f, sep="\t") for f in args.infiles]
+    df = pd.concat(per_sample_dfs, ignore_index=True)
+
+    groups = list(args.groups) if args.groups else [None] * len(args.infiles)
+    if len(groups) != len(args.infiles):
+        raise ValueError("--groups must have one entry per --infiles entry, or be omitted entirely")
+    group_by_sample = dict(zip([d['sample'].iloc[0] for d in per_sample_dfs], groups))
+    df['group'] = df['sample'].map(group_by_sample)
+
+    df['unmapped'] = df['total'] - df['mapped']
+    df['mapping_rate'] = df['mapped'] / df['total'] * 100
+    df['on_target_rate'] = df['target'] / df['mapped'] * 100
+
+    out_tsv = f"{args.outprefix}_on_target_rates.tsv"
+    df.to_csv(out_tsv, sep="\t", index=False)
+    print(f"Saved TSV: {out_tsv}")
+
+    unique_groups = list(df['group'].dropna().unique())
+    colors = [
+        '#6997B9',  # blue
+        '#BB6A68',  # red
+        '#70A677',  # green
+        '#D48653',  # orange
+        '#A783A3',  # purple
+    ]
+    color_dict = {g: colors[i % len(colors)] for i, g in enumerate(unique_groups)} if unique_groups else {}
+    bar_colors = df['group'].map(color_dict).fillna('#6997B9')  # blue
+
+    # Linear scaling: reserve a fixed amount of horizontal space per sample so
+    # labels don't overlap, with a floor for small cohorts. No upper cap --
+    # large cohorts (e.g. AGS390 has ~200 samples) need a genuinely wide PDF.
+    width = max(10, 0.22 * len(df))
+
+    plot_mapping_figure(df, args.outprefix, width, args.title)
+    plot_ontarget_figure(df, bar_colors, args.outprefix, "", width, args.title)
+
+    # Alias-labeled copy: always produced (mirrors the real-ID figure
+    # verbatim when --alias-map is empty), so the rule's declared output
+    # exists regardless of whether this bed panel actually has any aliases.
+    alias_map = parse_alias_map(args.alias_map)
+    alias_df = df.copy()
+    alias_df['sample'] = alias_df['sample'].apply(lambda s: resolve(s, alias_map))
+    plot_ontarget_figure(alias_df, bar_colors, args.outprefix, "_alias", width, args.title)
 
 
 if __name__ == "__main__":

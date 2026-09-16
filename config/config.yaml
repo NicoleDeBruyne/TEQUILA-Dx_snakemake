@@ -134,7 +134,7 @@ delta_psi_threshold:    0.1
 jxn_phasing_threshold:  0.8   # min fraction of bulk coverage a junction's hap1+hap2 must reach to be trusted (combined coverage in hap1 and hap2 must be 80% the bulk coverage)
 
 # ---------------------------------------------------------------------------
-# Merging hits across samples (rules/6_merge_hits.smk)
+# Merging hits across samples (rules/9_merge_results.smk)
 # ---------------------------------------------------------------------------
 output_dir: ""
 omim_file: "resources/omim_data/OMIM.tsv"   # included
@@ -156,7 +156,7 @@ merge_delta_psi_threshold:             0.1
 merge_jxn_sample_fraction:              0.05  # a junction that's an outlier in > this fraction of a group's samples is dropped
 
 # ---------------------------------------------------------------------------
-# Cohort-level junction outlier analysis (rules/7_cohort_junction_analysis.smk)
+# Cohort-level junction outlier analysis (rules/8_cohort_junction_analysis.smk)
 # Compares each sample against its own (bed, sample_type) cohort rather than GTEx.
 # Two methods -- "beta_binomial" (Beta fit + beta-binomial test, FDR-corrected)
 # or "modified_zscore" (median/MAD).
@@ -173,7 +173,7 @@ cohort_jxn_zscore_n_threshold:   10
 cohort_jxn_min_reads:          20   # a junction needs >= this many reads in >=1 bulk sample to be tested at all
 
 # ---------------------------------------------------------------------------
-# Cohort-wide QC and sample-type validation (rules/8_cohort_qc.smk)
+# Cohort-wide QC and sample-type validation (rules/6_sample_qc.smk + rules/9_merge_results.smk)
 # ---------------------------------------------------------------------------
 validate_ref_tissues: ["fibroblasts", "lymphocytes", "wholeblood"]
 validate_ref_colors:  ["#D95D5B", "#57AA3E", "#B271AB"]
@@ -187,7 +187,7 @@ sample_type_colors:
 cohort_qc_title: "Cohort QC"
 
 # ---------------------------------------------------------------------------
-# Relative gene expression quantification (rules/9_quantify_genes.smk)
+# Relative gene expression quantification (rules/7_sample_gene_quantification.smk + rules/9_merge_results.smk)
 # ---------------------------------------------------------------------------
 gene_quant_title: null
 

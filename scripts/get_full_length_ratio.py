@@ -1,35 +1,13 @@
 #!/usr/bin/env python3
 """
 scripts/get_full_length_ratio.py
-For each (gene, sample) pair, computes the "full-length ratio" (FLR) of each
-read overlapping that gene in the sample's BAM: the fraction of the gene's
-canonical transcript's exonic reference positions that the read's alignment
-actually spans via a non-N (non-intron-skip) CIGAR operation (M/D/=/X).
-avgFLR for a sample x gene pair is the mean FLR across every primary,
-mapped read overlapping the transcript's span. A read that fully spans
-every annotated exon of the canonical transcript (no dropped exons, no
-truncation) scores close to 1; a read covering only part of the transcript
-body (a truncated cDNA/library artifact, a partially-covered amplicon, an
-alternate/partial isoform, etc.) scores lower.
-
-Reads directly from each sample's own BAM (SAMPLES[s]["bam"], the same file
-_8A/_8B/quantify_gene_expression.py use) with one open file handle per
-sample, fetching each gene's canonical-transcript span with pysam's
-region-indexed fetch() -- NOT phase_reads.py's per-gene bulk BAM files.
-Those per-gene files are themselves nothing more than `samtools view
-<region> <this same original BAM>` (see phase_reads.py's
-filter_bam_by_region()), so reading them here would mean opening one small
-file per (sample, gene) pair -- tens of thousands of file opens for a large
-cohort x panel -- for data that's one indexed fetch() away in a file that's
-opened once per sample anyway. This also means _8D no longer needs to wait
-on phase_reads.py at all.
-
-The "canonical transcript" per gene is picked from --gtf: the transcript
-tagged "Ensembl_canonical" (GENCODE/Ensembl convention) if one exists for
-that gene, otherwise the transcript with the largest total exonic length.
-Its genomic span (min exon start to max exon end) is the fetch() region.
-
-Invoked by rules/8_cohort_qc.smk (_8D_get_full_length_ratio).
+Cohort-level merge step: combines every sample's own
+{sample}_full_length_ratio.tsv (per-gene avgFLR + read_count, written
+per-sample by scripts/get_full_length_ratio_sample.py via
+rules/6_sample_qc.smk's _6C) into the cohort's avgFLR / read-count matrices
+and heatmap. No BAM or GTF access here -- adding/removing a sample from a
+cohort only reruns this cheap merge, not the per-sample BAM scan + GTF
+parse. Invoked by rules/9_merge_results.smk's _9J.
 
 Genes are split into two heatmaps by their median (across samples) read
 count: genes with too few supporting reads have noisy/meaningless avgFLR,
@@ -44,12 +22,13 @@ sample), and a per-sample total-read-count bar (log-scaled, bottom, same
 value in both panels since it's summed across every gene, not just the
 ones shown in that panel). The boxplot points and the total-reads bars are
 both colored by sample_type (using the same colors as
-_8C2_validate_sample_types -- resolved via the Snakefile's own
-sample_type_color() and passed through --mapping-file's color column, not
+_9I2_validate_sample_types -- resolved via the Snakefile's own
+sample_type_color() and passed through --sample-types/--colors, not
 recomputed here), with a shared legend on the figure -- no separate color
 strip. Column width per sample shrinks (and the overall figure width is
 capped) as sample count grows, so large cohorts (e.g. ~200 samples) stay a
-print-friendly width instead of many feet wide.
+print-friendly width instead of many feet wide. No sample-name labels are
+drawn on the heatmap axis itself -- see git history / conversation notes.
 
 Outputs:
   --outprefix + "_matrix.tsv"              -- genes x samples avgFLR matrix
@@ -67,13 +46,9 @@ Outputs:
 """
 
 import argparse
-import gzip
-import os
-import concurrent.futures
 
 import pandas as pd
 import numpy as np
-import pysam
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -81,227 +56,29 @@ import matplotlib.colors
 import matplotlib.patches
 import seaborn as sns
 from matplotlib import rcParams
+
+from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
 rcParams['pdf.fonttype'] = 42
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Compute per-gene, per-sample full-length transcript coverage ratio (FLR) from each sample's BAM")
-    parser.add_argument(
-        "--mapping-file",
-        required=True,
-        help="TSV file without a header and with the columns: name, bam, sample_type, color -- same "
-             "convention as scripts/quantify_gene_expression.py's mapping file, plus sample_type and "
-             "a pre-resolved hex color (same colors _8C2_validate_sample_types uses, resolved by the "
-             "calling rule via the Snakefile's sample_type_color() -- not recomputed here) for the "
-             "heatmap's per-sample boxplot points and read-count bars.")
-    parser.add_argument("--bed", required=True,
-        help="BED file for the panel shared by every sample in --mapping-file. One row per gene "
-             "(chrom, start, end, gene, ...); column 4 is the gene symbol. Only used to get the gene "
-             "list -- the actual region fetched per gene is its canonical transcript's own span from --gtf.")
-    parser.add_argument("--gtf", required=True, help="Path to the reference annotation GTF (plain or .gz).")
+        description="Merge per-sample full-length-ratio TSVs into a cohort's avgFLR matrices + heatmap")
+    parser.add_argument("--infiles", nargs="+", required=True,
+        help="Every sample's {sample}_full_length_ratio.tsv, in the desired plot order")
+    parser.add_argument("--sample-types", nargs="*", default=[],
+        help="Optional per-sample sample_type label (same order as --infiles), for boxplot/bar coloring")
+    parser.add_argument("--colors", nargs="*", default=[],
+        help="Optional per-sample pre-resolved hex color (same order/length as --sample-types -- same "
+             "colors _9I2_validate_sample_types uses, resolved by the calling rule via the Snakefile's "
+             "sample_type_color(), not recomputed here)")
     parser.add_argument("--outprefix", required=True, help="Prefix for all output files.")
     parser.add_argument("--title", default="Full-length transcript coverage ratio (FLR)", help="Plot title prefix.")
     parser.add_argument("--min-reads", type=int, default=100,
         help="Genes whose median (across samples) read count is below this are split into their own "
              "low-confidence heatmap instead of the main one. Default: 100")
-    parser.add_argument("--threads", type=int, default=1, help="Number of samples to process in parallel. Default: 1")
+    add_alias_map_arg(parser)
     return parser.parse_args()
-
-
-def load_gene_list(bed):
-    """Gene symbols from BED column 4, in file order, de-duplicated -- same
-    convention as scripts/quantify_gene_expression.py's load_gene_regions()
-    and scripts/phase_reads.py's extract_gene_regions()."""
-    genes = []
-    seen = set()
-    with open(bed) as b:
-        for line in b:
-            if not line.strip() or line.startswith('#'):
-                continue
-            gene = line.strip().split('\t')[3]
-            if gene not in seen:
-                seen.add(gene)
-                genes.append(gene)
-    return genes
-
-
-# Reference-consuming, non-N CIGAR ops: M=0, D=2, ==7, X=8. I=1/S=4/H=5/P=6
-# don't consume reference; N=3 (intron skip) is explicitly excluded.
-_REF_CONSUMING_NON_N = {0, 2, 7, 8}
-
-
-def _open_maybe_gz(path):
-    return gzip.open(path, "rt") if path.endswith(".gz") else open(path, "r")
-
-
-def _gtf_attr(attr_str, key):
-    # GTF attribute fields look like: gene_name "FOO"; transcript_id "ENST...";
-    for field in attr_str.strip().split(";"):
-        field = field.strip()
-        if not field:
-            continue
-        parts = field.split(" ", 1)
-        if len(parts) != 2:
-            continue
-        k, v = parts
-        if k == key:
-            return v.strip().strip('"')
-    return None
-
-
-def load_canonical_transcripts(gtf_path, genes):
-    """Returns {gene: (chrom, span_start, span_end, [(exon_start, exon_end), ...], exonic_length)}
-    for the canonical transcript of every gene in `genes` found in the GTF.
-    All coordinates are 0-based half-open, matching pysam's reference
-    coordinate convention. (chrom, span_start, span_end) is the transcript's
-    overall genomic footprint (min exon start to max exon end) -- the region
-    passed to AlignmentFile.fetch()."""
-    genes = set(genes)
-
-    # transcript_id -> dict(gene, chrom, strand, canonical, exons=[(start,end),...])
-    transcripts = {}
-
-    with _open_maybe_gz(gtf_path) as fh:
-        for line in fh:
-            if not line or line.startswith("#"):
-                continue
-            fields = line.rstrip("\n").split("\t")
-            if len(fields) < 9:
-                continue
-            chrom, _, feature, start, end, _, strand, _, attrs = fields[:9]
-            if feature not in ("transcript", "exon"):
-                continue
-            gene_name = _gtf_attr(attrs, "gene_name") or _gtf_attr(attrs, "gene_id")
-            if gene_name not in genes:
-                continue
-            transcript_id = _gtf_attr(attrs, "transcript_id")
-            if transcript_id is None:
-                continue
-
-            if feature == "transcript":
-                is_canonical = 'tag "Ensembl_canonical"' in attrs
-                t = transcripts.setdefault(transcript_id, {
-                    "gene": gene_name, "chrom": chrom, "strand": strand,
-                    "canonical": False, "exons": [],
-                })
-                t["canonical"] = t["canonical"] or is_canonical
-            else:  # exon
-                t = transcripts.setdefault(transcript_id, {
-                    "gene": gene_name, "chrom": chrom, "strand": strand,
-                    "canonical": False, "exons": [],
-                })
-                # GTF is 1-based inclusive -> convert to 0-based half-open.
-                t["exons"].append((int(start) - 1, int(end)))
-
-    # Pick, per gene: the Ensembl_canonical-tagged transcript if any, else
-    # the transcript with the largest total exonic length.
-    by_gene = {}
-    for tid, t in transcripts.items():
-        if not t["exons"]:
-            continue
-        by_gene.setdefault(t["gene"], []).append(t)
-
-    result = {}
-    for gene, cands in by_gene.items():
-        canonical_cands = [c for c in cands if c["canonical"]]
-        pool = canonical_cands if canonical_cands else cands
-        best = max(pool, key=lambda c: sum(e - s for s, e in c["exons"]))
-        exons = sorted(best["exons"])
-        # Merge any overlapping/adjacent exon records (defensive -- GENCODE
-        # exons are normally already disjoint per transcript).
-        merged = []
-        for s, e in exons:
-            if merged and s <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
-            else:
-                merged.append((s, e))
-        exonic_length = sum(e - s for s, e in merged)
-        span_start = merged[0][0]
-        span_end = merged[-1][1]
-        result[gene] = (best["chrom"], span_start, span_end, merged, exonic_length)
-
-    return result
-
-
-def _read_ref_blocks(read):
-    """Reference-coordinate (0-based half-open) blocks covered by this
-    read's non-N, reference-consuming CIGAR ops (M/D/=/X)."""
-    blocks = []
-    pos = read.reference_start
-    block_start = None
-    for op, length in read.cigartuples or []:
-        if op in _REF_CONSUMING_NON_N:
-            if block_start is None:
-                block_start = pos
-            pos += length
-        else:
-            if block_start is not None:
-                blocks.append((block_start, pos))
-                block_start = None
-            if op == 3:  # N: intron skip, still consumes reference
-                pos += length
-    if block_start is not None:
-        blocks.append((block_start, pos))
-    return blocks
-
-
-def _overlap_length(blocks_a, blocks_b):
-    """Total overlap length between two lists of disjoint, sorted (start,end)
-    interval tuples."""
-    i = j = 0
-    total = 0
-    while i < len(blocks_a) and j < len(blocks_b):
-        a_s, a_e = blocks_a[i]
-        b_s, b_e = blocks_b[j]
-        lo, hi = max(a_s, b_s), min(a_e, b_e)
-        if lo < hi:
-            total += hi - lo
-        if a_e < b_e:
-            i += 1
-        else:
-            j += 1
-    return total
-
-
-def compute_avg_flr(bam_handle, chrom, span_start, span_end, exons, exonic_length):
-    """Returns (avg_flr, n_reads), fetching from an already-open
-    AlignmentFile via an indexed region query -- no per-gene file open.
-    avg_flr is NaN when there's no usable data; n_reads is always a real
-    count (0 when there's nothing)."""
-    if exonic_length <= 0:
-        return np.nan, 0
-    ratios = []
-    for read in bam_handle.fetch(chrom, span_start, span_end):
-        if read.is_unmapped or read.is_secondary or read.is_supplementary:
-            continue
-        read_blocks = _read_ref_blocks(read)
-        if not read_blocks:
-            continue
-        overlap = _overlap_length(read_blocks, exons)
-        ratios.append(overlap / exonic_length)
-    if not ratios:
-        return np.nan, 0
-    return float(np.mean(ratios)), len(ratios)
-
-
-def _process_sample(sample, bam_path, transcripts):
-    """Opens `bam_path` once and fetches every gene's region against that
-    single handle -- one file open per sample, not one per (sample, gene)."""
-    flr_out = {}
-    count_out = {}
-    if not bam_path or not os.path.exists(bam_path):
-        for gene in transcripts:
-            flr_out[gene] = np.nan
-            count_out[gene] = 0
-        return sample, flr_out, count_out
-
-    with pysam.AlignmentFile(bam_path, "rb") as bam:
-        for gene, (chrom, span_start, span_end, exons, exonic_length) in transcripts.items():
-            avg_flr, n_reads = compute_avg_flr(bam, chrom, span_start, span_end, exons, exonic_length)
-            flr_out[gene] = avg_flr
-            count_out[gene] = n_reads
-    return sample, flr_out, count_out
 
 
 def _panel_height(flr_df):
@@ -332,7 +109,7 @@ def _panel_height(flr_df):
 # regardless of how tall the heatmap row ends up being.
 _ROW_GAP = 0.15    # between heat/box and box/bar, inches
 _COL_GAP = 0.15    # between heat/bar and bar/cbar, inches
-_OUTER_GAP_MIN = 0.3   # between the two stacked (high/low) panels when no sample labels are drawn, inches
+_OUTER_GAP_MIN = 0.3   # between the two stacked (high/low) panels, inches
 _BAR_W = 1.6       # right (gene median reads) bar width, inches
 _CBAR_W = 0.25     # colorbar width, inches
 _MARGIN = 0.15     # figure margin on each side, inches (bbox_inches="tight" trims any excess)
@@ -387,13 +164,6 @@ def _draw_heatmap_panel(fig, x0, y_top, flr_df, gene_median_reads, sample_total_
     show_gene_labels = (heat_h / max(n_genes, 1)) * 72 >= 5  # ~5pt/row floor
     gene_fontsize = min(8, max(4, (heat_h * 72) / max(n_genes, 1) - 1))
 
-    # Same idea on the sample axis: past a certain density, individual
-    # sample-name labels just overlap into noise. Per-sample color (shared
-    # by the boxplot points and the reads bar below) still shows grouping,
-    # and exact identities are always in the companion _matrix.tsv.
-    show_sample_labels = (heat_w / max(n_samples, 1)) * 72 >= 5
-    sample_fontsize = min(7, max(3, (heat_w * 72) / max(n_samples, 1) - 1))
-
     y_heat_bottom = y_top - heat_h
     y_box_bottom = y_heat_bottom - _ROW_GAP - box_h
     y_bar_bottom = y_box_bottom - _ROW_GAP - bar_h
@@ -425,6 +195,7 @@ def _draw_heatmap_panel(fig, x0, y_top, flr_df, gene_median_reads, sample_total_
     ax_gbar.set_xlabel("median\nreads", fontsize=7)
     ax_gbar.tick_params(axis="y", left=False, labelleft=False)
     ax_gbar.set_ylim(ax_heat.get_ylim())
+    ax_gbar.set_xlim(left=1)
 
     # Per-sample avgFLR distribution across this panel's own genes -- one
     # jittered point per gene colored by that sample's sample_type, with
@@ -453,12 +224,9 @@ def _draw_heatmap_panel(fig, x0, y_top, flr_df, gene_median_reads, sample_total_
     # points above (i.e. by sample_type).
     ax_sbar.bar(x, stot.clip(lower=1).to_numpy(), width=0.8, color=scolors)
     ax_sbar.set_yscale("log")
+    ax_sbar.set_ylim(bottom=1)
     ax_sbar.set_ylabel("total\nreads", fontsize=7)
-    if show_sample_labels:
-        ax_sbar.set_xticks(x)
-        ax_sbar.set_xticklabels(sample_order, rotation=90, fontsize=sample_fontsize)
-    else:
-        ax_sbar.tick_params(axis="x", labelbottom=False, bottom=False)
+    ax_sbar.tick_params(axis="x", labelbottom=False, bottom=False)
 
 
 def make_combined_heatmap(flr_high, flr_low, gene_median_reads, sample_total_reads,
@@ -479,20 +247,7 @@ def make_combined_heatmap(flr_high, flr_low, gene_median_reads, sample_total_rea
     h_high = _panel_height(flr_high)
     h_low = _panel_height(flr_low)
 
-    # The top panel's own rotated sample-name labels hang below its reads
-    # bar, into the gap above the next panel -- estimate their height so
-    # the outer gap is big enough to clear them (rather than a small fixed
-    # gap that the labels then overlap into the next panel's title).
-    show_sample_labels = (heat_w / max(n_samples, 1)) * 72 >= 5
     outer_gap = _OUTER_GAP_MIN
-    if show_sample_labels:
-        sample_fontsize = min(7, max(3, (heat_w * 72) / max(n_samples, 1) - 1))
-        samples = list(flr_high.columns) or list(flr_low.columns)
-        max_label_len = max((len(s) for s in samples), default=0)
-        # Rough estimate of a 90-degree-rotated label's height: average
-        # character width ~0.6x font size, plus a little padding.
-        label_h = max_label_len * 0.6 * sample_fontsize / 72 + 0.25
-        outer_gap = max(outer_gap, label_h)
 
     full_h = _TOP_MARGIN + h_high + outer_gap + h_low + _MARGIN
 
@@ -507,8 +262,8 @@ def make_combined_heatmap(flr_high, flr_low, gene_median_reads, sample_total_rea
                          sample_colors, title_low, heat_w, full_w, full_h)
 
     # One legend for the whole figure -- sample_type -> color is the same
-    # in both panels (and matches rules/8_cohort_qc.smk's
-    # _8C2_validate_sample_types, which resolves colors via the Snakefile's
+    # in both panels (and matches rules/9_merge_results.smk's
+    # _9I2_validate_sample_types, which resolves colors via the Snakefile's
     # own sample_type_color()). Placed in the reserved top margin, above
     # the top panel's own axes, rather than overlapping it.
     seen = {}
@@ -526,46 +281,43 @@ def make_combined_heatmap(flr_high, flr_low, gene_median_reads, sample_total_rea
 def main():
     args = parse_args()
 
-    df = pd.read_csv(args.mapping_file, sep="\t", header=None, names=["sample", "bam", "sample_type", "color"])
-    samples = sorted(df["sample"].dropna().unique())
-    sample_to_bam = dict(zip(df["sample"], df["bam"]))
-    sample_to_type = dict(zip(df["sample"], df["sample_type"]))
-    sample_to_color = dict(zip(df["sample"], df["color"]))
+    per_sample_dfs = [pd.read_csv(f, sep="\t") for f in args.infiles]
+    samples = [d['sample'].iloc[0] for d in per_sample_dfs if not d.empty]
 
-    genes = load_gene_list(args.bed)
-    if not genes:
-        raise ValueError("No genes found in BED file: " + args.bed)
+    sample_types = list(args.sample_types) if args.sample_types else []
+    colors = list(args.colors) if args.colors else []
+    if sample_types and len(sample_types) != len(args.infiles):
+        raise ValueError("--sample-types must have one entry per --infiles entry, or be omitted entirely")
+    if colors and len(colors) != len(args.infiles):
+        raise ValueError("--colors must have one entry per --infiles entry, or be omitted entirely")
+    sample_to_type = dict(zip(samples, sample_types)) if sample_types else {}
+    sample_to_color = dict(zip(samples, colors)) if colors else {}
 
-    print("Loading canonical transcripts for " + str(len(genes)) + " gene(s) from " + args.gtf + "...")
-    transcripts = load_canonical_transcripts(args.gtf, genes)
-    missing = [g for g in genes if g not in transcripts]
-    if missing:
-        print("[WARNING] No canonical transcript found in GTF for " + str(len(missing)) +
-              " gene(s) (will be NaN in output): " + ", ".join(missing[:20]) +
-              (" ..." if len(missing) > 20 else ""))
+    long_df = pd.concat(per_sample_dfs, ignore_index=True)
+    genes = list(long_df['gene'].drop_duplicates())
 
-    print("Computing avgFLR across " + str(len(samples)) + " sample(s) x " + str(len(genes)) +
-          " gene(s) using " + str(args.threads) + " thread(s)...")
-
-    flr_results = {}
-    count_results = {}
-    with concurrent.futures.ProcessPoolExecutor(max_workers=args.threads) as ex:
-        futures = {ex.submit(_process_sample, s, sample_to_bam.get(s), transcripts): s for s in samples}
-        for f in concurrent.futures.as_completed(futures):
-            sample, flr_vals, count_vals = f.result()
-            flr_results[sample] = flr_vals
-            count_results[sample] = count_vals
-            print("Finished: " + sample)
-
-    matrix = pd.DataFrame(flr_results).reindex(index=genes, columns=samples)
+    matrix = long_df.pivot(index='gene', columns='sample', values='avgFLR').reindex(index=genes, columns=samples)
     matrix.index.name = "gene"
 
-    count_matrix = pd.DataFrame(count_results).reindex(index=genes, columns=samples).fillna(0).astype(int)
+    count_matrix = (
+        long_df.pivot(index='gene', columns='sample', values='read_count')
+        .reindex(index=genes, columns=samples).fillna(0).astype(int)
+    )
     count_matrix.index.name = "gene"
 
     out_matrix = args.outprefix + "_matrix.tsv"
     matrix.to_csv(out_matrix, sep="\t")
     print("Saved avgFLR matrix: " + out_matrix)
+
+    # Alias-labeled copy: always produced (mirrors the real-ID matrix
+    # verbatim when --alias-map is empty), so the rule's declared output
+    # exists regardless of whether this bed panel actually has any aliases.
+    alias_map = parse_alias_map(args.alias_map)
+    alias_matrix = matrix.copy()
+    alias_matrix.columns = resolve_all(alias_matrix.columns, alias_map)
+    out_matrix_alias = args.outprefix + "_matrix_alias.tsv"
+    alias_matrix.to_csv(out_matrix_alias, sep="\t")
+    print("Saved alias-labeled avgFLR matrix: " + out_matrix_alias)
 
     out_counts = args.outprefix + "_read_counts_matrix.tsv"
     count_matrix.to_csv(out_counts, sep="\t")

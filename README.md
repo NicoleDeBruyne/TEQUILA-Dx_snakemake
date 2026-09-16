@@ -13,10 +13,10 @@ For each sample (a long-read RNA-seq BAM file), the pipeline:
 3. **Phases reads** (`phase_reads`) — Produces one BAM file per haplotype (where possible) and a table mapping each gene to its phased BAM files, used in later steps.
 4. **Finds ASE outliers** (`ase_analysis`) — runs a binomial test per gene on the phased haplotype read counts to detect allele-specific expression.
 5. **Finds splice-junction outliers vs. GTEx** (`junction_analysis`) — compares each sample's junction usage to **GTEx reference tissue** data, using a beta-binomial test.
-6. **Merges hits across samples** (`merge_hits`) — for each (BED panel, sample type) group, filters and combines the variant, ASE, and junction results into one final `merged_all_hits.tsv` file per panel.
-7. **Finds splice-junction outliers vs. cohort** (`cohort_junction_analysis`) — compares each sample's junction usage to **the rest of the cohort's own samples**, instead of GTEx.
-8. **Checks cohort-wide QC** (`cohort_qc`) — for each BED panel: mapping/on-target rates, read-length distributions, a "full-length ratio" per gene, and a sample-identity check
-9. **Quantifies gene expression** (`quantify_genes`) — for each (BED panel, sample type) group: approximate relative gene expression by read count, by peak coverage, by splice-site-sharing assignment, and by isoform-aware quantification (AMALGAM).
+6. **Computes per-sample QC** (`sample_qc`) — mapping/on-target read counts, a read-length five-number summary, and a per-gene "full-length ratio", all computed directly from that sample's own BAM (no cohort dependency).
+7. **Quantifies gene expression per sample** (`sample_gene_quantification`) — approximate per-sample relative gene expression by read count, by peak coverage, and by splice-site-sharing assignment, plus a per-sample StringTie assembly for isoform-aware quantification (AMALGAM) later.
+8. **Finds splice-junction outliers vs. cohort** (`cohort_junction_analysis`) — compares each sample's junction usage to **the rest of the cohort's own samples**, instead of GTEx.
+9. **Merges results across samples** (`merge_hits` / `cohort_qc` / `quantify_genes`) — combines every sample's step 1-7 results (plus step 8's cohort-junction results) into cohort-level outputs: a ranked `merged_all_hits.tsv` candidate-hit list per BED panel, cohort-wide QC matrices/plots, and gene-expression matrices (by count, coverage, assignment, and AMALGAM). This is the only stage that reads results from more than one sample at once, which is what keeps rerunning it (e.g. after adding a sample, or configuring a sample alias) cheap -- it never touches a BAM directly.
 
 
 ## Repository structure
@@ -38,10 +38,10 @@ TEQUILA-Dx_snakemake/
 │   ├── 3_phase_reads.smk
 │   ├── 4_ase_analysis.smk
 │   ├── 5_junction_analysis.smk
-│   ├── 6_merge_hits.smk
-│   ├── 7_cohort_junction_analysis.smk
-│   ├── 8_cohort_qc.smk                # On-target rates, read attributes, full-length ratio, sample-identity check
-│   └── 9_quantify_genes.smk           # Gene expression matrices (by count, coverage, assignment, and AMALGAM)
+│   ├── 6_sample_qc.smk                 # Per-sample: on-target rate, read-length summary, full-length ratio
+│   ├── 7_sample_gene_quantification.smk # Per-sample: gene expression by count, coverage, assignment; StringTie assembly
+│   ├── 8_cohort_junction_analysis.smk  # Splice-junction outliers vs. the rest of the cohort
+│   └── 9_merge_results.smk             # Merges everything above into cohort-wide hit rankings, QC, and gene-expression matrices
 ├── scripts/                            # Python scripts called by the rules above
 ├── resources/
 │   └── omim_data/OMIM.tsv              # Included OMIM gene -> phenotype/inheritance table
@@ -104,9 +104,19 @@ samples:
     tissues: ["fibroblasts", "wholeblood"]   # GTEx reference tissue(s) to compare this sample against
     sample_type: "fibroblasts" 
     # outdir: "/path/to/sample1_output"      # optional: use this instead of the default {output_dir}/samples/sample1/output for this sample
+    # alias: "PT01"                          # optional: de-identified label to substitute for this sample's real ID in _alias outputs (see below)
 ```
 
 Samples that share the same `bed` panel and `sample_type` are grouped together for cohort-level analyses.
+
+**Sample aliases:** any sample can be given an optional `alias:` in the run config. For every
+cohort-level output (steps 6-9) that shows real sample IDs -- as a TSV column/index or as a plot
+label -- the pipeline also writes a companion `..._alias` file (e.g. `merged_all_hits_simplified.tsv`
+→ `merged_all_hits_simplified_alias.tsv`) with those IDs replaced by their alias. Samples with no
+`alias` configured fall back to their own real ID in the alias file. An `_alias` file is only
+produced/requested for a given BED panel or sample-type group if at least one of its samples has
+an alias configured; outputs that never show a sample identifier (e.g. `annotated.gtf.gz`, or the
+per-sample-unlabeled boxplot/upset plots in `merged_hits/`) don't get an alias companion at all.
 
 ## Usage
 
@@ -132,17 +142,25 @@ Everything is written under the single `output_dir` set in the run config:
 
 ```
 {output_dir}/
-  samples/{sample}/output/...       -- each sample's own results (variant_calling, phased_reads, ase_analysis, junction_analysis)
+  samples/{sample}/output/...       -- each sample's own results:
+                                        variant_calling, phased_reads, ase_analysis, junction_analysis,
+                                        qc/                          -- per-sample QC (on-target rate, read-length
+                                                                        summary, full-length ratio)
+                                        gene_quantification/         -- per-sample gene expression (count, coverage,
+                                                                        assignment) + StringTie assembly for AMALGAM
   samples/{sample}/logs/...         -- each sample's own logs
   cohort/{bed_id}/
     output/
       validate_sample_types/        -- sample-identity check plots (covers all sample types on this panel)
-      cohort_qc/                    -- QC plots for on-target rate / read attributes (covers all sample types on this panel)
+      cohort_qc/                    -- cohort-wide QC plots merged from every sample's own qc/ TSVs above
+                                        (on-target rate, read lengths, full-length ratio; covers all sample
+                                        types on this panel)
       merged_all_hits.tsv           -- the final diagnostic result for this BED panel
       sample_types/{sample_type}/
         output/...                  -- results for this group of samples: merged_variant_calling,
                                         merged_ase_analysis, merged_junction_analysis, merged_hits,
-                                        cohort_junction_analysis, gene_quantification
+                                        cohort_junction_analysis, gene_quantification (merged from every
+                                        sample's own gene_quantification/ TSVs above)
         logs/...                    -- logs for this group
     logs/...                        -- logs for the whole BED panel
 ```

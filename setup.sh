@@ -677,7 +677,7 @@ EOF
 ) || error "OMIM check failed"
 
 ##############################################################################
-log "AMALGAM (used by rules/9_quantify_genes.smk)"
+log "AMALGAM (used by rules/9_merge_results.smk)"
 ##############################################################################
 # Isoform discovery/quantification pipeline (github.com/RNA-ROB/amalgam).
 # Gets its own dedicated conda env (same pattern as conda_env_compile_variants) so its pinned dependencies can't conflict

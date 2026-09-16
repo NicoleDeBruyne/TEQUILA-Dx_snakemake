@@ -243,6 +243,27 @@ def sample_type_color(sample_type):
     idx = all_types.index(sample_type) % len(_DEFAULT_SAMPLE_TYPE_PALETTE)
     return _DEFAULT_SAMPLE_TYPE_PALETTE[idx]
 
+def sample_alias(sample):
+    """A sample's configured alias, or its own ID if it has none."""
+    return SAMPLES[sample].get("alias") or sample
+
+def _has_alias(sample):
+    return bool(SAMPLES[sample].get("alias"))
+
+def group_has_alias(group_id):
+    """True if any sample in this sample_type group has an alias configured."""
+    return any(_has_alias(s) for s in GROUPS[group_id])
+
+def bed_has_alias(cohort_id, bed_id):
+    """True if any sample sharing this cohort+bed panel has an alias configured."""
+    return any(_has_alias(s) for s in bed_samples(cohort_id, bed_id))
+
+def alias_map_args(samples):
+    """--alias-map CLI tokens ('sample=alias') for every sample in `samples`
+    that actually has an alias configured (samples without one are simply
+    omitted -- the receiving script's resolve() falls back to the sample ID)."""
+    return [str(s) + '=' + str(SAMPLES[s]['alias']) for s in samples if _has_alias(s)]
+
 def sample_fraction_threshold(group_id, fraction):
     return ceil(len(GROUPS[group_id]) * fraction)
 
@@ -292,6 +313,8 @@ def all_outputs():
             bod = bed_outdir(cid, bid)
             outs.append((str(bod) + '/hits_upset_density.pdf'))
             outs.append((str(bod) + '/merged_all_hits_simplified.tsv'))
+            if bed_has_alias(cid, bid):
+                outs.append((str(bod) + '/merged_all_hits_simplified_alias.tsv'))
         for gid in GROUPS:
             god = group_outdir(gid)
             for fname in ('genes_with_pathogenic_variant_boxplot.pdf', 'genes_with_ASE_boxplot.pdf',
@@ -305,6 +328,11 @@ def all_outputs():
                 god + "/cohort_junction_analysis/" + gid + "_" + _cja_thr_label(gid)
                 + "/" + gid + "_outliers.tsv"
             )
+            if group_has_alias(gid):
+                outs.append(
+                    god + "/cohort_junction_analysis/" + gid + "_" + _cja_thr_label(gid)
+                    + "/" + gid + "_outliers_alias.tsv"
+                )
 
     if flag("quantify_genes"):
         for gid in GROUPS:
@@ -314,16 +342,26 @@ def all_outputs():
             outs.append(god + "/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/annotation/annotated.gtf.gz")
             outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix.tsv")
+            if group_has_alias(gid):
+                outs.append(god + "/gene_quantification/by_count/gene_count_matrix_alias.tsv")
+                outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix_alias.tsv")
+                outs.append(god + "/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix_alias.tsv")
+                outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix_alias.tsv")
 
     if flag("cohort_qc"):
         for (cid, bid) in BED_GROUPS:
             bod = bed_outdir(cid, bid)
             cqd = bod + "/cohort_qc"
             outs.append((str(bod) + '/cohort_qc/validate_sample_types/' + str(bid) + '_distance_heatmap.pdf'))
-            outs.append((str(cqd) + '/on_target_rates/' + str(bid) + '_on_target_rates_ontarget.pdf'))
-            outs.append((str(cqd) + '/read_attributes/' + str(bid) + '_read_attributes_read_lengths_violin.pdf'))
+            outs.append((str(cqd) + '/on_target_rates/' + str(bid) + '_on_target_rates.pdf'))
+            outs.append((str(cqd) + '/read_attributes/' + str(bid) + '_read_lengths.pdf'))
             outs.append((str(cqd) + '/full_length_ratio/' + str(bid) + '_full_length_ratio_matrix.tsv'))
             outs.append((str(cqd) + '/full_length_ratio/' + str(bid) + '_full_length_ratio_heatmap.pdf'))
+            if bed_has_alias(cid, bid):
+                outs.append((str(bod) + '/cohort_qc/validate_sample_types/' + str(bid) + '_distance_heatmap_alias.pdf'))
+                outs.append((str(cqd) + '/on_target_rates/' + str(bid) + '_on_target_rates_alias.pdf'))
+                outs.append((str(cqd) + '/read_attributes/' + str(bid) + '_read_lengths_alias.pdf'))
+                outs.append((str(cqd) + '/full_length_ratio/' + str(bid) + '_full_length_ratio_matrix_alias.tsv'))
 
     return outs
 
@@ -338,7 +376,7 @@ include: "rules/2_compile_variants.smk"
 include: "rules/3_phase_reads.smk"
 include: "rules/4_ase_analysis.smk"
 include: "rules/5_junction_analysis.smk"
-include: "rules/6_merge_hits.smk"
-include: "rules/7_cohort_junction_analysis.smk"
-include: "rules/8_cohort_qc.smk"
-include: "rules/9_quantify_genes.smk"
+include: "rules/6_sample_qc.smk"
+include: "rules/7_sample_gene_quantification.smk"
+include: "rules/8_cohort_junction_analysis.smk"
+include: "rules/9_merge_results.smk"
