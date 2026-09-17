@@ -143,7 +143,7 @@ def all_groups():
             if "sample_type" not in SAMPLES[s]:
                 raise ValueError(
                     ("Sample '" + str(s) + "' is missing a 'sample_type' field in the run config, ")
-                    + 'required for grouping samples during the merge_hits stage.'
+                    + 'required for grouping samples during the cohort-level merge stages.'
                 )
             bed = SAMPLES[s]["bed"]
             sample_type = SAMPLES[s]["sample_type"]
@@ -308,7 +308,17 @@ def all_outputs():
                     (str(od) + '/junction_analysis/gtex_' + str(t) + '/' + str(s) + '_gtex_' + str(t) + '_outlier_junctions.tsv')
                 )
 
-    if flag("merge_hits"):
+        if flag("qc"):
+            outs.append((str(od) + '/qc/' + str(s) + '_on_target.tsv'))
+            outs.append((str(od) + '/qc/' + str(s) + '_read_attributes.tsv'))
+            outs.append((str(od) + '/qc/' + str(s) + '_full_length_ratio.tsv'))
+
+        if flag("gene_quantification"):
+            outs.append((str(od) + '/gene_quantification/' + str(s) + '_gene_count.tsv'))
+            outs.append((str(od) + '/gene_quantification/' + str(s) + '_gene_coverage.tsv'))
+            outs.append((str(od) + '/gene_quantification/' + str(s) + '_gene_assignment.tsv'))
+
+    if flag("merge_results"):
         for (cid, bid) in BED_GROUPS:
             bod = bed_outdir(cid, bid)
             outs.append((str(bod) + '/hits_upset_density.pdf'))
@@ -334,7 +344,7 @@ def all_outputs():
                     + "/" + gid + "_outliers_alias.tsv"
                 )
 
-    if flag("quantify_genes"):
+    if flag("gene_quantification"):
         for gid in GROUPS:
             god = group_outdir(gid)
             outs.append(god + "/gene_quantification/by_count/gene_count_matrix.tsv")
@@ -348,7 +358,7 @@ def all_outputs():
                 outs.append(god + "/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix_alias.tsv")
                 outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix_alias.tsv")
 
-    if flag("cohort_qc"):
+    if flag("qc"):
         for (cid, bid) in BED_GROUPS:
             bod = bed_outdir(cid, bid)
             cqd = bod + "/cohort_qc"

@@ -393,16 +393,28 @@ def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
 
 
 def load_gene_expression_df(path):
-    """Read the CPTM matrix from rule _9C (quantify_gene_by_assignment.py's
+    """Read the CPTM matrix from rule _9M (quantify_gene_by_assignment.py's
     <outprefix>_matrix.tsv) -- one row per targeted-panel gene, one column
     per sample in that (bed_id, sample_type) cohort. Since this matrix is
     already scoped to exactly one (panel, sample_type) group, every
-    sample column in it IS the cohort for percentile/n_cohort purposes --
-    no separate cohort-membership lookup needed."""
+    sample column in it IS the cohort for n_cohort purposes -- no separate
+    cohort-membership lookup needed."""
     return pd.read_csv(path, sep='\t', index_col=0)
 
 
-def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_name, omim_df=None, gene_expression_df=None):
+def load_gene_expression_zscore_df(path):
+    """Read the low-expression outlier z-score matrix from rule _9M
+    (quantify_gene_by_assignment.py's <outprefix>_outlier_zscores.tsv --
+    see scripts/expression_outliers.py's module docstring for the
+    algorithm). Same shape/format as load_gene_expression_df's matrix; kept
+    as a separate loader since the two files serve different annotation
+    columns (raw CPTM value vs. the robust outlier score) and may be
+    supplied independently."""
+    return pd.read_csv(path, sep='\t', index_col=0)
+
+
+def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_name, omim_df=None,
+                     gene_expression_df=None, gene_expression_zscore_df=None, gene_expression_outlier_threshold=3.0):
     """Build one sample's ranked candidate-hits table. All four input
     DataFrames are assumed already loaded (via load_*() above) and already
     filtered down to this sample only -- this function itself is agnostic
@@ -886,14 +898,20 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     hit_df.drop(columns=['_tb_n_pathogenic', '_tb_clnsig_rank', '_tb_max_bulk_delta', '_tb_max_cadd'], inplace=True)
     hit_df['ranking'] = np.arange(1, len(hit_df) + 1)
 
-    # Gene expression (rule _9C's targeted-panel CPTM matrix, one row per
+    # Gene expression (rule _9M's targeted-panel CPTM matrix, one row per
     # gene / one column per sample in this exact (bed_id, sample_type)
     # cohort -- see load_gene_expression_df()). relative_gene_expression is
-    # this sample's own CPTM value for the gene; cohort_relative_gene_expression
-    # is that gene's (1st, 50th, 99th) percentile across every sample in the
-    # matrix (i.e. the whole cohort, since the matrix is already scoped to
-    # this one group); n_cohort is the total sample count backing those
-    # percentiles (same for every gene/row -- the matrix's column count).
+    # this sample's own CPTM value for the gene.
+    #
+    # gene_expression_zscore/gene_expression_outlier come from a SEPARATE
+    # matrix (rule _9M's <outprefix>_outlier_zscores.tsv, load_gene_expression_zscore_df())
+    # -- this sample's robust, leave-one-out, shrinkage-based z-score for
+    # the gene (see scripts/expression_outliers.py's module docstring for
+    # the algorithm), and whether it crosses gene_expression_outlier_threshold
+    # (one-sided: only unusually LOW expression is flagged, per design
+    # discussion -- more negative z = lower expression relative to the rest
+    # of this sample's own cohort). This is annotation only for now -- it
+    # does NOT currently factor into a gene's tier.
     if gene_expression_df is not None:
         n_cohort = gene_expression_df.shape[1]
 
@@ -902,15 +920,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
                 return gene_expression_df.loc[gene, sample_name]
             return '.'
 
-        def _cohort_relative_expression(gene):
-            if gene not in gene_expression_df.index:
-                return '.'
-            vals = gene_expression_df.loc[gene].astype(float).values
-            p1, p50, p99 = np.percentile(vals, [1, 50, 99])
-            return f"({p1:.2f}, {p50:.2f}, {p99:.2f})"
-
         hit_df['relative_gene_expression'] = hit_df['gene'].apply(_relative_expression)
-        hit_df['cohort_relative_gene_expression'] = hit_df['gene'].apply(_cohort_relative_expression)
         hit_df['n_cohort'] = n_cohort
     else:
         # No gene-expression matrix provided -- keep the same output
@@ -918,14 +928,33 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         # omim_df/cohort_junction_df being omitted elsewhere in this
         # function).
         hit_df['relative_gene_expression'] = '.'
-        hit_df['cohort_relative_gene_expression'] = '.'
         hit_df['n_cohort'] = '.'
+
+    if gene_expression_zscore_df is not None:
+        def _expression_zscore(gene):
+            if gene in gene_expression_zscore_df.index and sample_name in gene_expression_zscore_df.columns:
+                z = gene_expression_zscore_df.loc[gene, sample_name]
+                return z if pd.notna(z) else '.'
+            return '.'
+
+        def _expression_outlier(gene):
+            z = _expression_zscore(gene)
+            if z == '.':
+                return '.'
+            return bool(float(z) <= -abs(gene_expression_outlier_threshold))
+
+        hit_df['gene_expression_zscore'] = hit_df['gene'].apply(_expression_zscore)
+        hit_df['gene_expression_outlier'] = hit_df['gene'].apply(_expression_outlier)
+    else:
+        # No z-score matrix provided -- same fallback convention as above.
+        hit_df['gene_expression_zscore'] = '.'
+        hit_df['gene_expression_outlier'] = '.'
 
     # Reorder
     hit_df['sample'] = sample_name
     hit_df = hit_df[[
         'sample', 'gene', 'phenotypes', 'inheritance_patterns', 'haploinsufficient', 'ranking', 'tier', 'variant', 'pathogenic_variant', 'ASE', 'outlier_junction', 'cohort_outlier_junction',
-        'relative_gene_expression', 'cohort_relative_gene_expression', 'n_cohort',
+        'relative_gene_expression', 'gene_expression_zscore', 'gene_expression_outlier', 'n_cohort',
         'variant_ID', 'variant_GT_nanoTS', 'variant_GT_longcallR', 'variant_GT_clair3-RNA', 'variant_GT_deepvariant',
         'variant_gnomAD_AF',  'variant_CLNSIG', 'variant_CADD_PHRED', 'variant_SpliceAI', 'variant_consequence', 'variant_num_callers', 'variant_nsamples',
         'ASE_ratio', 'ASE_nsamples', 

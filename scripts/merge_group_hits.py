@@ -50,11 +50,23 @@ def parse_args():
     parser.add_argument("--omim", required=False, default=None,
         help="Path to OMIM data. If omitted, phenotypes/inheritance_patterns/haploinsufficient are filled with '.'/False.")
     parser.add_argument("--gene-expression-matrix", required=False, default=None,
-        help="Group-level targeted-panel CPTM matrix (rule _9C's <outprefix>_matrix.tsv, from "
+        help="Group-level targeted-panel CPTM matrix (rule _9M's <outprefix>_matrix.tsv, from "
              "quantify_gene_by_assignment.py) -- one row per gene, one column per sample in this "
-             "(bed_id, sample_type) group. If omitted/missing, relative_gene_expression/"
-             "cohort_relative_gene_expression/n_cohort are filled with '.' (merge_hits.build_hit_table's "
-             "existing fallback convention for optional inputs).")
+             "(bed_id, sample_type) group. If omitted/missing, relative_gene_expression/n_cohort "
+             "are filled with '.' (merge_hits.build_hit_table's existing fallback convention for "
+             "optional inputs).")
+    parser.add_argument("--gene-expression-zscores", required=False, default=None,
+        help="Group-level low-expression outlier z-score matrix (rule _9M's "
+             "<outprefix>_outlier_zscores.tsv, from quantify_gene_by_assignment.py -- see "
+             "scripts/expression_outliers.py's module docstring for the algorithm). Same shape "
+             "as --gene-expression-matrix. If omitted/missing, gene_expression_zscore/"
+             "gene_expression_outlier are filled with '.'. Annotation only -- does NOT currently "
+             "factor into a gene's tier.")
+    parser.add_argument("--gene-expression-outlier-threshold", type=float, default=3.0,
+        help="A sample/gene is annotated gene_expression_outlier=True when its z-score (from "
+             "--gene-expression-zscores) is <= -this value. Should match whatever "
+             "--outlier-zscore-threshold quantify_gene_by_assignment.py was run with, for the "
+             "boolean flag to mean what its name says. Default: 3.0")
     parser.add_argument("--debug-sample", required=False, default=None,
         help="If set, print diagnostic detail (to stderr) for this one sample: the gene list surviving "
              "the per-sample variant_df slice, and the gene list in build_hit_table's output -- useful "
@@ -199,6 +211,11 @@ def main():
     # gene expression data" fallback (same pattern as omim_df/
     # cohort_junction_tsv being optional above).
 
+    gene_expression_zscore_df = None
+    if args.gene_expression_zscores and os.path.isfile(args.gene_expression_zscores):
+        gene_expression_zscore_df = merge_hits.load_gene_expression_zscore_df(args.gene_expression_zscores)
+    # else: same fallback convention as gene_expression_df above.
+
     hit_dfs = []
     for sample in args.samples:
         sample_variant_df = variant_df[variant_df['sample'].astype(str) == str(sample)]
@@ -223,6 +240,8 @@ def main():
         hit_df = merge_hits.build_hit_table(
             sample_variant_df, sample_ase_df, sample_junction_df, sample_cohort_junction_df,
             sample, omim_df, gene_expression_df,
+            gene_expression_zscore_df=gene_expression_zscore_df,
+            gene_expression_outlier_threshold=args.gene_expression_outlier_threshold,
         )
 
         if args.debug_sample and str(sample) == args.debug_sample:

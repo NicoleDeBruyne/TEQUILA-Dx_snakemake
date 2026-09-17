@@ -16,6 +16,15 @@ reasoning as scripts/quantify_gene_expression.py). Which genes are
 "BED-panel genes" for the CPTM/boxplot subset is inferred from which rows
 have a non-null cptm value (populated only for panel genes by the
 per-sample step) -- so this merge step doesn't need its own BED file.
+
+Also writes a low-expression outlier score for every (gene, sample), on
+the targeted-panel CPTM matrix -- see scripts/expression_outliers.py's
+module docstring for the algorithm. This is the outlier score
+scripts/merge_hits.py annotates onto merged_all_hits.tsv (the
+splice-site-assignment method was chosen for that annotation since,
+unlike --metric count/coverage, it isn't restricted to simple BED-region
+overlap/pileup and so isn't as easily confounded by a neighboring gene's
+reads spilling into a tightly-packed panel region).
 """
 
 import argparse
@@ -29,12 +38,30 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
+from expression_outliers import compute_outlier_scores, outliers_long_format
 rcParams['pdf.fonttype'] = 42
 
 
 # ---------------------------------------------------------------------------
 # Args
 # ---------------------------------------------------------------------------
+
+def add_outlier_args(parser):
+    """Shared CLI options for the low-expression outlier score -- same
+    defaults/semantics across all four quantification methods. See
+    expression_outliers.py's module docstring for the algorithm."""
+    parser.add_argument("--outlier-pseudocount", type=float, default=1.0,
+        help="Added to CPTM before log2-transforming. Default: 1.0")
+    parser.add_argument("--outlier-shrinkage-k", type=float, default=10.0,
+        help="Shrinkage constant: weight on a gene's own leave-one-out MAD is "
+             "n/(n+k) vs. the cohort-wide trend. Default: 10.0")
+    parser.add_argument("--outlier-min-mad", type=float, default=0.1,
+        help="Floor on the shrunk MAD (log2 units), guarding against a near-zero-MAD "
+             "gene producing an absurd z-score. Default: 0.1")
+    parser.add_argument("--outlier-zscore-threshold", type=float, default=3.0,
+        help="A sample is flagged as a low-expression outlier for a gene when "
+             "z <= -this value. Default: 3.0")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -53,6 +80,7 @@ def parse_args():
              "(gene PDFs are written next to the matrix, not under the prefix's basename)")
     parser.add_argument('--title')
     add_alias_map_arg(parser)
+    add_outlier_args(parser)
     return parser.parse_args()
 
 
@@ -203,6 +231,25 @@ def main():
     plot_outdir = os.path.dirname(args.outprefix)
     make_gene_boxplots(cptm_df, plot_outdir, metric_label)
     print("Saved per-gene boxplots to: " + plot_outdir)
+
+    # Low-expression outlier score (see expression_outliers.py's module
+    # docstring for the algorithm) -- this is the file
+    # rules/9_merge_results.smk's _9D2 passes to merge_hits.py to annotate
+    # merged_all_hits.tsv.
+    z_df, is_outlier_df = compute_outlier_scores(
+        cptm_df,
+        pseudocount=args.outlier_pseudocount,
+        shrinkage_k=args.outlier_shrinkage_k,
+        min_mad=args.outlier_min_mad,
+        z_threshold=args.outlier_zscore_threshold,
+    )
+    out_zscores = args.outprefix + "_outlier_zscores.tsv"
+    z_df.to_csv(out_zscores, sep="\t")
+    print("Saved outlier z-score matrix: " + out_zscores)
+
+    out_outliers = args.outprefix + "_outliers.tsv"
+    outliers_long_format(z_df, is_outlier_df).to_csv(out_outliers, sep="\t", index=False)
+    print("Saved low-expression outliers: " + out_outliers)
 
     # Per-sample breakdown of assigned vs. unassigned-and-why (see
     # _STATS_CATEGORIES), one row per sample, columns in the same order the

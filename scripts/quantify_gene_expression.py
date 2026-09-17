@@ -17,6 +17,11 @@ value -- see quantify_gene_expression_sample.py's module docstring.
 
 The per-gene boxplot (one page per gene) always plots the CPTM value, with
 the highest- and lowest-CPTM sample labeled directly on the plot.
+
+Also writes a low-expression outlier score for every (gene, sample): a
+leave-one-out, shrinkage-based robust z-score in log2 space -- see
+scripts/expression_outliers.py's module docstring for the full algorithm
+and why it's used instead of a parametric (e.g. negative-binomial) fit.
 """
 
 import argparse
@@ -30,7 +35,25 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
+from expression_outliers import compute_outlier_scores, outliers_long_format
 rcParams['pdf.fonttype'] = 42
+
+
+def add_outlier_args(parser):
+    """Shared CLI options for the low-expression outlier score -- same
+    defaults/semantics across all four quantification methods. See
+    expression_outliers.py's module docstring for the algorithm."""
+    parser.add_argument("--outlier-pseudocount", type=float, default=1.0,
+        help="Added to CPTM before log2-transforming. Default: 1.0")
+    parser.add_argument("--outlier-shrinkage-k", type=float, default=10.0,
+        help="Shrinkage constant: weight on a gene's own leave-one-out MAD is "
+             "n/(n+k) vs. the cohort-wide trend. Default: 10.0")
+    parser.add_argument("--outlier-min-mad", type=float, default=0.1,
+        help="Floor on the shrunk MAD (log2 units), guarding against a near-zero-MAD "
+             "gene producing an absurd z-score. Default: 0.1")
+    parser.add_argument("--outlier-zscore-threshold", type=float, default=3.0,
+        help="A sample is flagged as a low-expression outlier for a gene when "
+             "z <= -this value. Default: 3.0")
 
 
 def parse_args():
@@ -51,6 +74,7 @@ def parse_args():
              "prefix's basename)")
     parser.add_argument('--title')
     add_alias_map_arg(parser)
+    add_outlier_args(parser)
     return parser.parse_args()
 
 
@@ -137,6 +161,25 @@ def main():
     plot_outdir = os.path.dirname(args.outprefix)
     make_gene_boxplots(cptm_df, plot_outdir, metric_label)
     print("Saved per-gene boxplots to: " + plot_outdir)
+
+    # Low-expression outlier score (see expression_outliers.py's module
+    # docstring for the algorithm): computed on this same CPTM matrix, so
+    # count/coverage/assignment/amalgam are all scored identically and on
+    # the same scale.
+    z_df, is_outlier_df = compute_outlier_scores(
+        cptm_df,
+        pseudocount=args.outlier_pseudocount,
+        shrinkage_k=args.outlier_shrinkage_k,
+        min_mad=args.outlier_min_mad,
+        z_threshold=args.outlier_zscore_threshold,
+    )
+    out_zscores = args.outprefix + "_outlier_zscores.tsv"
+    z_df.to_csv(out_zscores, sep="\t")
+    print("Saved outlier z-score matrix: " + out_zscores)
+
+    out_outliers = args.outprefix + "_outliers.tsv"
+    outliers_long_format(z_df, is_outlier_df).to_csv(out_outliers, sep="\t", index=False)
+    print("Saved low-expression outliers: " + out_outliers)
 
 
 if __name__ == "__main__":

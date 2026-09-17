@@ -14,10 +14,10 @@ phase_reads:               true
 ase_analysis:               true
 junction_analysis:          true
 cohort_junction_analysis:   true
-merge_hits:                 true
-merge_hits_include_cohort_junctions: true
-cohort_qc:      true
-quantify_genes:              true
+merge_results:              true
+merge_results_include_cohort_junctions: true
+qc:             true
+gene_quantification:        true
 
 conda_env:        "envs/conda_env"
 conda_env_compile_variants: "envs/conda_env_compile_variants"
@@ -190,6 +190,18 @@ cohort_qc_title: "Cohort QC"
 # Relative gene expression quantification (rules/7_sample_gene_quantification.smk + rules/9_merge_results.smk)
 # ---------------------------------------------------------------------------
 gene_quant_title: null
+
+# Low-expression outlier score, computed identically for all four
+# quantification methods (by count, by coverage, by splice-site assignment,
+# and AMALGAM) -- see scripts/expression_outliers.py's module docstring for
+# the full algorithm (leave-one-out modified z-score in log2 space, with
+# each gene's MAD shrunk toward a cohort-wide MAD-vs-expression trend).
+# Annotation only for now -- does NOT currently factor into a gene's tier
+# in merged_all_hits.tsv (see design discussion).
+gene_outlier_pseudocount:      1.0   # added to CPTM before log2-transforming
+gene_outlier_shrinkage_k:     10.0   # shrinkage constant: weight on a gene's own MAD is n/(n+k) vs. the cohort trend
+gene_outlier_min_mad:          0.1   # floor on the shrunk MAD (log2 units), guards against near-zero-MAD genes
+gene_outlier_zscore_threshold: 3.0   # a sample/gene is flagged an outlier when z <= -this value (one-sided, low expression only)
 
 # ---------------------------------------------------------------------------
 # Resource defaults (override per rule if needed)
