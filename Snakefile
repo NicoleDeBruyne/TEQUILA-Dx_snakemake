@@ -130,6 +130,17 @@ for _cid, _members in config.get("cohorts", {}).items():
 def _bed_id(bed):
     return Path(bed).stem
 
+def all_bed_files():
+    """Sorted, de-duplicated list of every BED panel file used by any sample
+    in this run -- used by rule _5B1_fit_gtex_beta_distributions (see
+    rules/5_junction_analysis.smk) to restrict genome-wide GTEx beta-fitting
+    to just the junctions any sample in this run could ever query, instead
+    of fitting every junction in the raw GTEx matrix. Every sample's own
+    splice-junction counts (rule _5A) are already restricted to that
+    sample's own BED panel, so the union across all samples is guaranteed to
+    cover every junction any _5C job for this run will look up."""
+    return sorted(set(SAMPLES[s]["bed"] for s in SAMPLES))
+
 def _group_id(cohort_id, bed, sample_type):
     return (str(cohort_id) + '_' + str(_bed_id(bed)) + '_' + str(sample_type))
 
@@ -347,16 +358,31 @@ def all_outputs():
     if flag("gene_quantification"):
         for gid in GROUPS:
             god = group_outdir(gid)
-            outs.append(god + "/gene_quantification/by_count/gene_count_matrix.tsv")
-            outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix.tsv")
-            outs.append(god + "/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix.tsv")
+            # Every method now produces the same core set (CPTM + MOTR
+            # targeted-panel matrices, plus a genome-wide raw matrix where
+            # that's applicable -- assignment and amalgam only, since
+            # count/coverage's raw matrix is already BED-restricted
+            # per-sample, upstream) -- see scripts/motr.py and
+            # scripts/gene_boxplots.py for the shared MOTR/plotting code
+            # behind this across methods.
+            outs.append(god + "/gene_quantification/by_count/gene_count_matrix_cptm.tsv")
+            outs.append(god + "/gene_quantification/by_count/gene_count_matrix_motr.tsv")
+            outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix_cptm.tsv")
+            outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix_motr.tsv")
+            outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix_cptm.tsv")
+            outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix_motr.tsv")
+            outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_cptm.tsv")
+            outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_motr.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/annotation/annotated.gtf.gz")
-            outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix.tsv")
             if group_has_alias(gid):
-                outs.append(god + "/gene_quantification/by_count/gene_count_matrix_alias.tsv")
-                outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix_alias.tsv")
-                outs.append(god + "/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix_alias.tsv")
-                outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix_alias.tsv")
+                outs.append(god + "/gene_quantification/by_count/gene_count_matrix_cptm_alias.tsv")
+                outs.append(god + "/gene_quantification/by_count/gene_count_matrix_motr_alias.tsv")
+                outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix_cptm_alias.tsv")
+                outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix_motr_alias.tsv")
+                outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix_cptm_alias.tsv")
+                outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix_motr_alias.tsv")
+                outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_cptm_alias.tsv")
+                outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_motr_alias.tsv")
 
     if flag("qc"):
         for (cid, bid) in BED_GROUPS:

@@ -314,7 +314,18 @@ rule _9D2_merge_group_hits_with_cohort_junctions:
         cohort_junction_tsv = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
         gene_expression_matrix = lambda wc: (
             config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
-            + "/output/gene_quantification/by_assignment/gene_assignment_matrix.tsv"
+            + "/output/gene_quantification/by_assignment/gene_assignment_matrix_cptm.tsv"
+        ) if config.get("gene_quantification") else [],
+        # MOTR ("median of target ratios" -- DESeq2-style size-factor
+        # normalization restricted to BED-panel genes, see
+        # scripts/quantify_gene_by_assignment.py's compute_size_factors())
+        # counterpart to gene_expression_matrix above -- annotated onto
+        # merged_all_hits.tsv as relative_gene_expression_motr/
+        # cohort_relative_gene_expression_motr, alongside the CPTM-based
+        # relative_gene_expression/cohort_relative_gene_expression.
+        gene_expression_matrix_motr = lambda wc: (
+            config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
+            + "/output/gene_quantification/by_assignment/gene_assignment_matrix_motr.tsv"
         ) if config.get("gene_quantification") else [],
         # Low-expression outlier z-score matrix from this same file's _9M
         # rule below (see scripts/expression_outliers.py's module docstring
@@ -322,7 +333,7 @@ rule _9D2_merge_group_hits_with_cohort_junctions:
         # factor into a gene's tier (see design discussion).
         gene_expression_zscores = lambda wc: (
             config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
-            + "/output/gene_quantification/by_assignment/gene_assignment_outlier_zscores.tsv"
+            + "/output/gene_quantification/by_assignment/gene_assignment_zscores_cptm.tsv"
         ) if config.get("gene_quantification") else [],
     output:
         all_hits = _all_hits_tsv,
@@ -332,6 +343,9 @@ rule _9D2_merge_group_hits_with_cohort_junctions:
         omim_flag    = ("--omim " + config["omim_file"]) if config.get("omim_file") else "",
         gene_expression_flag = lambda wc, input: (
             "--gene-expression-matrix " + str(input.gene_expression_matrix)
+        ) if config.get("gene_quantification") else "",
+        gene_expression_motr_flag = lambda wc, input: (
+            "--gene-expression-matrix-motr " + str(input.gene_expression_matrix_motr)
         ) if config.get("gene_quantification") else "",
         gene_expression_zscore_flag = lambda wc, input: (
             "--gene-expression-zscores " + str(input.gene_expression_zscores)
@@ -357,6 +371,7 @@ rule _9D2_merge_group_hits_with_cohort_junctions:
             --samples     {params.samples} \\
             {params.omim_flag} \\
             {params.gene_expression_flag} \\
+            {params.gene_expression_motr_flag} \\
             {params.gene_expression_zscore_flag} \\
         2>&1 | tee {log}
         """
@@ -553,7 +568,15 @@ rule _9H_merge_read_attributes:
         # bed_has_alias() is true.
         length_boxplot_alias = _cohort_outdir + "/{bed_id}/output/cohort_qc/read_attributes/{bed_id}_read_lengths_alias.pdf",
     params:
-        outprefix  = lambda wc: (str(bed_outdir(wc.cohort_id, wc.bed_id)) + '/cohort_qc/read_attributes/' + str(wc.bed_id) + '_read_attributes'),
+        # NOTE: no trailing "_read_attributes" here -- plot_read_attributes.py
+        # already appends "_read_attributes.tsv"/"_read_lengths.pdf"/
+        # "_read_lengths_alias.pdf" onto this prefix itself. Adding it here
+        # too used to double it up (producing
+        # "{bed_id}_read_attributes_read_attributes.tsv" and
+        # "{bed_id}_read_attributes_read_lengths.pdf"), which never matched
+        # this rule's own `output:` paths above and made every run fail with
+        # MissingOutputException even though the script had written real files.
+        outprefix  = lambda wc: (str(bed_outdir(wc.cohort_id, wc.bed_id)) + '/cohort_qc/read_attributes/' + str(wc.bed_id)),
         title      = lambda wc: config.get("cohort_qc_title", (str(wc.cohort_id) + ' ' + str(wc.bed_id) + ' read attributes')),
         alias_args = lambda wc: _quoted(alias_map_args(bed_samples(wc.cohort_id, wc.bed_id))),
         script     = workflow.basedir + "/scripts/plot_read_attributes.py",
@@ -732,14 +755,17 @@ rule _9K_merge_gene_count:
     input:
         infiles = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "gene_count"),
     output:
-        matrix       = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_matrix.tsv",
+        matrix       = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_matrix_cptm.tsv",
+        matrix_motr  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_matrix_motr.tsv",
         matrix_raw   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_matrix_raw.tsv",
-        outlier_zscores = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_outlier_zscores.tsv",
-        outliers        = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_outliers.tsv",
-        # Always produced alongside `matrix` (mirrors it verbatim when no
-        # sample in this group has an alias configured); only actually
-        # *requested* by rule all via all_outputs() when group_has_alias() is true.
-        matrix_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_matrix_alias.tsv",
+        zscores_cptm = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_cptm.tsv",
+        zscores_motr = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_motr.tsv",
+        # Always produced alongside `matrix`/`matrix_motr` (mirrors them
+        # verbatim when no sample in this group has an alias configured);
+        # only actually *requested* by rule all via all_outputs() when
+        # group_has_alias() is true.
+        matrix_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_matrix_cptm_alias.tsv",
+        matrix_motr_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_matrix_motr_alias.tsv",
     params:
         outprefix  = lambda wc: (config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
                                  + "/output/gene_quantification/by_count/gene_count"),
@@ -771,14 +797,17 @@ rule _9L_merge_gene_coverage:
     input:
         infiles = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "gene_coverage"),
     output:
-        matrix       = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_matrix.tsv",
+        matrix       = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_matrix_cptm.tsv",
+        matrix_motr  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_matrix_motr.tsv",
         matrix_raw   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_matrix_raw.tsv",
-        outlier_zscores = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_outlier_zscores.tsv",
-        outliers        = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_outliers.tsv",
-        # Always produced alongside `matrix` (mirrors it verbatim when no
-        # sample in this group has an alias configured); only actually
-        # *requested* by rule all via all_outputs() when group_has_alias() is true.
-        matrix_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_matrix_alias.tsv",
+        zscores_cptm = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_cptm.tsv",
+        zscores_motr = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_motr.tsv",
+        # Always produced alongside `matrix`/`matrix_motr` (mirrors them
+        # verbatim when no sample in this group has an alias configured);
+        # only actually *requested* by rule all via all_outputs() when
+        # group_has_alias() is true.
+        matrix_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_matrix_cptm_alias.tsv",
+        matrix_motr_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_matrix_motr_alias.tsv",
     params:
         outprefix  = lambda wc: (config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
                                  + "/output/gene_quantification/by_coverage/gene_coverage"),
@@ -811,19 +840,21 @@ rule _9M_merge_gene_by_assignment:
         infiles       = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "gene_assignment"),
         stats_infiles = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "read_outcomes"),
     output:
-        matrix       = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix.tsv",
+        matrix       = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_cptm.tsv",
+        matrix_motr  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_motr.tsv",
         matrix_raw   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_raw.tsv",
         matrix_raw_all_genes = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_raw_all_genes.tsv",
         assignment_stats     = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_read_outcomes.tsv",
         assignment_stats_pdf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_read_outcomes.pdf",
         # Consumed directly by _9D2 above to annotate merged_all_hits.tsv --
         # see design discussion (annotation only, doesn't affect tier).
-        outlier_zscores = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_outlier_zscores.tsv",
-        outliers        = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_outliers.tsv",
+        zscores_cptm = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_cptm.tsv",
+        zscores_motr = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_motr.tsv",
         # Always produced alongside `matrix` (mirrors it verbatim when no
         # sample in this group has an alias configured); only actually
         # *requested* by rule all via all_outputs() when group_has_alias() is true.
-        matrix_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_alias.tsv",
+        matrix_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_cptm_alias.tsv",
+        matrix_motr_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_motr_alias.tsv",
     params:
         outprefix  = lambda wc: (config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
                                  + "/output/gene_quantification/by_assignment/gene_assignment"),
@@ -1060,19 +1091,14 @@ rule _9N5_amalgam_aggregate_matrices:
     output:
         transcript_matrix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/gene_amalgam_transcript_matrix.tsv",
         gene_matrix        = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix.tsv",
-        gene_matrix_cptm  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix_cptm.tsv",
-        outlier_zscores   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/gene_amalgam_outlier_zscores.tsv",
-        outliers          = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/gene_amalgam_outliers.tsv",
         # Always produced alongside `gene_matrix` (mirrors it verbatim when
         # no sample in this group has an alias configured); only actually
         # *requested* by rule all via all_outputs() when group_has_alias() is true.
         gene_matrix_alias  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix_alias.tsv",
-        gene_matrix_cptm_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix_cptm_alias.tsv",
     params:
         samples    = lambda wc: GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)],
         outprefix  = lambda wc: _amalgam_group_dir(wc.cohort_id, wc.bed_id, wc.sample_type) + "/quantification/gene_amalgam",
         alias_args = lambda wc: _quoted(alias_map_args(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])),
-        outlier_args = _quoted_outlier_args(),
         script     = workflow.basedir + "/scripts/aggregate_amalgam_matrices.py",
     threads: 1
     resources:
@@ -1088,6 +1114,56 @@ rule _9N5_amalgam_aggregate_matrices:
             --samples   {params.samples} \\
             --outprefix {params.outprefix} \\
             --alias-map {params.alias_args} \\
+        2>&1 | tee {log}
+        """
+
+
+rule _9N6_amalgam_normalize_matrix:
+    # Step 7 (not part of AMALGAM itself, and not part of the group's
+    # original submission script either -- new): restricts _9N5's
+    # genome-wide, gene_id-keyed gene_matrix.tsv to this group's BED panel
+    # (translating gene_id -> gene symbol via the reference GTF), then adds
+    # CPTM/MOTR normalization, z-scores, and per-gene boxplots -- the same
+    # outputs the other three quantification methods produce. See
+    # scripts/normalize_amalgam_matrix.py's module docstring.
+    input:
+        gene_matrix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix.tsv",
+        bed = lambda wc: SAMPLES[GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)][0]]["bed"],
+        gtf = config["annotation"],
+    output:
+        matrix_raw  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_matrix_raw.tsv",
+        matrix_cptm = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_matrix_cptm.tsv",
+        matrix_motr = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_matrix_motr.tsv",
+        zscores_cptm = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_cptm.tsv",
+        zscores_motr = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_motr.tsv",
+        # Always produced alongside `matrix_cptm`/`matrix_motr` (mirrors
+        # them verbatim when no sample in this group has an alias
+        # configured); only actually *requested* by rule all via
+        # all_outputs() when group_has_alias() is true.
+        matrix_cptm_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_matrix_cptm_alias.tsv",
+        matrix_motr_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_matrix_motr_alias.tsv",
+    params:
+        outprefix  = lambda wc: _amalgam_group_dir(wc.cohort_id, wc.bed_id, wc.sample_type) + "/gene_amalgam",
+        title      = lambda wc: config.get("gene_quant_title") or (str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + " relative gene expression (AMALGAM)"),
+        alias_args = lambda wc: _quoted(alias_map_args(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])),
+        outlier_args = _quoted_outlier_args(),
+        script     = workflow.basedir + "/scripts/normalize_amalgam_matrix.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(4, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)]) // 8),
+        runtime = 60,
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_normalize_matrix.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.matrix_raw}) $(dirname {log})
+        python -u {params.script} \\
+            --gene-matrix {input.gene_matrix} \\
+            --bed         {input.bed} \\
+            --gtf         {input.gtf} \\
+            --outprefix   {params.outprefix} \\
+            --title       {params.title:q} \\
+            --alias-map   {params.alias_args} \\
             {params.outlier_args} \\
         2>&1 | tee {log}
         """

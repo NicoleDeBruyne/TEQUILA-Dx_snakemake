@@ -40,7 +40,7 @@ rule _6A_get_on_target_rate:
         script = workflow.basedir + "/scripts/get_on_target_rate.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
         "{outdir}/../logs/{sample}_on_target_rate.log"
@@ -66,7 +66,7 @@ rule _6B_get_read_attributes:
         script = workflow.basedir + "/scripts/get_read_attributes.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
         "{outdir}/../logs/{sample}_read_attributes.log"
@@ -97,7 +97,7 @@ rule _6C_get_full_length_ratio:
         script = workflow.basedir + "/scripts/get_full_length_ratio_sample.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
         "{outdir}/../logs/{sample}_full_length_ratio.log"

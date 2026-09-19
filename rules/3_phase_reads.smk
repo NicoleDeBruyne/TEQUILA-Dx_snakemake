@@ -34,7 +34,7 @@ rule _3A_phase_reads:
         script              = workflow.basedir + "/scripts/phase_reads.py",
     threads: lambda wc: _rule_threads(wc, "phase_reads")
     resources:
-        mem_mb     = lambda wc, threads, attempt: max(4096, attempt * threads * 1024),
+        mem_mb = lambda wc, threads, attempt: max(4096, int(attempt * threads * 1.5 * 1024)),
         runtime    = config["time"],
     log:
         "{outdir}/../logs/{sample}_phase_reads.log"

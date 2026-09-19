@@ -4,12 +4,20 @@
 # Date: 2024.01.17
 # Adapted from Robert Wang (Xing Lab)
 # Optimized: 2025
+# Refactored 2026.09.17: beta-distribution fitting moved out to
+# fit_gtex_beta_distributions.py (rule _5B1, once per tissue+thresholds,
+# genome-wide) and fit_novel_junction_beta_distributions.py (rule _5B2, once
+# per sample+tissue, for junctions absent from the raw GTEx matrix). This
+# script (_5C) now only merges those precomputed fits against this sample's
+# own junction data and runs the beta-binomial significance test -- it no
+# longer fits anything itself, and no longer reads the raw (large)
+# per-GTEx-sample count matrix at all.
 
 import os, argparse, warnings, traceback
 import pandas as pd
 import numpy as np
 from collections import defaultdict
-from scipy.stats import betabinom, beta
+from scipy.stats import betabinom
 from pandas.errors import PerformanceWarning
 from math import ceil
 import concurrent.futures
@@ -24,11 +32,14 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='Identifies splice junctions mapping to a user-defined gene region that '
                     'show unusually high or low usage frequencies within a sample of interest '
-                    'relative to tissue-matched GTEx controls')
+                    'relative to tissue-matched GTEx controls, using precomputed beta fits '
+                    '(see fit_gtex_beta_distributions.py / fit_novel_junction_beta_distributions.py).')
     parser.add_argument('--jxn-info-file', required=True,
         help='Path to TSV file with junction information for the region of interest.')
-    parser.add_argument('--gtexfile', required=True,
-        help='Path to read count matrix for splice junctions discovered across tissue-matched GTEx controls.')
+    parser.add_argument('--gtex-beta-fits', required=True,
+        help='Path to fit_gtex_beta_distributions.py\'s (_5B1) output for this tissue.')
+    parser.add_argument('--novel-beta-fits', required=True,
+        help='Path to fit_novel_junction_beta_distributions.py\'s (_5B2) output for this sample+tissue.')
     parser.add_argument('--outfile', required=True, type=str,
         help='Output file to write merged junctions.')
     parser.add_argument('--sample-coverage-threshold', type=int, default=20)
@@ -100,7 +111,6 @@ def parse_gtf_splice_junctions(gtf_file):
     ]
     priority_rank = {typ: i for i, typ in enumerate(priority_order)}
 
-    # Normalise unknown transcript types to "other"
     for tid in list(transcript_type):
         if transcript_type[tid] not in priority_rank:
             transcript_type[tid] = "other"
@@ -143,7 +153,6 @@ def calculate_PSI(df, PSI_rescale_factor, col_prefix=''):
         cov_col = col_prefix + 'jxn_coverage'
         df[jxn_col] = pd.to_numeric(df[jxn_col], errors='coerce').fillna(0).astype(int)
         df[cov_col] = pd.to_numeric(df[cov_col], errors='coerce').fillna(0).astype(int)
-        # Vectorised PSI — avoids row-wise apply
         cov_num = df[cov_col].astype(float)
         jxn_num = df[jxn_col].astype(float)
         psi = np.where(cov_num == 0, np.nan, jxn_num / cov_num)
@@ -157,63 +166,41 @@ def calculate_PSI(df, PSI_rescale_factor, col_prefix=''):
         traceback.print_exc()
 
 
-def fit_beta_dist(x, tol, n_threshold):
-    """Fit a beta distribution on values in x, and separately compute the
-    empirical p1/p99 percentiles of x -- independent of the fit/n_threshold,
-    same philosophy as identify_cohort_junction_outliers.py's cohort-level
-    p1/p99 ("purely empirical... independent of whichever distribution was
-    fit"). p1/p99 are what delta_PSI is computed from below (distance
-    outside [p1, p99], 0 if inside), not the fitted mean -- even though the
-    mean (expected_PSI) is still computed and reported here."""
-    x = pd.to_numeric(x, errors='coerce')
-    x = x[~np.isnan(x)]
-    n = len(x)
+def beta_binomial_test_vectorized(x, n, alpha_value, beta_value):
+    """Vectorized replacement for the old per-row beta_binomial_test(): computes the same
+    two-sided beta-binomial p-value for every row at once via array-valued scipy calls,
+    instead of one Python-level scipy call per row.
 
-    if n == 0:
-        p1_value, p99_value = "low_n", "low_n"
-    else:
-        # Same conservative-bound convention as
-        # identify_cohort_junction_outliers.py: n<=10 uses the raw min/max;
-        # above that, ceil(n*0.01) as the percentile index (e.g. n=107:
-        # ceil(107*0.01)=2 -> 3rd value from each end, excluding the
-        # bottom/top 2).
-        sorted_x = np.sort(x)
-        if n <= 10:
-            p1_value, p99_value = sorted_x[0], sorted_x[-1]
-        else:
-            k = ceil(n * 0.01)
-            p1_value, p99_value = sorted_x[k], sorted_x[n - 1 - k]
+    Returns an object array with "n/a"/"error" strings preserved where the inputs were
+    invalid, exactly matching the old per-row function's sentinel behavior.
+    """
+    x = np.asarray(x, dtype=float)
+    n = np.asarray(n, dtype=float)
+    alpha_value = np.asarray(alpha_value, dtype=float)
+    beta_value = np.asarray(beta_value, dtype=float)
 
-    if n < n_threshold:
-        return (n, "low_n", "low_n", "low_n", p1_value, p99_value)
-    if x.var() < tol:
-        return (n, x.mean() / tol, (1 - x.mean()) / tol, x.mean(), p1_value, p99_value)
-    try:
-        alpha_value, beta_value = beta.fit(x, floc=0, fscale=1)[0:2]
-        expected_PSI = alpha_value / (alpha_value + beta_value)
-        return (n, alpha_value, beta_value, expected_PSI, p1_value, p99_value)
-    except Exception:
-        return (n, "error", "error", "error", p1_value, p99_value)
+    valid = ~(np.isnan(x) | np.isnan(n) | np.isnan(alpha_value) | np.isnan(beta_value))
+
+    x_r = np.round(x)
+    n_r = np.round(n)
+
+    result = np.full(x.shape, "n/a", dtype=object)
+
+    if valid.any():
+        lte_x = betabinom.cdf(x_r[valid], n_r[valid], alpha_value[valid], beta_value[valid])
+        gte_x = betabinom.cdf(n_r[valid] - x_r[valid], n_r[valid], beta_value[valid], alpha_value[valid])
+        p_value = np.clip(2 * np.minimum(lte_x, gte_x), 0, 1)
+
+        valid_result = np.where(np.isnan(p_value), "error", p_value)
+        result[valid] = valid_result
+
+    return result
 
 
-def beta_binomial_test(x, n, alpha_value, beta_value):
-    """Compute the probability of observing a value as extreme as x from a beta distribution."""
-    if any(np.isnan(val) for val in [x, n, alpha_value, beta_value]):
-        return "n/a"
-    x = round(x)
-    n = round(n)
-    lte_x = betabinom.cdf(x, n, alpha_value, beta_value)
-    gte_x = betabinom.cdf(n - x, n, beta_value, alpha_value)
-    p_value = np.clip(2 * min(lte_x, gte_x), 0, 1)
-    if np.isnan(p_value):
-        return "error"
-    return p_value
-
-
-def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_coverage_threshold,
-                   gtex_coverage_threshold, PSI_rescale_factor, gtex_n_threshold,
-                   phasing_threshold, annotated_junctions, report_outdir):
-    """Process region of interest."""
+def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_coverage_threshold,
+                   PSI_rescale_factor, phasing_threshold, annotated_junctions, report_outdir):
+    """Process region of interest -- merges this sample's junction data against the
+    precomputed GTEx beta fits and runs the beta-binomial test. No fitting happens here."""
 
     start_time = time.time()
     report = os.path.join(report_outdir, f"{region.replace(':', '_').replace('-', '_')}_report.tsv")
@@ -230,10 +217,6 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
             hap1_df = jxn_info_df_filtered[jxn_info_df_filtered['phasing'] == 'hap1'].copy()
             hap2_df = jxn_info_df_filtered[jxn_info_df_filtered['phasing'] == 'hap2'].copy()
         del jxn_info_df_filtered
-
-        gtex_samples = gtex_df_filtered.columns[1:]
-        gtex_df_filtered.columns = [gtex_df_filtered.columns[0]] + \
-                                    [col + '_jxn_alignment_count' for col in gtex_samples]
 
         if len(bulk_df['gene'].unique()) > 1:
             report_file.write(f"Error: Multiple genes for region {region}. Exiting...\n")
@@ -252,70 +235,88 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
             report_file.write(f"  Haplotype 1 alignment count: {hap1_alignment_count}\n")
             report_file.write(f"  Haplotype 2 alignment count: {hap2_alignment_count}\n")
         report_file.write(f"Number of junctions in sample of interest: {len(bulk_df)}\n\n")
-        report_file.write(f"Number of junctions in GTEx: {len(gtex_df_filtered)}\n\n")
-        if len(gtex_df_filtered) == 0:
-            report_file.write(f"\nNo junctions found over region {region} in GTEx samples. Exiting...\n")
+        report_file.write(f"Number of GTEx-covered junctions in region: {len(gtex_fits_filtered)}\n\n")
+        if len(gtex_fits_filtered) == 0:
+            report_file.write(f"\nNo junctions found over region {region} in the GTEx beta-fit tables. Exiting...\n")
             return
 
         ############################## STEP 2: ADD MISSING JUNCTIONS ##############################
 
-        # Vectorised splice-site extraction — faster than list comprehension on the index
         def _add_ss(df):
             parts = df.index.str.split('_')
             df['ss1'] = parts.map(lambda p: p[0] + '_' + p[1])
             df['ss2'] = parts.map(lambda p: p[0] + '_' + p[2])
 
+        bulk_df = bulk_df.set_index('junction') if 'junction' in bulk_df.columns else bulk_df
         _add_ss(bulk_df)
-        _add_ss(gtex_df_filtered)
         if haplotype_specific:
+            hap1_df = hap1_df.set_index('junction') if 'junction' in hap1_df.columns else hap1_df
+            hap2_df = hap2_df.set_index('junction') if 'junction' in hap2_df.columns else hap2_df
             _add_ss(hap1_df)
             _add_ss(hap2_df)
 
         bulk_df_full = pd.DataFrame()
         for sample in bulk_df['sample'].unique():
             bulk_df_sample = bulk_df[bulk_df['sample'] == sample]
-            bulk_df_sample = pd.concat([
-                bulk_df_sample,
-                gtex_df_filtered[~gtex_df_filtered.index.isin(bulk_df_sample.index)][['ss1', 'ss2']]
-                    .assign(sample=sample, phasing='bulk', region=region, gene=gene,
-                            gene_alignment_count=bulk_alignment_count, jxn_alignment_count=0)
-            ])
+            missing = gtex_fits_filtered[~gtex_fits_filtered.index.isin(bulk_df_sample.index)]
+            padding = pd.DataFrame(index=missing.index)
+            parts = padding.index.str.split('_')
+            padding['ss1'] = parts.map(lambda p: p[0] + '_' + p[1])
+            padding['ss2'] = parts.map(lambda p: p[0] + '_' + p[2])
+            padding['sample'] = sample
+            padding['phasing'] = 'bulk'
+            padding['region'] = region
+            padding['gene'] = gene
+            padding['gene_alignment_count'] = bulk_alignment_count
+            padding['jxn_alignment_count'] = 0
+            bulk_df_sample = pd.concat([bulk_df_sample, padding])
             bulk_df_full = pd.concat([bulk_df_full, bulk_df_sample])
-
-        gtex_df_full = pd.concat([
-            gtex_df_filtered,
-            bulk_df[~bulk_df.index.isin(gtex_df_filtered.index)][['ss1', 'ss2']]
-                .assign(**{s + '_jxn_alignment_count': 0 for s in gtex_samples})
-        ])
         del bulk_df, bulk_df_sample
+
+        gtex_fits_full = pd.concat([
+            gtex_fits_filtered,
+            pd.DataFrame(
+                index=bulk_df_full.index[~bulk_df_full.index.isin(gtex_fits_filtered.index)].unique()
+            )
+        ])
+        gtex_fits_full = gtex_fits_full.reindex(bulk_df_full.index.unique())
 
         if haplotype_specific:
             hap1_df_full = pd.DataFrame()
             for sample in hap1_df['sample'].unique():
                 hap1_df_sample = hap1_df[hap1_df['sample'] == sample]
-                hap1_df_sample = pd.concat([
-                    hap1_df_sample,
-                    gtex_df_full[~gtex_df_full.index.isin(hap1_df_sample.index)][['ss1', 'ss2']]
-                        .assign(sample=sample, phasing='hap1', region=region, gene=gene,
-                                gene_alignment_count=hap1_alignment_count, jxn_alignment_count=0)
-                ])
+                missing = gtex_fits_full[~gtex_fits_full.index.isin(hap1_df_sample.index)]
+                padding = pd.DataFrame(index=missing.index)
+                parts = padding.index.str.split('_')
+                padding['ss1'] = parts.map(lambda p: p[0] + '_' + p[1])
+                padding['ss2'] = parts.map(lambda p: p[0] + '_' + p[2])
+                padding['sample'] = sample
+                padding['phasing'] = 'hap1'
+                padding['region'] = region
+                padding['gene'] = gene
+                padding['gene_alignment_count'] = hap1_alignment_count
+                padding['jxn_alignment_count'] = 0
+                hap1_df_sample = pd.concat([hap1_df_sample, padding])
                 hap1_df_full = pd.concat([hap1_df_full, hap1_df_sample])
 
             hap2_df_full = pd.DataFrame()
             for sample in hap2_df['sample'].unique():
                 hap2_df_sample = hap2_df[hap2_df['sample'] == sample]
-                hap2_df_sample = pd.concat([
-                    hap2_df_sample,
-                    gtex_df_full[~gtex_df_full.index.isin(hap2_df_sample.index)][['ss1', 'ss2']]
-                        .assign(sample=sample, phasing='hap2', region=region, gene=gene,
-                                gene_alignment_count=hap2_alignment_count, jxn_alignment_count=0)
-                ])
+                missing = gtex_fits_full[~gtex_fits_full.index.isin(hap2_df_sample.index)]
+                padding = pd.DataFrame(index=missing.index)
+                parts = padding.index.str.split('_')
+                padding['ss1'] = parts.map(lambda p: p[0] + '_' + p[1])
+                padding['ss2'] = parts.map(lambda p: p[0] + '_' + p[2])
+                padding['sample'] = sample
+                padding['phasing'] = 'hap2'
+                padding['region'] = region
+                padding['gene'] = gene
+                padding['gene_alignment_count'] = hap2_alignment_count
+                padding['jxn_alignment_count'] = 0
+                hap2_df_sample = pd.concat([hap2_df_sample, padding])
                 hap2_df_full = pd.concat([hap2_df_full, hap2_df_sample])
             del hap1_df, hap2_df, hap1_df_sample, hap2_df_sample
 
-        if bulk_df_full.index.symmetric_difference(gtex_df_full.index).any():
-            report_file.write(f"Error: unexpected mismatch between junctions in sample of interest and GTEx samples. Exiting...\n")
-            return
         report_file.write(f"There are {len(bulk_df_full)} total junctions to analyze.\n\n")
 
         ############################## STEP 3: CALCULATE COVERAGE ##############################
@@ -325,8 +326,6 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
         if haplotype_specific:
             calculate_coverage(hap1_df_full)
             calculate_coverage(hap2_df_full)
-        for sample in gtex_samples:
-            calculate_coverage(gtex_df_full, sample + '_')
 
         ############################## STEP 4: CALCULATE PSI VALUES ##############################
 
@@ -335,48 +334,30 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
         if haplotype_specific:
             calculate_PSI(hap1_df_full, PSI_rescale_factor)
             calculate_PSI(hap2_df_full, PSI_rescale_factor)
-        for sample in gtex_samples:
-            calculate_PSI(gtex_df_full, PSI_rescale_factor, sample + '_')
-            low_coverage_mask = pd.to_numeric(gtex_df_full[sample + '_jxn_coverage'], errors='coerce') < gtex_coverage_threshold
-            gtex_df_full.loc[low_coverage_mask, sample + '_rescaled_sample_PSI'] = np.nan
 
-        gtex_df_rescaled_PSI = gtex_df_full[[f'{s}_rescaled_sample_PSI' for s in gtex_samples]].copy()
-        del gtex_df_full
+        ############################## STEP 5: MERGE PRECOMPUTED BETA FITS ##############################
 
-        ############################## STEP 5: FIT BETA DISTRIBUTION ON GTEx DATA ##############################
-
-        report_file.write(f"Fitting beta distributions on PSI values from GTEx samples...\n")
-        gtex_df_rescaled_PSI[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI', 'p1_PSI', 'p99_PSI']] = \
-            gtex_df_rescaled_PSI.apply(
-                lambda row: pd.Series(fit_beta_dist(np.array(row), tol=PSI_rescale_factor, n_threshold=gtex_n_threshold)),
-                axis=1
-            )
+        report_file.write(f"Merging precomputed GTEx beta fits...\n")
+        fit_cols = ['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI',
+                    'p1_PSI', 'p99_PSI', 'in_gtex_matrix']
         final_df = bulk_df_full.merge(
-            gtex_df_rescaled_PSI[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI', 'p1_PSI', 'p99_PSI']],
-            left_index=True, right_index=True
+            gtex_fits_full[fit_cols], left_index=True, right_index=True, how='left'
         )
+        final_df['in_gtex_matrix'] = final_df['in_gtex_matrix'].fillna(False)
 
         ############################## STEP 6: RUN BETA-BINOMIAL TESTS ##############################
 
         if haplotype_specific:
-            # jxn_coverage should already be int (calculate_PSI converts it
-            # in place), but coerce defensively here too -- same as the
-            # jxn_num/cov_num coercion done a few lines below for the
-            # beta-binomial test itself. Without this, a jxn_coverage that's
-            # still string-typed for some reason hits pandas' numeric-Series
-            # * float path and raises deep inside numpy (a confusing
-            # "string multiply ufunc" TypeError with no obvious connection
-            # to this line, rather than a clear coercion failure).
             hap1_coverage = pd.to_numeric(hap1_df_full['jxn_coverage'], errors='coerce').reindex(final_df.index, fill_value=0)
             hap2_coverage = pd.to_numeric(hap2_df_full['jxn_coverage'], errors='coerce').reindex(final_df.index, fill_value=0)
             bulk_coverage_num = pd.to_numeric(final_df['jxn_coverage'], errors='coerce')
             coverage_mask = (hap1_coverage + hap2_coverage) > (phasing_threshold * bulk_coverage_num)
             hap1_df_filtered = hap1_df_full[coverage_mask.reindex(hap1_df_full.index, fill_value=False)].merge(
-                final_df[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI', 'p1_PSI', 'p99_PSI']],
-                left_index=True, right_index=True)
+                gtex_fits_full[fit_cols], left_index=True, right_index=True, how='left')
             hap2_df_filtered = hap2_df_full[coverage_mask.reindex(hap2_df_full.index, fill_value=False)].merge(
-                final_df[['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI', 'p1_PSI', 'p99_PSI']],
-                left_index=True, right_index=True)
+                gtex_fits_full[fit_cols], left_index=True, right_index=True, how='left')
+            hap1_df_filtered['in_gtex_matrix'] = hap1_df_filtered['in_gtex_matrix'].fillna(False)
+            hap2_df_filtered['in_gtex_matrix'] = hap2_df_filtered['in_gtex_matrix'].fillna(False)
             final_df = pd.concat([final_df, hap1_df_filtered, hap2_df_filtered])
             num_hap = len(final_df[final_df['phasing'].isin(['hap1', 'hap2'])])
             report_file.write(f"Running beta-binomial tests for {len(final_df)-num_hap} bulk "
@@ -384,15 +365,13 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
         else:
             report_file.write(f"Running beta-binomial tests for {len(final_df)} junctions.\n")
 
-        # Vectorised numeric coercion before row-wise apply
         jxn_num = pd.to_numeric(final_df['jxn_alignment_count'], errors='coerce')
         cov_num = pd.to_numeric(final_df['jxn_coverage'], errors='coerce')
         alpha_num = pd.to_numeric(final_df['alpha'], errors='coerce')
         beta_num = pd.to_numeric(final_df['beta'], errors='coerce')
-        final_df['p_value'] = [
-            beta_binomial_test(ceil(x), ceil(n), a, b)
-            for x, n, a, b in zip(jxn_num, cov_num, alpha_num, beta_num)
-        ]
+        final_df['p_value'] = beta_binomial_test_vectorized(
+            np.ceil(jxn_num), np.ceil(cov_num), alpha_num, beta_num
+        )
 
         psi_num = pd.to_numeric(final_df['rescaled_sample_PSI'], errors='coerce')
         p1_num  = pd.to_numeric(final_df['p1_PSI'], errors='coerce')
@@ -403,12 +382,6 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
         )
         delta_PSI = pd.Series(delta_num, index=final_df.index).astype(object)
         delta_PSI[np.isnan(psi_num) | np.isnan(p1_num) | np.isnan(p99_num)] = "n/a"
-        # Mirror identify_cohort_junction_outliers.py's sentinel priority: a
-        # low-n/error fit means this junction's GTEx reference distribution
-        # (and therefore its significance test) isn't trustworthy, even
-        # though p1/p99 alone might still have been computable from a small
-        # number of GTEx samples -- suppress delta the same way rather than
-        # reporting a number next to an untested p_value.
         delta_PSI[final_df['expected_PSI'] == 'low_n'] = 'low_n'
         delta_PSI[final_df['expected_PSI'] == 'error'] = 'error'
         final_df['delta_PSI'] = delta_PSI
@@ -429,10 +402,10 @@ def process_region(jxn_info_df_filtered, gtex_df_filtered, region, sample_covera
             (pd.to_numeric(final_df['jxn_coverage'], errors='coerce') < sample_coverage_threshold),
             final_df['flag'] + ';low_coverage', final_df['flag'])
         final_df['flag'] = np.where(
-            ~final_df.index.isin(gtex_df_filtered.index),
+            ~final_df['in_gtex_matrix'].astype(bool),
             final_df['flag'] + ';not_detected_in_gtex', final_df['flag'])
 
-        final_df['flag'] = final_df['flag'].str[1:]  # strip leading semicolon
+        final_df['flag'] = final_df['flag'].str[1:]
         final_df['flag'] = final_df['flag'].apply(lambda x: x if x else "no_flag")
 
         ############################## STEP 7: IDENTIFY ANNOTATED JUNCTIONS ##############################
@@ -464,7 +437,7 @@ def main():
     """Main script."""
 
     print(f"\n\n\n******************************************************************************************")
-    print(f"Detecting splice junction outliers...")
+    print(f"Testing splice junction usage against precomputed GTEx beta fits...")
     print(f"******************************************************************************************\n")
 
     args = parse_args()
@@ -472,8 +445,11 @@ def main():
     if not os.path.exists(args.jxn_info_file):
         print(f"\nERROR: {args.jxn_info_file} not found.")
         return
-    if not os.path.exists(args.gtexfile):
-        print(f"\nERROR: {args.gtexfile} not found.")
+    if not os.path.exists(args.gtex_beta_fits):
+        print(f"\nERROR: {args.gtex_beta_fits} not found.")
+        return
+    if not os.path.exists(args.novel_beta_fits):
+        print(f"\nERROR: {args.novel_beta_fits} not found.")
         return
 
     outdir = os.path.dirname(args.outfile)
@@ -486,8 +462,18 @@ def main():
                                       'gene_alignment_count': int, 'junction': str,
                                       'jxn_alignment_count': int})
 
-    print(f"\nReading GTEx file {args.gtexfile}...")
-    gtex_df = pd.read_csv(args.gtexfile, sep='\t', index_col=0)
+    print(f"\nReading precomputed GTEx beta fits {args.gtex_beta_fits}...")
+    gtex_fits = pd.read_csv(args.gtex_beta_fits, sep='\t', comment='#', index_col=0)
+
+    print(f"Reading precomputed novel-junction beta fits {args.novel_beta_fits}...")
+    novel_fits = pd.read_csv(args.novel_beta_fits, sep='\t', index_col=0)
+
+    all_fits = pd.concat([gtex_fits, novel_fits])
+    all_fits['in_gtex_matrix'] = all_fits['in_gtex_matrix'].astype(bool)
+    # A junction should never appear in both tables (fit_novel_junction_beta_distributions.py
+    # only fits junctions absent from the GTEx table), but guard defensively rather than
+    # silently double-counting if it ever does.
+    all_fits = all_fits[~all_fits.index.duplicated(keep='first')]
 
     if args.annotation_file:
         if not os.path.exists(args.annotation_file):
@@ -502,49 +488,28 @@ def main():
     regions = jxn_info_df['region'].unique()
     print(f"\nBegin processing {len(regions)} regions using {args.threads} threads. This may take a while...")
 
-    # GTEx junction IDs are formatted "chr:start-end:strand" (e.g. "chr1:11212-12009:+"),
-    # unlike every other junction ID in this pipeline (get_splice_junction_counts_by_region.py,
-    # make_junction_count_matrix.py, merge_and_filter_junction_results.py), which all use
-    # "chr_start_end". Strand is ignored -- start is always < end regardless of strand.
-    # Parsed ONCE here (not per-region -- gtex_df.index itself never changes across regions,
-    # only the boolean mask selecting which rows belong to a given region does), since this
-    # can be a large index (especially for tissues like brain) and previously got re-split/
-    # re-parsed from scratch inside the per-region loop below -- O(n_regions) redundant work
-    # over the *entire* GTEx reference, dominating runtime on panels with many genes.
-    idx_chrom_coord = gtex_df.index.str.split(':')
-    gtex_chrom = idx_chrom_coord.map(lambda p: p[0])
-    idx_coords = idx_chrom_coord.map(lambda p: p[1]).str.split('-')
-    gtex_start = idx_coords.map(lambda p: int(p[0]))
-    gtex_end = idx_coords.map(lambda p: int(p[1]))
+    idx_chrom_coord = all_fits.index.str.split('_')
+    fits_chrom = idx_chrom_coord.map(lambda p: p[0])
+    fits_start = idx_chrom_coord.map(lambda p: int(p[1]))
+    fits_end = idx_chrom_coord.map(lambda p: int(p[2]))
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.threads) as executor:
         futures = []
         for region in regions:
             jxn_info_df_filtered = jxn_info_df[jxn_info_df['region'] == region].copy()
-            jxn_info_df_filtered.set_index('junction', inplace=True)
 
-            # Pre-parse region components for the GTEx filter — avoids per-row lambda parsing
             reg_chrom, reg_coords = region.split(':')
             reg_start, reg_end = map(int, reg_coords.split('-'))
-            gtex_mask = (
-                (gtex_chrom == reg_chrom) &
-                (gtex_start >= reg_start) &
-                (gtex_end <= reg_end)
+            fits_mask = (
+                (fits_chrom == reg_chrom) &
+                (fits_start >= reg_start) &
+                (fits_end <= reg_end)
             )
-            gtex_df_filtered = gtex_df[gtex_mask].copy()
-            # Normalize to "chr_start_end" so downstream index comparisons against sample
-            # junctions (_add_ss, .isin() in process_region) match correctly instead of
-            # silently never matching two different string formats for the same junction.
-            gtex_df_filtered.index = (
-                gtex_chrom[gtex_mask].astype(str) + '_' +
-                gtex_start[gtex_mask].astype(str) + '_' +
-                gtex_end[gtex_mask].astype(str)
-            )
+            gtex_fits_filtered = all_fits[fits_mask].copy()
 
             futures.append(executor.submit(
-                process_region, jxn_info_df_filtered, gtex_df_filtered, region,
-                args.sample_coverage_threshold, args.gtex_coverage_threshold,
-                args.PSI_rescale_factor, args.gtex_n_threshold, args.phasing_threshold,
+                process_region, jxn_info_df_filtered, gtex_fits_filtered, region,
+                args.sample_coverage_threshold, args.PSI_rescale_factor, args.phasing_threshold,
                 annotated_junctions, report_outdir))
 
     results = []

@@ -102,7 +102,7 @@ rule _1B_longcallr:
         work_dir  = "{outdir}/variant_calling/longcallR/work",
     threads: lambda wc: _rule_threads(wc, "longcallr")
     resources:
-        mem_mb  = lambda wc, threads, attempt: max(4096, attempt * threads * _bam_size_gb(wc) * 2 * 1024),
+        mem_mb  = lambda wc, threads, attempt: max(4096, int(attempt * threads * _bam_size_gb(wc) * 2.5 * 1024)),
         runtime = config["time"],
     log:
         "{outdir}/../logs/{sample}_longcallR.log"

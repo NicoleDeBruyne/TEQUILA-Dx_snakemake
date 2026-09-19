@@ -55,9 +55,15 @@ def parse_args():
              "(bed_id, sample_type) group. If omitted/missing, relative_gene_expression/n_cohort "
              "are filled with '.' (merge_hits.build_hit_table's existing fallback convention for "
              "optional inputs).")
+    parser.add_argument("--gene-expression-matrix-motr", required=False, default=None,
+        help="Group-level targeted-panel MOTR matrix (rule _9M's <outprefix>_matrix_motr.tsv, "
+             "from quantify_gene_by_assignment.py's compute_size_factors() -- DESeq2-style "
+             "median-of-ratios normalization restricted to BED-panel genes). Same shape as "
+             "--gene-expression-matrix. If omitted/missing, relative_gene_expression_motr/"
+             "cohort_relative_gene_expression_motr are filled with '.'.")
     parser.add_argument("--gene-expression-zscores", required=False, default=None,
         help="Group-level low-expression outlier z-score matrix (rule _9M's "
-             "<outprefix>_outlier_zscores.tsv, from quantify_gene_by_assignment.py -- see "
+             "<outprefix>_zscores_cptm.tsv, from quantify_gene_by_assignment.py -- see "
              "scripts/expression_outliers.py's module docstring for the algorithm). Same shape "
              "as --gene-expression-matrix. If omitted/missing, gene_expression_zscore/"
              "gene_expression_outlier are filled with '.'. Annotation only -- does NOT currently "
@@ -211,6 +217,14 @@ def main():
     # gene expression data" fallback (same pattern as omim_df/
     # cohort_junction_tsv being optional above).
 
+    gene_expression_motr_df = None
+    if args.gene_expression_matrix_motr and os.path.isfile(args.gene_expression_matrix_motr):
+        # Same shape/loader as the CPTM matrix -- load_gene_expression_df()
+        # just reads a genes x samples TSV, agnostic to which normalization
+        # produced it.
+        gene_expression_motr_df = merge_hits.load_gene_expression_df(args.gene_expression_matrix_motr)
+    # else: same fallback convention as gene_expression_df above.
+
     gene_expression_zscore_df = None
     if args.gene_expression_zscores and os.path.isfile(args.gene_expression_zscores):
         gene_expression_zscore_df = merge_hits.load_gene_expression_zscore_df(args.gene_expression_zscores)
@@ -240,6 +254,7 @@ def main():
         hit_df = merge_hits.build_hit_table(
             sample_variant_df, sample_ase_df, sample_junction_df, sample_cohort_junction_df,
             sample, omim_df, gene_expression_df,
+            gene_expression_motr_df=gene_expression_motr_df,
             gene_expression_zscore_df=gene_expression_zscore_df,
             gene_expression_outlier_threshold=args.gene_expression_outlier_threshold,
         )

@@ -130,6 +130,14 @@ ase_phasing_threshold:  0.5   # min fraction of max coverage phased to haplotype
 gtex_data_dir: "resources/gtex_data"
 gtex_coverage_threshold:   20
 gtex_n_threshold:          100
+# Rescale factor (tol) applied to GTEx PSI values before beta-fitting, and used
+# as the fit's variance-tolerance cutoff -- previously hardcoded to the script's
+# argparse default (1e-3) and never actually wired through config; now a real
+# knob because it's also part of the beta-fit cache key (see
+# rules/5_junction_analysis.smk's _GTEX_BETA_FITS_TEMPLATE) -- changing this
+# value changes the fit results, so it must be part of that filename, same as
+# gtex_coverage_threshold/gtex_n_threshold above.
+PSI_rescale_factor:      0.001
 delta_psi_threshold:    0.1
 jxn_phasing_threshold:  0.8   # min fraction of bulk coverage a junction's hap1+hap2 must reach to be trusted (combined coverage in hap1 and hap2 must be 80% the bulk coverage)
 

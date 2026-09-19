@@ -25,6 +25,18 @@ splice-site-assignment method was chosen for that annotation since,
 unlike --metric count/coverage, it isn't restricted to simple BED-region
 overlap/pileup and so isn't as easily confounded by a neighboring gene's
 reads spilling into a tightly-packed panel region).
+
+Also computes a second normalization of the same targeted-panel raw
+counts: MOTR ("median of target ratios") -- DESeq2's "poscounts"
+median-of-ratios size-factor normalization (their own fix for the classic
+method's all-or-nothing zero-count handling), restricted to genes on this
+run's BED panel rather than the whole transcriptome, since that's the
+only gene set this pipeline ever reports on. See
+compute_size_factors()'s docstring for the algorithm and its per-sample
+fallback. Written to a separate <outprefix>_matrix_motr.tsv (+ _alias
+copy) -- the existing CPTM matrix is renamed to <outprefix>_matrix_cptm.tsv
+(from plain _matrix.tsv) so the two normalizations are unambiguous side
+by side.
 """
 
 import argparse
@@ -38,7 +50,9 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
-from expression_outliers import compute_outlier_scores, outliers_long_format
+from expression_outliers import compute_outlier_scores
+from motr import add_motr_args, compute_size_factors
+from gene_boxplots import make_gene_boxplots
 rcParams['pdf.fonttype'] = 42
 
 
@@ -73,12 +87,17 @@ def parse_args():
     parser.add_argument(
         "--outprefix",
         required=True,
-        help="Prefix for output files: <outprefix>_matrix.tsv (targeted-panel CPTM), "
+        help="Prefix for output files: <outprefix>_matrix_cptm.tsv (targeted-panel CPTM), "
+             "<outprefix>_matrix_motr.tsv (targeted-panel MOTR -- median-of-target-ratios, "
+             "DESeq2-style size-factor normalization), "
              "<outprefix>_matrix_raw.tsv (targeted-panel raw counts), "
              "<outprefix>_matrix_raw_all_genes.tsv (every gene with >=1 assigned read cohort-wide), "
-             "and <outdir>/<gene>.pdf per targeted-panel gene "
+             "<outprefix>_zscores_cptm.tsv + <outprefix>_zscores_motr.tsv (low-expression outlier "
+             "z-scores, one per normalization), and "
+             "<outdir>/<gene>_cptm.pdf + <outdir>/<gene>_motr.pdf per targeted-panel gene "
              "(gene PDFs are written next to the matrix, not under the prefix's basename)")
     parser.add_argument('--title')
+    add_motr_args(parser)
     add_alias_map_arg(parser)
     add_outlier_args(parser)
     return parser.parse_args()
@@ -128,49 +147,6 @@ def make_assignment_summary_plot(stats_df, out_pdf, title):
 
 
 # ---------------------------------------------------------------------------
-# Plotting (same convention as quantify_gene_expression.py's per-gene boxplots)
-# ---------------------------------------------------------------------------
-
-def make_gene_boxplots(cptm_df, outdir, metric_label):
-    """One page per gene: a boxplot of every sample's CPTM value for that
-    gene, with individual sample points overlaid and the highest- and
-    lowest-CPTM sample labeled by name."""
-    os.makedirs(outdir, exist_ok=True)
-    for gene in cptm_df.index:
-        vals = cptm_df.loc[gene].dropna()
-        out_pdf = os.path.join(outdir, gene + ".pdf")
-        if vals.empty:
-            continue
-
-        fig, ax = plt.subplots(figsize=(3.6, 4.2))
-        _black = dict(color="black")
-        ax.boxplot([vals.to_numpy()], showfliers=False, widths=0.5,
-                   boxprops=_black, whiskerprops=_black, capprops=_black, medianprops=_black)
-
-        jitter = (np.random.RandomState(0).rand(len(vals)) - 0.5) * 0.15
-        ax.scatter(1 + jitter, vals.to_numpy(), color="#2c7fb8", zorder=3, s=18)
-
-        max_sample = vals.idxmax()
-        min_sample = vals.idxmin()
-        ax.scatter([1 + jitter[list(vals.index).index(max_sample)]], [vals[max_sample]],
-                   color="#c0392b", zorder=4, s=30)
-        ax.annotate(max_sample, (1 + jitter[list(vals.index).index(max_sample)], vals[max_sample]),
-                    textcoords="offset points", xytext=(6, 0), fontsize=7, color="#c0392b", va="center")
-        if min_sample != max_sample:
-            ax.scatter([1 + jitter[list(vals.index).index(min_sample)]], [vals[min_sample]],
-                       color="#c0392b", zorder=4, s=30)
-            ax.annotate(min_sample, (1 + jitter[list(vals.index).index(min_sample)], vals[min_sample]),
-                        textcoords="offset points", xytext=(6, 0), fontsize=7, color="#c0392b", va="center")
-
-        ax.set_xticks([])
-        ax.set_ylabel("CPTM (" + metric_label + ")")
-        ax.set_title(gene, fontsize=10)
-        fig.tight_layout()
-        fig.savefig(out_pdf)
-        plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -213,7 +189,7 @@ def main():
     )
     cptm_df.index.name = "gene"
 
-    out_matrix = args.outprefix + "_matrix.tsv"
+    out_matrix = args.outprefix + "_matrix_cptm.tsv"
     cptm_df.to_csv(out_matrix, sep="\t")
     print("Saved targeted-panel CPTM matrix: " + out_matrix)
 
@@ -223,33 +199,60 @@ def main():
     alias_map = parse_alias_map(args.alias_map)
     alias_cptm_df = cptm_df.copy()
     alias_cptm_df.columns = resolve_all(alias_cptm_df.columns, alias_map)
-    out_matrix_alias = args.outprefix + "_matrix_alias.tsv"
+    out_matrix_alias = args.outprefix + "_matrix_cptm_alias.tsv"
     alias_cptm_df.to_csv(out_matrix_alias, sep="\t")
     print("Saved alias-labeled targeted-panel CPTM matrix: " + out_matrix_alias)
 
+    # MOTR ("median of target ratios"): DESeq2-style median-of-ratios
+    # normalization, restricted to targeted-panel genes only (raw_df, not
+    # raw_all_df) -- see compute_size_factors()'s docstring.
+    size_factors = compute_size_factors(raw_df, max_zero_fraction=args.motr_max_zero_fraction)
+    motr_df = raw_df.div(size_factors, axis=1)
+    motr_df.index.name = "gene"
+
+    out_matrix_motr = args.outprefix + "_matrix_motr.tsv"
+    motr_df.to_csv(out_matrix_motr, sep="\t")
+    print("Saved targeted-panel MOTR matrix: " + out_matrix_motr)
+
+    alias_motr_df = motr_df.copy()
+    alias_motr_df.columns = resolve_all(alias_motr_df.columns, alias_map)
+    out_matrix_motr_alias = args.outprefix + "_matrix_motr_alias.tsv"
+    alias_motr_df.to_csv(out_matrix_motr_alias, sep="\t")
+    print("Saved alias-labeled targeted-panel MOTR matrix: " + out_matrix_motr_alias)
+
     metric_label = "assigned reads"
     plot_outdir = os.path.dirname(args.outprefix)
-    make_gene_boxplots(cptm_df, plot_outdir, metric_label)
-    print("Saved per-gene boxplots to: " + plot_outdir)
+    make_gene_boxplots(cptm_df, plot_outdir, "CPTM (" + metric_label + ")", "_cptm")
+    make_gene_boxplots(motr_df, plot_outdir, "MOTR (" + metric_label + ")", "_motr")
+    print("Saved per-gene CPTM/MOTR boxplots to: " + plot_outdir)
 
     # Low-expression outlier score (see expression_outliers.py's module
-    # docstring for the algorithm) -- this is the file
-    # rules/9_merge_results.smk's _9D2 passes to merge_hits.py to annotate
-    # merged_all_hits.tsv.
-    z_df, is_outlier_df = compute_outlier_scores(
+    # docstring for the algorithm), computed once per normalization -- the
+    # CPTM version is the file rules/9_merge_results.smk's _9D2 passes to
+    # merge_hits.py to annotate merged_all_hits.tsv (unchanged from
+    # before); the MOTR version is new, for anyone comparing the two
+    # normalizations' outlier calls directly.
+    z_cptm_df, _ = compute_outlier_scores(
         cptm_df,
         pseudocount=args.outlier_pseudocount,
         shrinkage_k=args.outlier_shrinkage_k,
         min_mad=args.outlier_min_mad,
         z_threshold=args.outlier_zscore_threshold,
     )
-    out_zscores = args.outprefix + "_outlier_zscores.tsv"
-    z_df.to_csv(out_zscores, sep="\t")
-    print("Saved outlier z-score matrix: " + out_zscores)
+    out_zscores_cptm = args.outprefix + "_zscores_cptm.tsv"
+    z_cptm_df.to_csv(out_zscores_cptm, sep="\t")
+    print("Saved CPTM z-score matrix: " + out_zscores_cptm)
 
-    out_outliers = args.outprefix + "_outliers.tsv"
-    outliers_long_format(z_df, is_outlier_df).to_csv(out_outliers, sep="\t", index=False)
-    print("Saved low-expression outliers: " + out_outliers)
+    z_motr_df, _ = compute_outlier_scores(
+        motr_df,
+        pseudocount=args.outlier_pseudocount,
+        shrinkage_k=args.outlier_shrinkage_k,
+        min_mad=args.outlier_min_mad,
+        z_threshold=args.outlier_zscore_threshold,
+    )
+    out_zscores_motr = args.outprefix + "_zscores_motr.tsv"
+    z_motr_df.to_csv(out_zscores_motr, sep="\t")
+    print("Saved MOTR z-score matrix: " + out_zscores_motr)
 
     # Per-sample breakdown of assigned vs. unassigned-and-why (see
     # _STATS_CATEGORIES), one row per sample, columns in the same order the

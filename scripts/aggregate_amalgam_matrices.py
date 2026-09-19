@@ -6,52 +6,29 @@ Combines every sample's AMALGAM Quantify_Transcripts.py output
 (<sample>_transcript_quantification.tsv, columns: transcript_id, gene_id,
 count, ...) in a (bed_id, sample_type) group into two cohort-wide
 matrices: one per-transcript, one per-gene (gene-level = sum of that
-gene's transcripts' counts). Extracted from the aggregation step of the
+gene's transcripts' counts), both genome-wide and gene_id-keyed (AMALGAM's
+own namespace -- Ensembl gene_id for reference-matched genes, GffCompare's
+XLOC_... for novel loci). Extracted from the aggregation step of the
 group's original manual sbatch pipeline into its own script, matching
 this repo's convention of a dedicated scripts/*.py file per pipeline
-step rather than inline Python in a rules/*.smk shell block.
+step rather than inline Python in a rules/*.smk shell block. Written to
+by_amalgam/quantification/ (this method's per-sample working directory) --
+kept genome-wide and gene_id-keyed here rather than restricted/translated,
+since that's the one point this script has every sample's raw AMALGAM
+output in hand and there's no reason to lose the untranslated data.
 
-The gene matrix's raw counts are also normalized into a CPTM ("counts per
-target million") value here -- unlike --metric count/coverage/assignment
-(scripts/quantify_gene_expression_sample.py,
-scripts/quantify_gene_by_assignment_sample.py), which each compute their
-own CPTM per-sample before this cohort-level merge even happens, AMALGAM's
-per-sample output is raw transcript counts with no per-sample normalization
-step of its own -- so it has to happen here, on the assembled cohort
-matrix, the one time this script has every sample's raw values in hand at
-once. Same normalization convention as the other three methods: raw_value /
-(sum of every gene's raw value for that sample) * 1e6, so all four methods'
-CPTM values are on a comparable scale.
-
-Also writes a low-expression outlier score for every (gene, sample), on
-this CPTM-normalized gene matrix -- see scripts/expression_outliers.py's
-module docstring for the algorithm.
+Targeted-panel restriction (translating gene_id -> gene symbol via the
+reference GTF and intersecting with the run's BED panel), CPTM/MOTR
+normalization, z-scores, and per-gene boxplots are a separate step --
+see scripts/normalize_amalgam_matrix.py, which reads this script's
+gene_matrix.tsv and writes its outputs to the base by_amalgam/ directory.
 """
 
 import argparse
 
 import pandas as pd
-import numpy as np
 
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
-from expression_outliers import compute_outlier_scores, outliers_long_format
-
-
-def add_outlier_args(parser):
-    """Shared CLI options for the low-expression outlier score -- same
-    defaults/semantics across all four quantification methods. See
-    expression_outliers.py's module docstring for the algorithm."""
-    parser.add_argument("--outlier-pseudocount", type=float, default=1.0,
-        help="Added to CPTM before log2-transforming. Default: 1.0")
-    parser.add_argument("--outlier-shrinkage-k", type=float, default=10.0,
-        help="Shrinkage constant: weight on a gene's own leave-one-out MAD is "
-             "n/(n+k) vs. the cohort-wide trend. Default: 10.0")
-    parser.add_argument("--outlier-min-mad", type=float, default=0.1,
-        help="Floor on the shrunk MAD (log2 units), guarding against a near-zero-MAD "
-             "gene producing an absurd z-score. Default: 0.1")
-    parser.add_argument("--outlier-zscore-threshold", type=float, default=3.0,
-        help="A sample is flagged as a low-expression outlier for a gene when "
-             "z <= -this value. Default: 3.0")
 
 
 def parse_args():
@@ -63,10 +40,9 @@ def parse_args():
     parser.add_argument('--samples', required=True, nargs='+',
         help="Sample name for each --infiles entry, same order/length.")
     parser.add_argument('--outprefix', required=True,
-        help="Writes <outprefix>_transcript_matrix.tsv, <outprefix>_gene_matrix.tsv (raw), "
-             "<outprefix>_gene_matrix_cptm.tsv (normalized), and outlier score files -- see module docstring.")
+        help="Writes <outprefix>_transcript_matrix.tsv and <outprefix>_gene_matrix.tsv "
+             "(raw, genome-wide, gene_id-keyed) -- see module docstring.")
     add_alias_map_arg(parser)
-    add_outlier_args(parser)
     args = parser.parse_args()
     if len(args.infiles) != len(args.samples):
         parser.error("--infiles and --samples must have the same number of entries")
@@ -138,38 +114,6 @@ def main():
     out_gene_alias = args.outprefix + '_gene_matrix_alias.tsv'
     alias_gene_matrix.to_csv(out_gene_alias, sep='\t')
     print(f"Done: {out_gene_alias} written.", flush=True)
-
-    # CPTM normalization (raw_value / that sample's own gene-sum * 1e6) --
-    # see this module's docstring for why it happens here rather than
-    # per-sample, unlike --metric count/coverage/assignment.
-    col_sums = gene_matrix.sum(axis=0)
-    cptm_df = gene_matrix.div(col_sums.replace(0, np.nan), axis=1).fillna(0) * 1e6
-    out_cptm = args.outprefix + '_gene_matrix_cptm.tsv'
-    cptm_df.to_csv(out_cptm, sep='\t')
-    print(f"Done: {out_cptm} written.", flush=True)
-
-    alias_cptm_df = cptm_df.copy()
-    alias_cptm_df.columns = resolve_all(alias_cptm_df.columns, alias_map)
-    out_cptm_alias = args.outprefix + '_gene_matrix_cptm_alias.tsv'
-    alias_cptm_df.to_csv(out_cptm_alias, sep='\t')
-    print(f"Done: {out_cptm_alias} written.", flush=True)
-
-    # Low-expression outlier score (see expression_outliers.py's module
-    # docstring for the algorithm), on the CPTM-normalized gene matrix.
-    z_df, is_outlier_df = compute_outlier_scores(
-        cptm_df,
-        pseudocount=args.outlier_pseudocount,
-        shrinkage_k=args.outlier_shrinkage_k,
-        min_mad=args.outlier_min_mad,
-        z_threshold=args.outlier_zscore_threshold,
-    )
-    out_zscores = args.outprefix + '_outlier_zscores.tsv'
-    z_df.to_csv(out_zscores, sep='\t')
-    print(f"Done: {out_zscores} written.", flush=True)
-
-    out_outliers = args.outprefix + '_outliers.tsv'
-    outliers_long_format(z_df, is_outlier_df).to_csv(out_outliers, sep='\t', index=False)
-    print(f"Done: {out_outliers} written.", flush=True)
 
 
 if __name__ == '__main__':
