@@ -10,6 +10,7 @@ import shlex
 shell.prefix("set -euo pipefail;")
 
 
+# Load the run config
 with open(config["run"]) as fh:
     run_cfg = yaml.safe_load(fh)
 
@@ -30,10 +31,12 @@ if not config.get("output_dir"):
         "for the pipeline to know where to write its output layout."
     )
 
+# Default each sample's own output directory if it wasn't set explicitly.
 for _sample, _entry in SAMPLES.items():
     if not _entry.get("outdir"):
         _entry["outdir"] = config["output_dir"] + "/samples/" + _sample + "/output"
 
+# Config keys that point at reference/resource files bundled with the pipeline
 _BUNDLED_PATH_KEYS = [
     "genome", "annotation",
     "conda_env", "conda_env_compile_variants", "gnomad_base", "clinvar_vcf", "annovar_dir",
@@ -53,6 +56,7 @@ for _key in _BUNDLED_PATH_KEYS:
     if _val and not os.path.isabs(_val) and not _URL_RE.match(_val) and not _is_remote_sentinel(_val):
         config[_key] = os.path.join(workflow.basedir, _val)
 
+# If a resource's config value is "remote", download it from these public URLs instead of using a local/bundled path
 _REMOTE_GNOMAD_BASE = "https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/genomes"
 _REMOTE_GNOMAD_MITO_VCF = ("https://storage.googleapis.com/gcp-public-data--gnomad/release/3.1/"
                            "vcf/genomes/gnomad.genomes.v3.1.sites.chrM.vcf.bgz")
@@ -70,6 +74,10 @@ def _resolved_clinvar_vcf():
 
 def _cadd_use_local():
     return not _is_remote_sentinel(config["cadd_script"])
+
+# --- Sample/tissue/cohort/group bookkeeping ---------------------------------
+# Samples are organized into cohorts (config-defined, plus an implicit "cohort_all"),
+# and within a cohort into "groups" keyed by (cohort, bed file, sample_type) for group-level merge/analysis rules.
 
 def _parse_tissues(raw):
     if isinstance(raw, list):
@@ -142,6 +150,10 @@ def group_tissues(group_id):
 def group_outdir(group_id):
     return (str(config['output_dir']) + '/' + str(GROUP_COHORT_ID[group_id]) + '/' + str(GROUP_BED_ID[group_id]) + '/output/sample_types/' + str(GROUP_SAMPLE_TYPE[group_id]) + '/output')
 
+# --- Cohort junction analysis settings ---------------
+# Small groups use a modified-z-score outlier test; larger groups use a
+# beta-binomial test (auto-selected by sample count unless overridden).
+
 def _cja_method_for_group(group_id):
     method = config.get("cohort_jxn_method", "auto")
     if method in ("beta_binomial", "modified_zscore"):
@@ -157,7 +169,7 @@ def _cja_method_for_group(group_id):
 
 def _cja_thr_label(group_id):
     if _cja_method_for_group(group_id) == "beta_binomial":
-        return "padj" + str(config["cohort_jxn_beta_padj_threshold"]) + "_delta" + str(config["delta_psi_threshold"])
+        return "padj" + str(config["cohort_jxn_beta_padj_threshold"]) + "_delta" + str(config["cohort_jxn_beta_delta_threshold"])
     z = config.get("cohort_jxn_z_threshold", 3.5)
     d = config.get("cohort_jxn_z_delta_threshold", 0.1)
     return "z" + str(z) + "_delta" + str(d)
@@ -169,7 +181,7 @@ def _cja_outliers_filtered_path(group_id):
 
 def _cja_thr_flag(group_id):
     if _cja_method_for_group(group_id) == "beta_binomial":
-        return "--bb-thresholds " + str(config["cohort_jxn_beta_padj_threshold"]) + ":" + str(config["delta_psi_threshold"])
+        return "--bb-thresholds " + str(config["cohort_jxn_beta_padj_threshold"]) + ":" + str(config["cohort_jxn_beta_delta_threshold"])
     z = config.get("cohort_jxn_z_threshold", 3.5)
     d = config.get("cohort_jxn_z_delta_threshold", 0.1)
     return "--z-thresholds " + str(z) + ":" + str(d)
@@ -229,6 +241,7 @@ def alias_map_args(samples):
 def sample_fraction_threshold(group_id, fraction):
     return ceil(len(GROUPS[group_id]) * fraction)
 
+# Pipeline stages are on by default; set config[<key>] = False to skip one.
 def flag(key):
     return config.get(key, True)
 
@@ -238,6 +251,8 @@ def _rule_threads(wc, rule_key):
 def _group_threads(group_id, rule_key, default):
     return int(config.get("groups", {}).get(group_id, {}).get((str(rule_key) + '_threads'), default))
 
+# Builds the full list of target files for `rule all`,
+# i.e. every output the pipeline should produce given the enabled stages
 def all_outputs():
     outs = []
     for s in SAMPLES:
@@ -350,6 +365,7 @@ rule all:
         all_outputs()
 
 
+# Rule definitions, split by pipeline stage and applied in roughly this order
 include: "rules/1_call_variants.smk"
 include: "rules/2_compile_variants.smk"
 include: "rules/3_phase_reads.smk"

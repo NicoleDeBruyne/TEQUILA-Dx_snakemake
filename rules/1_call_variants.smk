@@ -1,10 +1,12 @@
 
+# Call variants on each sample's BAM with four independent callers, run in parallel
 def _bam(wc):
     return SAMPLES[wc.sample]["bam"]
 
 def _outdir(wc):
     return SAMPLES[wc.sample]["outdir"]
 
+# Used to scale each caller's memory request to the size of the input BAM
 def _bam_size_gb(wc):
     import os
     bam = SAMPLES[wc.sample]["bam"]
@@ -13,6 +15,7 @@ def _bam_size_gb(wc):
     except FileNotFoundError:
         return 10
 
+# Directories to mount into a caller's container (its own input/output/resource paths)
 def _bind_dirs(*paths):
     import os
     dirs = []
@@ -23,6 +26,7 @@ def _bind_dirs(*paths):
     return ",".join(dirs)
 
 
+# nanoTS: nanopore-tuned variant caller (Singularity container)
 rule _1A_nanots:
     input:
         bam = _bam,
@@ -42,9 +46,31 @@ rule _1A_nanots:
         mem_mb  = lambda wc, threads, attempt: max(4096, attempt * threads * _bam_size_gb(wc) * 1 * 1024),
         runtime = config["time"],
     log:
+        "{outdir}/../logs/{sample}_nanoTS.log"
     shell:
+        """
+        mkdir -p {params.work_dir}
+        singularity exec -B {params.binds} \\
+            {params.image} nanoTS full_pipeline \\
+            --bam {input.bam} \\
+            --ref {params.genome} \\
+            --threads {threads} \\
+            --model_unphased {params.model_unphased} \\
+            --model_phased {params.model_phased} \\
+            --outdir {params.work_dir} \\
+        2>&1 | tee {log}
+        bcftools sort {params.work_dir}/phased_predict.pass.vcf \
+            | bcftools norm -f {params.genome} -m -both -O z -o {output.vcf_gz} \
+        2>&1 | tee -a {log}
+        tabix -f -p vcf {output.vcf_gz}
+        rm -f {params.work_dir}/suffix_qname.pgbam
+        rm -f {params.work_dir}/suffix_qname.pgbai
+        rm -f {params.work_dir}/suffix_qname.bam
+        rm -f {params.work_dir}/suffix_qname.bam.bai
+        """
 
 
+# longcallR: general-purpose long-read variant caller, run natively (no container)
 rule _1B_longcallr:
     input:
         bam = _bam,
@@ -60,9 +86,26 @@ rule _1B_longcallr:
         mem_mb  = lambda wc, threads, attempt: max(4096, int(attempt * threads * _bam_size_gb(wc) * 2.5 * 1024)),
         runtime = config["time"],
     log:
+        "{outdir}/../logs/{sample}_longcallR.log"
     shell:
+        """
+        mkdir -p {params.work_dir}
+        {params.longcallr} \\
+            --bam-path {input.bam} \\
+            --ref-path {params.genome} \\
+            --threads {threads} \\
+            --preset ont-cdna \\
+            --no-bam-output \\
+            --output {params.work_dir}/{wildcards.sample}_longcallR \\
+        2>&1 | tee {log}
+        bcftools sort {params.work_dir}/{wildcards.sample}_longcallR.vcf \
+            | bcftools norm -f {params.genome} -m -both -O z -o {output.vcf_gz} \
+        2>&1 | tee -a {log}
+        tabix -f -p vcf {output.vcf_gz}
+        """
 
 
+# Clair3-RNA: variant caller, phases reads with whatshap first (Docker container)
 rule _1C_clair3_rna:
     input:
         bam = _bam,
@@ -80,9 +123,32 @@ rule _1C_clair3_rna:
         mem_mb  = lambda wc, threads, attempt: max(4096, attempt * threads * _bam_size_gb(wc) * 1 * 1024),
         runtime = config["time"],
     log:
+        "{outdir}/../logs/{sample}_clair3_rna.log"
     shell:
+        """
+        mkdir -p {params.work_dir}
+        singularity exec -B {params.binds} \\
+            {params.image} /opt/bin/run_clair3_rna \\
+            --bam_fn {input.bam} \\
+            --ref_fn {params.genome} \\
+            --threads {threads} \\
+            --platform ont_r10_dorado_cdna \\
+            --output_dir {params.work_dir} \\
+            --enable_phasing_model \\
+            --whatshap {params.whatshap} \\
+            --conda_prefix /opt/conda/envs/clair3_rna \\
+            --sample_name {wildcards.sample}_clair3_rna \\
+            --output_prefix {wildcards.sample}_clair3_rna \\
+        2>&1 | tee {log}
+        bcftools sort {params.work_dir}/{wildcards.sample}_clair3_rna_enable_phasing.vcf.gz \
+            | bcftools norm -f {params.genome} -m -both -O z -o {output.vcf_gz} \
+        2>&1 | tee -a {log}
+        tabix -f -p vcf {output.vcf_gz}
+        rm -rf {params.work_dir}/tmp
+        """
 
 
+# DeepVariant: Google's variant caller (Docker container)
 rule _1D_deepvariant:
     input:
         bam = _bam,
@@ -99,4 +165,25 @@ rule _1D_deepvariant:
         mem_mb  = lambda wc, threads, attempt: max(8192, attempt * threads * _bam_size_gb(wc) * 1 * 1024),
         runtime = config["time"],
     log:
+        "{outdir}/../logs/{sample}_deepvariant.log"
     shell:
+        """
+        mkdir -p {params.work_dir}
+        singularity exec -B {params.binds} \\
+            {params.image} /opt/deepvariant/bin/run_deepvariant \\
+            --reads {input.bam} \\
+            --ref {params.genome} \\
+            --num_shards {threads} \\
+            --model_type ONT_R104 \\
+            --intermediate_results_dir {params.work_dir} \\
+            --output_vcf {params.work_dir}/{wildcards.sample}_deepvariant.vcf.gz \\
+            --sample_name {wildcards.sample}_deepvariant \\
+        2>&1 | tee {log}
+        bcftools sort {params.work_dir}/{wildcards.sample}_deepvariant.vcf.gz \
+            | bcftools norm -f {params.genome} -m -both -O z -o {output.vcf_gz} \
+        2>&1 | tee -a {log}
+        tabix -f -p vcf {output.vcf_gz}
+        rm -f {params.work_dir}/make_examples.tfrecord-*.gz
+        rm -f {params.work_dir}/make_examples.tfrecord-*.gz.example_info.json
+        rm -f {params.work_dir}/call_variants_output-*.tfrecord.gz
+        """

@@ -1,5 +1,3 @@
-
-
 import argparse
 import os
 import re
@@ -45,24 +43,6 @@ def parse_args():
 
 
 _CALLER_PHASE_PRIORITY = ('nanoTS', 'clair3_rna', 'longcallR')
-
-
-def _clnsig_category_rank(clnsig):
-    s = str(clnsig)
-    base = s.split(':', 1)[0]
-    if base == 'Pathogenic':
-        return 0
-    if base == 'Pathogenic/Likely_pathogenic':
-        return 1
-    if base == 'Likely_pathogenic':
-        return 2
-    if base == 'Conflicting_classifications_of_pathogenicity':
-        if re.search(r'Pathogenic|Likely_pathogenic', s):
-            return 3
-        return None
-    if re.search(r'Pathogenic|Likely_pathogenic', s):
-        return 4
-    return None
 
 
 def _caller_from_name(name):
@@ -246,9 +226,12 @@ def load_gene_expression_zscore_df(path):
     return pd.read_csv(path, sep='\t', index_col=0)
 
 
+# NOTE: gene_expression_df/relative_gene_expression (CPTM-based) has been dropped from the
+# output in favor of the MOTR-based relative_gene_expression_motr; gene_expression_df is kept
+# as an accepted (but now unused) argument so existing callers don't need to change.
 def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_name, omim_df=None,
                      gene_expression_df=None, gene_expression_motr_df=None,
-                     gene_expression_zscore_df=None, gene_expression_outlier_threshold=3.0):
+                     gene_expression_zscore_df=None):
 
     gt_by_caller = _build_gt_by_caller(variant_df)
     gt_caller_cols = [f'variant_GT_{suffix}' for suffix in _CALLER_GT_DISPLAY.values()]
@@ -368,6 +351,13 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     else:
         hit_df['cohort_outlier_junction'] = 'None'
 
+    # True if the gene shows up as an ASE outlier and/or a junction outlier (per-sample or cohort)
+    hit_df['RNA_dysregulation'] = (
+        (hit_df['ASE'] == True)
+        | (hit_df['outlier_junction'] != 'None')
+        | (hit_df['cohort_outlier_junction'] != 'None')
+    )
+
     hit_df = hit_df.astype(object)
     hit_df.fillna(".", inplace=True)
 
@@ -392,7 +382,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
             has_2_pathogenic_trans=False, has_2_pathogenic_unclear=False,
             has_1_pathogenic_1_vus_trans=False,
             has_2_vus_trans=False, has_2_vus_unclear=False,
-            best_pathogenic_clnsig_rank=None,
         )
         if gene_variant_rows.empty:
             return empty
@@ -402,11 +391,9 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
             clnsig_values = sub['CLNSIG'].astype(str)
             is_pathogenic = clnsig_values.str.contains(r'Pathogenic|Likely_pathogenic', regex=True).any()
             is_homozygous = sub['GT'].isin(['1/1', '1|1']).any()
-            clnsig_rank = _clnsig_category_rank(clnsig_values.iloc[0]) if is_pathogenic else None
             variants[variant_id] = dict(
                 is_pathogenic=is_pathogenic,
                 is_homozygous=is_homozygous,
-                clnsig_rank=clnsig_rank,
                 rows=sub[['_caller', '_raw_GT', 'PS']].to_dict('records'),
             )
 
@@ -446,9 +433,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
             has_1_pathogenic_1_vus_trans=has_1_pathogenic_1_vus_trans,
             has_2_vus_trans=has_2_vus_trans,
             has_2_vus_unclear=has_2_vus_unclear,
-            best_pathogenic_clnsig_rank=(
-                min((variants[v]['clnsig_rank'] for v in path_ids if variants[v]['clnsig_rank'] is not None), default=None)
-            ),
         )
 
     variant_class_by_gene = {
@@ -461,7 +445,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         has_2_pathogenic_trans=False, has_2_pathogenic_unclear=False,
         has_1_pathogenic_1_vus_trans=False,
         has_2_vus_trans=False, has_2_vus_unclear=False,
-        best_pathogenic_clnsig_rank=None,
     )
 
     def _assign_tier(row):
@@ -471,12 +454,12 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         strong = (row['outlier_junction'] == 'Strong') or (row['cohort_outlier_junction'] == 'Strong')
         moderate = (row['outlier_junction'] == 'Moderate') or (row['cohort_outlier_junction'] == 'Moderate')
         weak = (row['outlier_junction'] == 'Weak') or (row['cohort_outlier_junction'] == 'Weak')
-        ase_or_strong = ase or strong
         bucket = _inheritance_bucket(row['inheritance_patterns'])
 
         ase_hapi_or_strong = (ase and haploinsufficient) or strong
         ase_not_hapi_or_moderate = (ase and not haploinsufficient) or moderate
 
+        # Bucket 1: AD or XLD only
         if bucket == 1:
             if vc['has_pathogenic']:
                 return 1
@@ -490,6 +473,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
                 return 5
             return None
 
+        # Bucket 2: mixed inheritance (AD/AR or XLD/XLR)
         if bucket == 2:
             if vc['has_2_pathogenic_trans'] or vc['has_homozygous_pathogenic']:
                 return 1
@@ -505,43 +489,43 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
                 return 6
             return None
 
+        # Bucket 3: AR, XLR, or unknown inheritance
         if vc['has_2_pathogenic_trans'] or vc['has_homozygous_pathogenic']:
             return 1
         if vc['has_1_pathogenic_1_vus_trans'] or vc['has_2_pathogenic_unclear']:
             return 2
+        # 1 P/LP alone, OR 2 VUS in trans, OR 1 homozygous VUS
         if vc['has_pathogenic'] or vc['has_2_vus_trans'] or vc['has_homozygous_vus']:
-            if ase_or_strong:
+            if strong:
                 return 2
-            if moderate:
+            if ase or moderate:
                 return 3
             if weak:
                 return 4
             return 5
-        if vc['has_2_vus_unclear']:
-            if ase_or_strong:
+        # Any other VUS
+        if vc['has_vus']:
+            if strong:
                 return 3
-            if moderate:
+            if ase or moderate:
                 return 4
             if weak:
                 return 5
             return 6
-        if ase_or_strong:
+        # No VUS, but RNA dysregulation is present
+        if strong:
             return 4
-        if moderate:
+        if ase or moderate:
             return 5
         if weak:
             return 6
-        if vc['has_vus']:
-            return 7
         return None
 
     hit_df['tier'] = hit_df.apply(_assign_tier, axis=1)
     hit_df['_tb_n_pathogenic'] = hit_df['gene'].map(
         lambda g: variant_class_by_gene.get(g, _empty_variant_class)['n_pathogenic_variants']
     )
-    hit_df['_tb_clnsig_rank'] = hit_df['gene'].map(
-        lambda g: variant_class_by_gene.get(g, _empty_variant_class)['best_pathogenic_clnsig_rank']
-    )
+    hit_df['_tb_variants'] = hit_df['variant']
 
     def _max_bulk_delta(row):
         a = max_deltas(row, '')[0]
@@ -569,12 +553,12 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     hit_df['_tb_max_cadd'] = hit_df.apply(_max_cadd, axis=1)
 
     hit_df.sort_values(
-        by=['tier', '_tb_n_pathogenic', '_tb_clnsig_rank', 'ASE', '_tb_max_bulk_delta', '_tb_max_cadd', 'gene'],
-        ascending=[True, False, True, False, False, False, True],
+        by=['tier', '_tb_n_pathogenic', '_tb_variants', 'ASE', '_tb_max_bulk_delta', '_tb_max_cadd', 'gene'],
+        ascending=[True, False, False, False, False, False, True],
         na_position='last',
         inplace=True
     )
-    hit_df.drop(columns=['_tb_n_pathogenic', '_tb_clnsig_rank', '_tb_max_bulk_delta', '_tb_max_cadd'], inplace=True)
+    hit_df.drop(columns=['_tb_n_pathogenic', '_tb_variants', '_tb_max_bulk_delta', '_tb_max_cadd'], inplace=True)
     hit_df['ranking'] = np.arange(1, len(hit_df) + 1)
 
 
@@ -611,13 +595,9 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         hit_df[cohort_col] = hit_df['gene'].apply(_cohort_expression_summary)
 
     _annotate_relative_expression(
-        hit_df, gene_expression_df,
-        'relative_gene_expression', 'cohort_relative_gene_expression',
-        n_cohort_col='n_cohort',
-    )
-    _annotate_relative_expression(
         hit_df, gene_expression_motr_df,
         'relative_gene_expression_motr', 'cohort_relative_gene_expression_motr',
+        n_cohort_col='n_cohort',
     )
 
     if gene_expression_zscore_df is not None:
@@ -627,24 +607,15 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
                 return z if pd.notna(z) else '.'
             return '.'
 
-        def _expression_outlier(gene):
-            z = _expression_zscore(gene)
-            if z == '.':
-                return '.'
-            return bool(float(z) <= -abs(gene_expression_outlier_threshold))
-
-        hit_df['gene_expression_zscore'] = hit_df['gene'].apply(_expression_zscore)
-        hit_df['gene_expression_outlier'] = hit_df['gene'].apply(_expression_outlier)
+        hit_df['gene_expression_motr_zscore'] = hit_df['gene'].apply(_expression_zscore)
     else:
-        hit_df['gene_expression_zscore'] = '.'
-        hit_df['gene_expression_outlier'] = '.'
+        hit_df['gene_expression_motr_zscore'] = '.'
 
     hit_df['sample'] = sample_name
     hit_df = hit_df[[
-        'sample', 'gene', 'phenotypes', 'inheritance_patterns', 'haploinsufficient', 'ranking', 'tier', 'variant', 'pathogenic_variant', 'ASE', 'outlier_junction', 'cohort_outlier_junction',
-        'relative_gene_expression', 'cohort_relative_gene_expression',
+        'sample', 'gene', 'phenotypes', 'inheritance_patterns', 'haploinsufficient', 'ranking', 'tier', 'variant', 'pathogenic_variant', 'ASE', 'outlier_junction', 'cohort_outlier_junction', 'RNA_dysregulation',
         'relative_gene_expression_motr', 'cohort_relative_gene_expression_motr',
-        'gene_expression_zscore', 'gene_expression_outlier', 'n_cohort',
+        'gene_expression_motr_zscore', 'n_cohort',
         'variant_ID', 'variant_GT_nanoTS', 'variant_GT_longcallR', 'variant_GT_clair3-RNA', 'variant_GT_deepvariant',
         'variant_gnomAD_AF',  'variant_CLNSIG', 'variant_CADD_PHRED', 'variant_SpliceAI', 'variant_consequence', 'variant_num_callers', 'variant_nsamples',
         'ASE_ratio', 'ASE_nsamples', 

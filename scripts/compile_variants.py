@@ -15,14 +15,12 @@ import concurrent.futures
 import time
 from math import ceil
 
+# Pipeline: read VCFs -> merge into one variants df -> annotate (gnomAD, ClinVar, ANNOVAR, CADD, SpliceAI -> write {outprefix}_compiled_variants.tsv.
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Compile variants from multiple VCF files and add annotations "
                     "(gnomAD, ClinVar, Annovar, CADD, SpliceAI) into a single .tsv file "
-                    "({outprefix}_compiled_variants.tsv). This script does NOT apply final "
-                    "filtering thresholds (gnomAD AF, CLNSIG, CADD, SpliceAI, DP, AF) -- see "
-                    "filter_variants.py for that, which operates on this script's output "
-                    "so re-filtering doesn't require re-annotating. "
+                    "({outprefix}_compiled_variants.tsv). "
                     "Note that contigs in all VCF and BED files should be formatted as "
                     "'chr1', 'chr2', ..., 'chrX', 'chrY', 'chrM'. "
                     "Also note that insertions should be formatted as A>ATC (rather than ->TC), "
@@ -41,9 +39,8 @@ def parse_args():
     parser.add_argument("--genome",
         help="Path to FASTA file for the reference genome. Required if --ANNOVAR or --SpliceAI is used.")
     parser.add_argument("--gtf",
-        help="Path to GTF file to build SpliceAI's gene annotation from (via process_gtf), so "
-             "SpliceAI scores against the same annotation version used elsewhere in this "
-             "pipeline. If --include-SpliceAI-scores is used and no GTF is provided, falls "
+        help="Path to GTF file to build SpliceAI's gene annotation from"
+             "If --include-SpliceAI-scores is used and no GTF is provided, falls "
              "back to SpliceAI's own bundled annotation, selected via --SpliceAI-annotation.")
     parser.add_argument("--gnomad-vcf",
         help="Path to gnomAD VCF file(s). If provided, maximum gnomAD allele frequencies will be "
@@ -51,10 +48,8 @@ def parse_args():
              "provided as a comma-separated list (e.g. --gnomad-vcf 'gnomad.vcf.gz,gnomad2.vcf.gz').")
     parser.add_argument("--gnomad-vcf-fallback",
         help="Comma-separated gnomAD VCF file(s)/URL(s) to retry against if --gnomad-vcf fails "
-             "for any reason at runtime (missing/unindexed local file, a failed bcftools call, "
-             "etc.). Typically the canonical public gnomAD URLs, so a broken/missing local "
-             "install doesn't halt the pipeline. If omitted, or identical to --gnomad-vcf, no "
-             "second attempt is made.")
+             "for any reason at runtime. Typically the canonical public gnomAD URLs, so a broken/missing local "
+             "install doesn't halt the pipeline. If omitted, or identical to --gnomad-vcf, no second attempt is made.")
     parser.add_argument("--clinvar-vcf",
         help="Path to ClinVar VCF file. If provided, CLNSIG annotations will be included in the final output.")
     parser.add_argument("--clinvar-vcf-fallback",
@@ -162,6 +157,7 @@ def parse_args():
     return parser.parse_args()
 
 
+# Convert a GTF to the exon-list format SpliceAI's live scorer expects for a custom annotation
 def process_gtf(gtf, outfile):
     df = pd.read_csv(gtf, sep='\t', comment='#',
                      names=["CHROM", "SOURCE", "FEATURE", "START", "END", "SCORE", "STRAND", "FRAME", "ATTRIBUTES"])
@@ -181,6 +177,7 @@ def process_gtf(gtf, outfile):
     output_df.to_csv(outfile, sep='\t', index=False)
 
 
+# Stream a remote VCF through bcftools view | query, retrying with backoff on transient failures
 def _run_remote_bcftools_pipeline(view_cmd, query_cmd, max_retries=5, initial_delay=15, cwd=None, label=None,
                                    quiet_success=False):
     tag = f' ({label})' if label else ''
@@ -216,6 +213,7 @@ def _run_remote_bcftools_pipeline(view_cmd, query_cmd, max_retries=5, initial_de
         f'({" ".join(view_cmd)}): {last_err}')
 
 
+# Fetch a remote VCF's header, retrying with backoff on transient failures
 def _bcftools_header_with_retry(vcf_file, max_retries=5, initial_delay=15, cwd=None):
     delay = initial_delay
     last_err = None
@@ -231,6 +229,7 @@ def _bcftools_header_with_retry(vcf_file, max_retries=5, initial_delay=15, cwd=N
     raise last_err
 
 
+# Run tabix against a remote indexed file, retrying with backoff on transient failures
 def _run_remote_tabix_with_retry(url, extra_args, max_retries=5, initial_delay=15, cwd=None, label=None):
     tag = f' ({label})' if label else ''
     cmd = ['tabix', url] + list(extra_args)
@@ -258,6 +257,8 @@ def _is_remote_url(path):
     return re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', path) is not None
 
 
+# Query a VCF (local or remote) restricted to a BED's regions; remote files are chunked and
+# queried in parallel to dodge a libcurl HTTP/2 bug from too many requests on one connection
 def _query_vcf_regions(vcf_file, bed_file, format_string, threads, cwd, chunk_size=10, max_workers=None):
     if max_workers is None:
         max_workers = threads
@@ -316,6 +317,7 @@ def _query_vcf_regions(vcf_file, bed_file, format_string, threads, cwd, chunk_si
     return ''.join(results[i + 1] for i in range(n_chunks))
 
 
+# Pull non-hom-ref, non-missing genotypes out of one VCF into a dict keyed by variant identity
 def process_vcf(vcf_file, vcf_file_name, bed_file, genome):
 
     vcf_data = {}
@@ -347,6 +349,8 @@ def process_vcf(vcf_file, vcf_file_name, bed_file, genome):
     return vcf_data
 
 
+# Annotate max gnomAD AF per variant (AF_grpmax > AF_hom > AF, whichever the VCF has); falls
+# back to gnomad_vcf_fallback on failure, then to 'fail' for all variants if that fails too
 def extract_gnomAD_AF(df, gnomad_vcf, outprefix, bed_file, threads, cache_dir, gnomad_vcf_fallback=None):
 
     start_time = time.time()
@@ -440,6 +444,8 @@ def extract_gnomAD_AF(df, gnomad_vcf, outprefix, bed_file, threads, cache_dir, g
     return df
 
 
+# Annotate ClinVar CLNSIG (appending CLNSIGCONF when present); same fallback-then-'fail' pattern
+# as extract_gnomAD_AF
 def extract_CLNSIG(df, clinvar_vcf, outprefix, bed_file, threads, cache_dir, clinvar_vcf_fallback=None):
 
     start_time = time.time()
@@ -505,6 +511,7 @@ def extract_CLNSIG(df, clinvar_vcf, outprefix, bed_file, threads, cache_dir, cli
     return df
 
 
+# Label each variant with the panel gene(s) whose BED region it falls in ('.' if none/no BED)
 def add_gene_overlap_column(df, panel_bed):
     if not panel_bed:
         df['gene'] = '.'
@@ -525,6 +532,9 @@ def add_gene_overlap_column(df, panel_bed):
     return df
 
 
+# Run ANNOVAR's refGene annotation (Func/Gene/GeneDetail/ExonicFunc/AAChange); ANNOVAR's own
+# indel coordinate convention is corrected back to VCF-style (A>ATC etc.) using the reference
+# FASTA before merging back in. Fills all ANNOVAR columns with 'fail' if anything goes wrong.
 def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
 
     ANNOVAR_COLUMNS = [
@@ -607,6 +617,7 @@ def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
     return df
 
 
+# Score one chunk of variants with a local CADD-scripts install (conda-only / -m mode)
 def run_CADD_chunk(chunk_variants, idx, outprefix, CADD_script, CADD_data_dir, include_CADD_annotations):
 
     work_dir = os.path.dirname(outprefix)
@@ -650,6 +661,8 @@ def run_CADD_chunk(chunk_variants, idx, outprefix, CADD_script, CADD_data_dir, i
     return df_CADD
 
 
+# Boolean mask: which variants are rare/unknown enough and not excluded-by-CLNSIG to bother
+# scoring with CADD/SpliceAI (shared by both, called separately with each tool's own thresholds)
 def _gnomad_clnsig_filter_mask(df, gnomad_af_threshold, clnsig_filter):
     mask = pd.Series(True, index=df.index)
     if gnomad_af_threshold is not None and 'gnomAD_AF' in df.columns:
@@ -660,6 +673,7 @@ def _gnomad_clnsig_filter_mask(df, gnomad_af_threshold, clnsig_filter):
     return mask
 
 
+# Log how many unique variants a CADD/SpliceAI filter mask kept, out of the total
 def _print_filter_summary(label, df, mask, gnomad_af_threshold, clnsig_filter):
 
     unique_cols = ['chrom', 'pos', 'ref', 'alt']
@@ -673,6 +687,8 @@ def _print_filter_summary(label, df, mask, gnomad_af_threshold, clnsig_filter):
           f'-> {n_selected} unique variants selected for {label}.')
 
 
+# CADD source 1: run CADD-scripts locally, splitting the masked variant set across `threads`
+# parallel chunks (see run_CADD_chunk)
 def _run_CADD_local(df, outprefix, CADD_script, CADD_data_dir, include_CADD_annotations, mask, threads):
 
     print(f'\nPreparing variants for CADD analysis...')
@@ -724,6 +740,7 @@ def _run_CADD_local(df, outprefix, CADD_script, CADD_data_dir, include_CADD_anno
     return df
 
 
+# Query a local bgzip+tabix-indexed TSV, restricted to a BED's positions
 def _query_local_tabix_tsv(path, bed_file, cwd, columns):
     cmd = ['tabix', path, '-R', bed_file]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -733,6 +750,8 @@ def _query_local_tabix_tsv(path, bed_file, cwd, columns):
     return pd.read_csv(io.StringIO(proc.stdout), sep='\t', header=None, names=columns, dtype=str)
 
 
+# CADD source 2 (fallback): look up scores in the local pre-scored SNV/InDel files instead of
+# running CADD itself; InDels get '.' if no local InDel file was configured
 def _run_CADD_local_prescored(df, outprefix, CADD_local_prescored_snv, CADD_local_prescored_indel,
                                cache_dir, mask, threads):
 
@@ -791,6 +810,7 @@ def _run_CADD_local_prescored(df, outprefix, CADD_local_prescored_snv, CADD_loca
     return df
 
 
+# CADD source 3 (last resort): tabix the public pre-scored SNV file remotely; no InDel coverage
 def _run_CADD_remote_prescored(df, outprefix, CADD_prescored_url, cache_dir, mask, threads):
 
     print(f'\nLooking up CADD scores from the remote pre-scored SNV file...')
@@ -836,6 +856,7 @@ def _run_CADD_remote_prescored(df, outprefix, CADD_prescored_url, cache_dir, mas
     return df
 
 
+# Orchestrate the CADD fallback chain: local run -> local pre-scored -> remote pre-scored -> 'fail'
 def run_CADD(df, outprefix, cache_dir, CADD_script, CADD_data_dir,
              CADD_local_prescored_snv, CADD_local_prescored_indel, CADD_prescored_url,
              include_CADD_annotations, mask, threads):
@@ -889,6 +910,7 @@ def run_CADD(df, outprefix, cache_dir, CADD_script, CADD_data_dir,
     return df
 
 
+# Score one chunk of variants with the live spliceai tool
 def run_SpliceAI_chunk(chunk_variants, idx, outprefix, genome, annotation_arg):
 
     work_dir = os.path.dirname(outprefix)
@@ -932,6 +954,8 @@ def run_SpliceAI_chunk(chunk_variants, idx, outprefix, genome, annotation_arg):
     return df_chunk
 
 
+# SpliceAI source 2 (fallback / --SpliceAI-force-prescored-lookup): look up scores in the
+# precomputed SNV/InDel VCFs instead of running spliceai live
 def _run_SpliceAI_prescored_lookup(df, outprefix, snv_vcf, indel_vcf, mask, cache_dir, threads):
 
     print(f'\nLooking up SpliceAI scores from precomputed VCF(s)...')
@@ -982,6 +1006,9 @@ def _run_SpliceAI_prescored_lookup(df, outprefix, snv_vcf, indel_vcf, mask, cach
     return df
 
 
+# SpliceAI source 1: run the live spliceai tool, splitting the masked variant set across
+# `threads` parallel chunks (see run_SpliceAI_chunk); builds a custom annotation from --gtf
+# when given, otherwise uses SpliceAI's own bundled grch37/grch38 annotation
 def _run_SpliceAI_live(df, outprefix, genome, gtf, SpliceAI_annotation, mask, threads):
 
     print(f'\nPreparing variants for SpliceAI analysis...')
@@ -1037,6 +1064,7 @@ def _run_SpliceAI_live(df, outprefix, genome, gtf, SpliceAI_annotation, mask, th
     return df
 
 
+# Orchestrate the SpliceAI fallback chain: live run -> prescored lookup -> 'fail'
 def run_SpliceAI(df, outprefix, genome, gtf, SpliceAI_annotation, snv_vcf, indel_vcf,
                   force_prescored_lookup, mask, cache_dir, threads):
 
@@ -1076,6 +1104,8 @@ def run_SpliceAI(df, outprefix, genome, gtf, SpliceAI_annotation, snv_vcf, indel
 
 
 
+# Read all input VCFs, merge into one variants df, then run whichever annotation steps
+# were configured (gnomAD, ClinVar, gene overlap, ANNOVAR, CADD, SpliceAI), in that order
 def main():
 
     print(f"\n\n\n******************************************************************************************")

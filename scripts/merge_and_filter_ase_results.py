@@ -17,7 +17,7 @@ def parse_args():
     parser.add_argument("--outprefix", help="Prefix for output files.", required=True)
     parser.add_argument("--title", default="Number of Genes with Allele-specific Expression by Sample", help="Title for the plot.")
     parser.add_argument('--min-haplotype-ratio', default=0, type=float, help='Exclude genes with haplotype ratio < min-haplotype-ratio, for example, if you believe these are false positives.')
-    parser.add_argument('--delta-haplotype-ratio-threshold', default=0.1, type=float, help='Minimum difference in haplotype ratio to be considered an outlier. (default: 0.1)')
+    parser.add_argument('--minor-haplotype-frequency-threshold', default=0.4, type=float, help='A gene is considered an outlier when its minor-haplotype fraction (ratio) is below this value. (default: 0.4)')
     parser.add_argument('--padj-threshold', default=0.05, type=float, help='Maximum adjusted p-value to be considered an outlier. (default: 0.05)')
     parser.add_argument("--sample-number-threshold", type=int, help="The maximum number of samples that a gene can be an outlier in to be retained.")
     parser.add_argument("--plot", action="store_true", help="If set, generates a plot of the number of genes with outlier ASE according to the haplotype-ratio and padj thresholds before and after sample number filtering.")
@@ -111,7 +111,7 @@ def main():
             print(f"WARNING: Input file {input_file} is empty.")
             continue
         samples.update(df['sample'].unique())
-        df = df[(df['ratio'] >= args.min_haplotype_ratio) & (abs(df['diff']) >= args.delta_haplotype_ratio_threshold) & (df['padj'] <= args.padj_threshold)]
+        df = df[(df['ratio'] >= args.min_haplotype_ratio) & (df['ratio'] < args.minor_haplotype_frequency_threshold) & (df['padj'] <= args.padj_threshold)]
         df.insert(0, "input_file", input_file)
         merged_df = pd.concat([merged_df, df], ignore_index=True)
 
@@ -131,7 +131,7 @@ def main():
 
     if args.plot:
         legends = [
-            ('#d95d5b', f'Genes with abs(Δ haplotype ratio) ≥ {args.delta_haplotype_ratio_threshold} and padj ≤ {args.padj_threshold}'), \
+            ('#d95d5b', f'Genes with minor haplotype fraction < {args.minor_haplotype_frequency_threshold} and padj ≤ {args.padj_threshold}'), \
             ('#4c8fca', f'Genes with allelic imbalance in ≤ {args.sample_number_threshold} samples')
         ]
         plot_outlier_counts(samples, [merged_df, filtered_df], legends, args.title, f"{args.outprefix}_counts.pdf")

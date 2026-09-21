@@ -1,47 +1,41 @@
+run: ""  # path to the run config (samples, output_dir, etc.)
 
-run: ""
-
-longcallr:                 true
-nanots:                    true
-clair3_rna:                true
-deepvariant:               true
-compile_variants:          true
-phase_reads:               true
-ase_analysis:               true
-junction_analysis:          true
-cohort_junction_analysis:   true
-merge_results:              true
+# Which pipeline stages to run; set to false to skip a stage
+longcallr: true
+nanots: true
+clair3_rna: true
+deepvariant: true
+compile_variants: true
+phase_reads: true
+ase_analysis: true
+junction_analysis: true
+cohort_junction_analysis: true
+merge_results: true
 merge_results_include_cohort_junctions: true
-qc:             true
-gene_quantification:        true
+qc: true
+gene_quantification: true
 
-conda_env:        "envs/conda_env"
+# Path to envs created by setup.sh
+conda_env: "envs/conda_env"
 conda_env_compile_variants: "envs/conda_env_compile_variants"
 
-genome:     "resources/gencode_data/GRCh38.primary_assembly.genome.fa"
+# Output directory
+output_dir: ""
+
+# Reference genome/annotation
+genome: "resources/gencode_data/GRCh38.primary_assembly.genome.fa"
 annotation: "resources/gencode_data/gencode.v44.primary_assembly.annotation.gtf"
 
-longcallr_bin:    "envs/conda_env/bin/longcallR"
-nanots_image:     "library://zelinliu/nanots/nanots:1.0.0"
+# Variant callers
+longcallr_bin: "envs/conda_env/bin/longcallR"
+nanots_image: "library://zelinliu/nanots/nanots:1.0.0"
 nanots_model_unphased: "resources/NanoTS/model/unphased_cDNA_nanopore_R104_HG002.pth"
-nanots_model_phased:   "resources/NanoTS/model/phased_cDNA_nanopore_R104_HG002.pth"
+nanots_model_phased: "resources/NanoTS/model/phased_cDNA_nanopore_R104_HG002.pth"
 clair3_rna_image: "docker://hkubal/clair3-rna:v0.2.2"
 deepvariant_image: "docker://google/deepvariant:1.6.1"
 
-gnomad_base:         "resources/gnomad_data"
-clinvar_vcf:         "resources/clinvar_data/clinvar.vcf.gz"
-annovar_dir:         "resources/annovar"
-amalgam_dir:         "resources/amalgam"
-cadd_script:       "resources/CADD-scripts-1.7.1/CADD_wrapper.sh"
-cadd_data_dir:       "resources/CADD-scripts-1.7.1/data"
-cadd_local_prescored_snv:   "resources/CADD-scripts-1.7.1/data/prescored/GRCh38_v1.7/no_anno/whole_genome_SNVs.tsv.gz"
-cadd_local_prescored_indel: "resources/CADD-scripts-1.7.1/data/prescored/GRCh38_v1.7/no_anno/gnomad.genomes.r4.0.indel.tsv.gz"
-cadd_prescored_url:  "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/whole_genome_SNVs.tsv.gz"
-spliceai_annotation: "grch38"
-spliceai_prescored_snv_vcf:   ""
-spliceai_prescored_indel_vcf: ""
-spliceai_force_prescored_lookup: false
-
+# Resources for variant annotation (set to "remote" to fetch gnomAD/ClinVar from the web instead of a local copy)
+gnomad_base: "resources/gnomad_data"
 gnomad_chroms:
   - chr1
   - chr2
@@ -68,7 +62,22 @@ gnomad_chroms:
   - chrX
   - chrY
 gnomad_mito_vcf: "resources/gnomad_data/gnomad.genomes.v3.1.sites.chrM.vcf.bgz"
+clinvar_vcf: "resources/clinvar_data/clinvar.vcf.gz"
+annovar_dir: "resources/annovar"
+amalgam_dir: "resources/amalgam"
+cadd_script: "resources/CADD-scripts-1.7.1/CADD_wrapper.sh"
+cadd_data_dir: "resources/CADD-scripts-1.7.1/data"
+cadd_local_prescored_snv: "resources/CADD-scripts-1.7.1/data/prescored/GRCh38_v1.7/no_anno/whole_genome_SNVs.tsv.gz"
+cadd_local_prescored_indel: "resources/CADD-scripts-1.7.1/data/prescored/GRCh38_v1.7/no_anno/gnomad.genomes.r4.0.indel.tsv.gz"
+cadd_prescored_url: "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/whole_genome_SNVs.tsv.gz"
+spliceai_annotation: "grch38"
+# Prescored VCFs not included by default, so they are blank here
+spliceai_prescored_snv_vcf: ""
+spliceai_prescored_indel_vcf: ""
+# Set to spliceai_force_prescored_lookup to true to skip live scoring entirely (SpliceAI is slow)
+spliceai_force_prescored_lookup: false
 
+# Thresholds for running CADD and SpliceAI (only run on variants passing these filters to save compute time)
 cadd_gnomad_af_threshold: 0.01
 cadd_clnsig_filter:
   - "Benign"
@@ -80,82 +89,90 @@ spliceai_clnsig_filter:
   - "Likely_benign"
   - "Benign/Likely_benign"
 
-gnomad_af_threshold:    0.01
+# Final variant filtering thresholds
+gnomad_af_threshold: 0.01
 clnsig_filter:
   - "Benign"
   - "Likely_benign"
   - "Benign/Likely_benign"
-cadd_threshold:         15
-spliceai_threshold:     0.2
+cadd_threshold: 15
+spliceai_threshold: 0.2
 final_dp_threshold: ""
 final_af_threshold: ""
 
-phasing_threshold:      0.5
-terminal_variant_proportion: 0.5
-min_dist_from_read_end_variant_phasing: 20
+# Read phasing thresholds
+phasing_min_dp: 20    # a variant must have this DP to be used in phasing
+phasing_min_af: 0.1    # an indel must have an AF greater than this to be used in phasing 
+terminal_variant_proportion: 0.5    # exclude variants that are disproportionally present at the end of reads from phasing
+min_dist_from_read_end_variant_phasing: 20  # a variant is considered to be at the end of a read if it is within this many bases
+phasing_threshold: 0.5    # only keep phasing result if this proportion of the total gene coverage can be phased
 
-phasing_min_dp: 20
-phasing_min_af: 0.1
+# ASE (allele-specific expression) analysis thresholds
+sample_coverage_threshold: 20    # only run ASE analysis for genes with max coverage greater than this
+ase_phasing_threshold: 0.5    # only run ASE analysis for genes in which this proportion of the max bulk coverage could be phased
+ase_padj_threshold: 0.01    # for calling significance
+minor_haplotype_frequency_threshold: 0.3    # for calling significance (when minor haplotype accounts for <30% of reads, ASE is applicable)
 
-sample_coverage_threshold: 20
-padj_threshold:         0.01
-haplotype_ratio_threshold: 0.2
-ase_phasing_threshold:  0.5
-
+# Junction analysis (vs GTEx)
 gtex_data_dir: "resources/gtex_data"
-gtex_coverage_threshold:   20
-gtex_n_threshold:          100
-PSI_rescale_factor:      0.001
-delta_psi_threshold:    0.1
-jxn_phasing_threshold:  0.8
+gtex_coverage_threshold: 20    # only calculate PSI-approx for junctions with at least this coverage (PSI-approx denom)
+jxn_phasing_threshold: 0.8    # only calculate hap1/hap2 PSI-approx values when phased coverage is at least this proportion of bulk coverage
+gtex_n_threshold: 100    # only fit beta distribution for junctions with at least this many PSI-approx values in GTEx
+psi_rescale_factor: 0.001    # rescale PSI-approx values away from 0 and 1 for beta distribution fitting
+psi_padj_threshold: 0.01    # for calling significance
+delta_psi_threshold: 0.1    # difference between the sample's PSI-approx and the 1st/99th percentile of GTEx PSI-approx values; for calling significance
 
-output_dir: ""
-omim_file: "resources/omim_data/OMIM.tsv"
+# Merging variant results across variant callers and samples
+merge_min_dp_snv: 20    # DP filter applied at merge step
+merge_min_dp_indel: 20    # DP filter applied at merge step
+merge_num_callers_threshold_snv: 2    # SNVs must be called by at least this many tools
+merge_num_callers_threshold_indel: 2    # indels must be called by at least this many tools
+merge_variant_sample_fraction: 0.05    # variants present in greater than 5% of samples are filtered out
 
-merge_num_callers_threshold_snv:       2
-merge_num_callers_threshold_indel:     2
-merge_min_dp_snv:                     20
-merge_min_dp_indel:                   20
-merge_variant_sample_fraction:         0.05
+# Merging ASE results samples
+merge_min_haplotype_ratio: 0.1    # ignore genes with minor haplotype frequency < 10%
+merge_ase_padj_threshold: 0.01    # similar to padj_threshold but applied at the merge step
+merge_minor_haplotype_frequency_threshold: 0.3    # similar to minor_haplotype_frequency_threshold but applied at the merge step
+merge_ase_sample_fraction: 0.05    # genes with ASE in greater than 5% of samples are filtered out
 
-merge_min_haplotype_ratio:             0.1
-merge_ase_padj_threshold:              0.01
-merge_delta_haplotype_ratio_threshold: 0.2
-merge_ase_sample_fraction:             0.05
+# Merging junction results samples
+merge_jxn_coverage_threshold: 50    # similar to gtex_coverage_threshold but applied at the merge step
+merge_jxn_padj_threshold: 0.01    # similar to padj_threshold but applied at the merge step
+merge_delta_psi_threshold: 0.1    # similar to delta_psi_threshold but applied at the merge step
+merge_jxn_sample_fraction: 0.05    # junctions with an outlier call in greater than 5% of samples are filtered out
 
-merge_jxn_coverage_threshold:         50
-merge_jxn_padj_threshold:              0.01
-merge_delta_psi_threshold:             0.1
-merge_jxn_sample_fraction:              0.05
+# Cohort-level junction analysis (beta-binomial for larger groups, modified z-score for smaller ones)
+cohort_jxn_min_samples: 10    # skip cohort junction analysis entirely for groups smaller than this
+cohort_jxn_method: "auto"    # "auto", "beta_binomial", or "modified_zscore"; auto picks based on group size
+cohort_jxn_beta_min_samples: 30    # groups with at least this many samples use beta-binomial when method is "auto"
+cohort_jxn_zscore_n_threshold: 10    # minimum number of values required to compute a modified z-score per junction
+cohort_jxn_beta_n_threshold: 30    # minimum number of values to fit a beta distribution for that junction
+cohort_jxn_beta_padj_threshold: 0.05    # significance threshold for beta-binomial method
+cohort_jxn_beta_delta_threshold: 0.1    # significance threshold for beta-binomial method
+cohort_jxn_z_threshold: 3.5    # significance threshold for modified_zscore method
+cohort_jxn_z_delta_threshold: 0.1    # significance threshold for modified_zscore method
+cohort_jxn_phasing_threshold: 0.8    # only calculate hap1/hap2 values when phased coverage is at least this proportion of bulk coverage
+cohort_jxn_min_reads: 20    # minimum bulk read count for a junction to be included in the analysis (at least one sample must have this many reads supporting junction)
 
-cohort_jxn_min_samples:        10
-cohort_jxn_method:       "auto"
-cohort_jxn_beta_min_samples:   30
-cohort_jxn_beta_padj_threshold: 0.05
-cohort_jxn_z_threshold:       3.5
-cohort_jxn_z_delta_threshold: 0.1
-cohort_jxn_phasing_threshold: 0.8 
-cohort_jxn_beta_n_threshold:     30
-cohort_jxn_zscore_n_threshold:   10
-cohort_jxn_min_reads:          20
-
-validate_ref_tissues: ["fibroblasts", "lymphocytes", "wholeblood"]
-validate_ref_colors:  ["#D95D5B", "#57AA3E", "#B271AB"]
-
-sample_type_colors:
+# QC / plotting: reference tissues and colors used in sample-type plots
+validate_ref_tissues: ["fibroblasts", "lymphocytes", "wholeblood"]    # GTEx tissues to plot alongside samples in the sample-type validation heatmap
+validate_ref_colors: ["#D95D5B", "#57AA3E", "#B271AB"]    # colors for each reference tissue above, in the same order
+sample_type_colors: # plot color per sample_type; any sample_type not listed here gets an auto-assigned color
   fibroblasts: "#D95D5B"
   lymphocytes: "#57AA3E"
   PBMCs: "#4C8FCA"
   wholeblood: "#B271AB"
+cohort_qc_title: "Cohort QC"    # title prefix used on cohort QC plots
+gene_quant_title: null    # title override for gene-quantification plots; defaults to an auto-generated title if null
 
-cohort_qc_title: "Cohort QC"
+# Gene-level expression analysis
+gene_outlier_pseudocount: 1.0    # added to normalized CPTM or MOTR before log2-transforming
+gene_outlier_shrinkage_k: 10.0    # shrinkage constant: weight on a gene's own MAD vs. the cohort-wide trend is n/(n+k)
+gene_outlier_min_mad: 0.1    # floor on the shrunk MAD, so a near-zero-variance gene can't produce an absurd z-score
 
-gene_quant_title: null
+# OMIM gene/phenotype data merged into the final hit tables
+omim_file: "resources/omim_data/OMIM.tsv"  
 
-gene_outlier_pseudocount:      1.0
-gene_outlier_shrinkage_k:     10.0
-gene_outlier_min_mad:          0.1
-gene_outlier_zscore_threshold: 3.0
-
-threads: 8
-time:    1440
+# Default cluster resources per job
+threads: 8    # 8 threads for multi-threaded jobs (some jobs are single-threaded)
+time: 1440    # 24 hours

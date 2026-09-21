@@ -1,4 +1,5 @@
 
+# Merge per-sample results into cohort-level tables, hit lists, and QC/expression plots
 from math import ceil
 
 _cohort_outdir  = config["output_dir"] + "/{cohort_id}"
@@ -37,6 +38,7 @@ def _group_junction_source_glob(group_id, tissue):
 
 
 
+# Pool each group's per-sample filtered variants and keep those recurring across enough callers/samples
 rule _9A_merge_group_variants:
     input:
         variant_files = lambda wc: _group_variant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
@@ -59,8 +61,24 @@ rule _9A_merge_group_variants:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_variants.log"
     shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles {input.variant_files} \\
+            --outprefix {params.outprefix} \\
+            --num-callers-threshold-SNV {params.num_callers_snv} \\
+            --num-callers-threshold-indel {params.num_callers_indel} \\
+            --min-DP-SNV {params.min_dp_snv} \\
+            --min-DP-indel {params.min_dp_indel} \\
+            --sample-number-threshold {params.n} \\
+            --plot \\
+            --plot-variant-type SNV indel \\
+            --title "{params.group_id} Variant Counts" \\
+        2>&1 | tee {log}
+        """
 
 
+# Pool each group's per-sample ASE results and keep the ones that clear the group-level thresholds
 rule _9B_merge_group_ase:
     input:
         ase_files = lambda wc: _group_ase_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
@@ -72,7 +90,7 @@ rule _9B_merge_group_ase:
                                         * config["merge_ase_sample_fraction"]),
         outprefix    = lambda wc, output: output.tsv[:-len(".tsv")],
         min_hap_ratio       = config["merge_min_haplotype_ratio"],
-        delta_hap_ratio_thr = config["merge_delta_haplotype_ratio_threshold"],
+        minor_hap_freq_thr  = config["merge_minor_haplotype_frequency_threshold"],
         ase_padj_thr        = config["merge_ase_padj_threshold"],
         script       = workflow.basedir + "/scripts/merge_and_filter_ase_results.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "merge_group_ase", 1)
@@ -82,8 +100,22 @@ rule _9B_merge_group_ase:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_ase.log"
     shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles {input.ase_files} \\
+            --outprefix {params.outprefix} \\
+            --min-haplotype-ratio {params.min_hap_ratio} \\
+            --minor-haplotype-frequency-threshold {params.minor_hap_freq_thr} \\
+            --padj-threshold {params.ase_padj_thr} \\
+            --plot \\
+            --title "{params.group_id}: Number of Genes with Allele-specific Expression by Sample" \\
+            --sample-number-threshold {params.n} \\
+        2>&1 | tee {log}
+        """
 
 
+# Pool each group's per-sample GTEx junction outliers (per tissue) into one group-level table
 rule _9C_merge_group_junctions:
     input:
         junction_files = lambda wc: _group_tissue_junction_files(
@@ -107,8 +139,30 @@ rule _9C_merge_group_junctions:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_junctions_{tissue}.log"
     shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles {input.junction_files} \\
+            --outprefix {params.outprefix} \\
+            --jxn-coverage-threshold {params.jxn_cov_thr} \\
+            --padj-threshold {params.jxn_padj_thr} \\
+            --delta-PSI-threshold {params.delta_psi_thr} \\
+            --event-types exon_skipping exon_inclusion alt_ss1 alt_ss2 \\
+            --sample-number-threshold {params.n} \\
+            --plot \\
+            --title "{params.group_id}: Number of Genes with Outlier Junctions by Sample" \\
+        2>&1 | tee {log}
+        SRC=$(ls {params.source_glob} 2>/dev/null | head -1)
+        if [ -z "$SRC" ]; then
+            echo "WARNING: no output file matched glob {params.source_glob}" | tee -a {log} >&2
+            exit 1
+        fi
+        cp "$SRC" {output.tsv}
+        echo "Copied $SRC -> {output.tsv}" >> {log}
+        """
 
 
+# Build each sample's ranked hit table (variant/ASE/junction evidence), without cohort junction or expression data yet
 rule _9D1_merge_group_hits_preliminary:
     input:
         variant_tsv    = _variant_tsv,
@@ -132,8 +186,22 @@ rule _9D1_merge_group_hits_preliminary:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_hits_preliminary.log"
     shell:
+        """
+        mkdir -p $(dirname {output.all_hits}) $(dirname {log})
+        python -u {params.script} \\
+            --outfile     {output.all_hits} \\
+            --variant-tsv {input.variant_tsv} \\
+            --ase-tsv     {input.ase_tsv} \\
+            --tissues     {params.tissues} \\
+            --junction-files {input.junction_files} \\
+            --cohort-junction-tsv {params.cohort_junction_tsv} \\
+            --samples     {params.samples} \\
+            {params.omim_flag} \\
+        2>&1 | tee {log}
+        """
 
 
+# Same as _9D1, but also folds in cohort junction outliers and MOTR expression z-scores (the real all_hits.tsv)
 rule _9D2_merge_group_hits_with_cohort_junctions:
     input:
         variant_tsv    = _variant_tsv,
@@ -153,7 +221,7 @@ rule _9D2_merge_group_hits_with_cohort_junctions:
         ) if config.get("gene_quantification") else [],
         gene_expression_zscores = lambda wc: (
             config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
-            + "/output/gene_quantification/by_assignment/gene_assignment_zscores_cptm.tsv"
+            + "/output/gene_quantification/by_assignment/gene_assignment_zscores_motr.tsv"
         ) if config.get("gene_quantification") else [],
     output:
         all_hits = _all_hits_tsv,
@@ -169,7 +237,6 @@ rule _9D2_merge_group_hits_with_cohort_junctions:
         ) if config.get("gene_quantification") else "",
         gene_expression_zscore_flag = lambda wc, input: (
             "--gene-expression-zscores " + str(input.gene_expression_zscores)
-            + " --gene-expression-outlier-threshold " + str(config.get("gene_outlier_zscore_threshold", 3.0))
         ) if config.get("gene_quantification") else "",
         script       = workflow.basedir + "/scripts/merge_group_hits.py",
     threads: 1
@@ -179,8 +246,25 @@ rule _9D2_merge_group_hits_with_cohort_junctions:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_hits.log"
     shell:
+        """
+        mkdir -p $(dirname {output.all_hits}) $(dirname {log})
+        python -u {params.script} \\
+            --outfile     {output.all_hits} \\
+            --variant-tsv {input.variant_tsv} \\
+            --ase-tsv     {input.ase_tsv} \\
+            --tissues     {params.tissues} \\
+            --junction-files {input.junction_files} \\
+            --cohort-junction-tsv {input.cohort_junction_tsv} \\
+            --samples     {params.samples} \\
+            {params.omim_flag} \\
+            {params.gene_expression_flag} \\
+            {params.gene_expression_motr_flag} \\
+            {params.gene_expression_zscore_flag} \\
+        2>&1 | tee {log}
+        """
 
 
+# Bar/box plots of genes with each hit category (pathogenic variant, ASE, junction, dysregulation)
 rule _9E_plot_group_hits:
     input:
         all_hits = lambda wc: _group_all_hits_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
@@ -203,6 +287,12 @@ rule _9E_plot_group_hits:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/plot_group_hits.log"
     shell:
+        """
+        python -u {params.script} \\
+            --infile {input.all_hits} \\
+            --outdir {params.outdir} \\
+        2>&1 | tee {log}
+        """
 
 
 def _group_all_hits_path(group_id):
@@ -210,6 +300,7 @@ def _group_all_hits_path(group_id):
     return str(group_outdir(group_id)) + "/merged_hits/" + fname
 
 
+# Concatenate every group's hit table into one bed-level table, plus a simplified summary version
 rule _9F_final_merge:
     input:
         all_hits = lambda wc: [_group_all_hits_path(gid) for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]],
@@ -227,8 +318,21 @@ rule _9F_final_merge:
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_final_merge.log"
     shell:
+        """
+        mkdir -p $(dirname {log})
+        awk 'FNR==1 && NR!=1 {{next}} {{print}}' {input.all_hits} > {output.merged} 2> {log}
+        echo "Finished final merge to {output.merged}." >> {log}
+
+        python -u {params.script} \\
+            --infile  {output.merged} \\
+            --outfile {output.simplified} \\
+            --alias-outfile {output.simplified_alias} \\
+            --alias-map {params.alias_args} \\
+        2>&1 | tee -a {log}
+        """
 
 
+# Upset plot of overlapping hit categories per sample
 rule _9F_plot_hits_upset:
     input:
         all_hits = _cohort_outdir + "/{bed_id}/output/merged_all_hits.tsv",
@@ -249,9 +353,19 @@ rule _9F_plot_hits_upset:
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_hits_upset.log"
     shell:
+        """
+        mkdir -p {params.outdir} $(dirname {log})
+        python -u {params.script} \\
+            --infile      {input.all_hits} \\
+            --samples     {params.samples} \\
+            --sample-types {params.sample_types} \\
+            --outdir      {params.outdir} \\
+            --title       "{params.title}" \\
+        2>&1 | tee {log}
+        """
 
 
-
+# Cohort-level QC: merge each sample's per-sample QC metric into a bed-level table + plots
 def _sample_qc_file(sample, name):
     return str(SAMPLES[sample]['outdir']) + '/qc/' + str(sample) + '_' + str(name) + '.tsv'
 
@@ -259,6 +373,7 @@ def _bed_qc_files(cohort_id, bed_id, name):
     return [_sample_qc_file(s, name) for s in bed_samples(cohort_id, bed_id)]
 
 
+# Merge on-target rates across the bed's samples, colored/grouped by sample_type
 rule _9G_merge_on_target_rates:
     input:
         infiles = lambda wc: _bed_qc_files(wc.cohort_id, wc.bed_id, "on_target"),
@@ -280,8 +395,19 @@ rule _9G_merge_on_target_rates:
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_on_target_rates.log"
     shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles   {input.infiles} \\
+            --groups    {params.groups} \\
+            --outprefix {params.outprefix} \\
+            --title     {params.title:q} \\
+            --alias-map {params.alias_args} \\
+        2>&1 | tee {log}
+        """
 
 
+# Merge read length/quality attributes across the bed's samples
 rule _9H_merge_read_attributes:
     input:
         infiles = lambda wc: _bed_qc_files(wc.cohort_id, wc.bed_id, "read_attributes"),
@@ -301,13 +427,24 @@ rule _9H_merge_read_attributes:
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_read_attributes.log"
     shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles   {input.infiles} \\
+            --outprefix {params.outprefix} \\
+            --title     {params.title:q} \\
+            --alias-map {params.alias_args} \\
+        2>&1 | tee {log}
+        """
 
 
+# Sanity-check that samples cluster by their labeled sample_type (vs. GTEx reference tissues)
 def _group_junction_matrix_inputs(group_id):
     return [(str(SAMPLES[s]['outdir']) + '/junction_analysis/junction_counts/' + str(s) + '_junction_count_matrix.tsv')
             for s in GROUPS[group_id]]
 
 
+# Combine each group's per-sample junction-count matrices into one group-level matrix
 rule _9I1_build_group_junction_matrix:
     input:
         matrices = lambda wc: _group_junction_matrix_inputs(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
@@ -323,8 +460,18 @@ rule _9I1_build_group_junction_matrix:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/group_junction_matrix.log"
     shell:
+        """
+        mkdir -p $(dirname {log})
+        python -u {params.script} \\
+            --infiles      {input.matrices} \\
+            --sample-names {params.samples} \\
+            --outfile      {output.matrix} \\
+            --threads      {threads} \\
+        2>&1 | tee {log}
+        """
 
 
+# Compare each group's junction usage against GTEx reference tissues (distance heatmap + PCA) as a sample-type QC check
 rule _9I2_validate_sample_types:
     input:
         query_matrices = lambda wc: [
@@ -352,8 +499,23 @@ rule _9I2_validate_sample_types:
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_validate_sample_types.log"
     shell:
+        """
+        mkdir -p $(dirname {log})
+        python -u {params.script} \\
+            --matrix-refs  {input.gtex_matrices} \\
+            --ref-names    {params.ref_names} \\
+            --ref-colors   {params.ref_colors} \\
+            --matrix-query {input.query_matrices} \\
+            --query-names  {params.query_names} \\
+            --query-colors {params.query_colors} \\
+            --bed          {input.bed} \\
+            --outprefix    {params.outprefix} \\
+            --alias-map    {params.alias_args} \\
+        2>&1 | tee {log}
+        """
 
 
+# Merge full-length-read ratios across the bed's samples, colored/grouped by sample_type
 rule _9J_merge_full_length_ratio:
     input:
         infiles = lambda wc: _bed_qc_files(wc.cohort_id, wc.bed_id, "full_length_ratio"),
@@ -377,9 +539,22 @@ rule _9J_merge_full_length_ratio:
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_full_length_ratio.log"
     shell:
+        """
+        mkdir -p $(dirname {output.matrix}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles      {input.infiles} \\
+            --sample-types {params.sample_types} \\
+            --colors       {params.colors} \\
+            --outprefix    {params.outprefix} \\
+            --title        {params.title:q} \\
+            --min-reads    {params.min_reads} \\
+            --alias-map    {params.alias_args} \\
+        2>&1 | tee {log}
+        """
 
 
-
+# Cohort-level gene expression: merge each group's per-sample values into a matrix (CPTM + MOTR
+# normalization, plus z-scores for outlier detection), one rule per quantification metric
 def _sample_quant_file(sample, name):
     return str(SAMPLES[sample]['outdir']) + '/gene_quantification/' + str(sample) + '_' + str(name) + '.tsv'
 
@@ -387,6 +562,9 @@ def _group_quant_files(group_id, name):
     return [_sample_quant_file(s, name) for s in GROUPS[group_id]]
 
 
+# NOTE: --outlier-zscore-threshold only feeds an unused internal flag in the quantification
+# scripts (the z-score itself is always written out); the actual gene-expression-outlier call
+# happens later, in the merge_hits/merge_group_hits step, and no longer uses this threshold.
 def _quoted_outlier_args(cid=None):
     return (
         "--outlier-pseudocount " + str(config.get("gene_outlier_pseudocount", 1.0))
@@ -396,6 +574,7 @@ def _quoted_outlier_args(cid=None):
     )
 
 
+# Read-count-based expression matrix
 rule _9K_merge_gene_count:
     input:
         infiles = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "gene_count"),
@@ -421,8 +600,20 @@ rule _9K_merge_gene_count:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_count_quantification.log"
     shell:
+        """
+        mkdir -p $(dirname {output.matrix}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles   {input.infiles} \\
+            --metric    count \\
+            --outprefix {params.outprefix} \\
+            --title     {params.title:q} \\
+            --alias-map {params.alias_args} \\
+            {params.outlier_args} \\
+        2>&1 | tee {log}
+        """
 
 
+# Coverage-based expression matrix
 rule _9L_merge_gene_coverage:
     input:
         infiles = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "gene_coverage"),
@@ -448,8 +639,20 @@ rule _9L_merge_gene_coverage:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_coverage_quantification.log"
     shell:
+        """
+        mkdir -p $(dirname {output.matrix}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles   {input.infiles} \\
+            --metric    coverage \\
+            --outprefix {params.outprefix} \\
+            --title     {params.title:q} \\
+            --alias-map {params.alias_args} \\
+            {params.outlier_args} \\
+        2>&1 | tee {log}
+        """
 
 
+# Splice-site-assignment-based expression matrix (source of the MOTR z-scores used in merged hits)
 rule _9M_merge_gene_by_assignment:
     input:
         infiles       = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "gene_assignment"),
@@ -479,8 +682,21 @@ rule _9M_merge_gene_by_assignment:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_assignment_quantification.log"
     shell:
+        """
+        mkdir -p $(dirname {output.matrix}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles       {input.infiles} \\
+            --stats-infiles {input.stats_infiles} \\
+            --outprefix     {params.outprefix} \\
+            --title         {params.title:q} \\
+            --alias-map     {params.alias_args} \\
+            {params.outlier_args} \\
+        2>&1 | tee {log}
+        """
 
 
+# AMALGAM: transcript-level expression built from each sample's StringTie assembly, merged
+# into a group transcriptome, then quantified per sample and normalized like the other metrics
 def _amalgam_group_dir(cohort_id, bed_id, sample_type):
     return config["output_dir"] + "/" + str(cohort_id) + "/" + str(bed_id) + "/output/sample_types/" + str(sample_type) + "/output/gene_quantification/by_amalgam"
 
@@ -493,6 +709,7 @@ def _amalgam_quantification_tsv(cohort_id, bed_id, sample_type, sample):
     return _amalgam_group_dir(cohort_id, bed_id, sample_type) + "/quantification/" + sample + "_transcript_quantification.tsv"
 
 
+# Merge each group's per-sample StringTie assemblies into one combined transcript GTF
 rule _9N1_amalgam_merge_gtfs:
     input:
         annotation  = config["annotation"],
@@ -514,8 +731,19 @@ rule _9N1_amalgam_merge_gtfs:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_merge_gtfs.log"
     shell:
+        """
+        mkdir -p $(dirname {output.combined_gtf}) $(dirname {log})
+        (
+            export PATH="{params.amalgam_env}/bin:$PATH"
+            echo "{input.annotation}" > {params.gtf_list}
+            for f in {input.sample_gtfs}; do echo "$f" >> {params.gtf_list}; done
+            gffcompare -i {params.gtf_list} -T -o {params.outprefix}
+            echo "Finished merging GTFs."
+        ) 2>&1 | tee {log}
+        """
 
 
+# Filter/refine the merged transcript set into this group's AMALGAM transcriptome
 rule _9N2_amalgam_build_transcriptome:
     input:
         combined_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/merged.combined.gtf",
@@ -538,8 +766,26 @@ rule _9N2_amalgam_build_transcriptome:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_build_transcriptome.log"
     shell:
+        """
+        mkdir -p $(dirname {output.filtered_gtf}) $(dirname {log})
+        (
+            export PATH="{params.amalgam_env}/bin:{params.main_env}/bin:$PATH"
+            python -u {params.amalgam_dir}/scripts/Build_Transcriptome.py \\
+                -i {params.merge_prefix} \\
+                -g {input.annotation} \\
+                -f {input.genome} \\
+                -x {params.amalgam_dir}/assets/human.refTSS_v4.1.hg38.bed.gz \\
+                -y {params.amalgam_dir}/assets/atlas.clusters.2.0.GRCh38.bed.gz \\
+                -o {output.filtered_gtf}
+            echo "Finished filtering GTF."
+            sort -k1,1V -k4,4g -k5,5g {output.filtered_gtf} | bgzip > {output.filtered_gtf_gz}
+            tabix -p gff {output.filtered_gtf_gz}
+            echo "Finished sorting and indexing GTF."
+        ) 2>&1 | tee {log}
+        """
 
 
+# Annotate the group transcriptome's ORFs
 rule _9N3_amalgam_annotate_orf:
     input:
         filtered_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/filtered.gtf",
@@ -560,8 +806,22 @@ rule _9N3_amalgam_annotate_orf:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_annotate_orf.log"
     shell:
+        """
+        mkdir -p $(dirname {output.annotated_gtf}) $(dirname {log})
+        (
+            export PATH="{params.amalgam_env}/bin:{params.main_env}/bin:$PATH"
+            python -u {params.amalgam_dir}/scripts/Annotate_ORF.py \\
+                -i {input.filtered_gtf} \\
+                -a {input.annotation} \\
+                -f {input.genome} \\
+                -o {output.annotated_gtf}
+            sort -k1,1V -k4,4g -k5,5g {output.annotated_gtf} | bgzip > {output.annotated_gtf_gz}
+            tabix -p gff {output.annotated_gtf_gz}
+        ) 2>&1 | tee {log}
+        """
 
 
+# Quantify each sample's reads against the group's AMALGAM transcriptome
 rule _9N4_amalgam_quantify_transcripts:
     input:
         bam    = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -579,8 +839,19 @@ rule _9N4_amalgam_quantify_transcripts:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/{sample}_amalgam_quantify_transcripts.log"
     shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        (
+            export PATH="{params.amalgam_env}/bin:$PATH"
+            python -u {params.amalgam_dir}/scripts/Quantify_Transcripts.py \\
+                -i {input.bam} \\
+                -g {input.gtf_gz} \\
+                -o {output.tsv}
+        ) 2>&1 | tee {log}
+        """
 
 
+# Collapse per-sample transcript-level quantifications into a group gene-level matrix
 rule _9N5_amalgam_aggregate_matrices:
     input:
         tsvs = lambda wc: [
@@ -603,8 +874,18 @@ rule _9N5_amalgam_aggregate_matrices:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_aggregate_matrices.log"
     shell:
+        """
+        mkdir -p $(dirname {output.gene_matrix}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles   {input.tsvs} \\
+            --samples   {params.samples} \\
+            --outprefix {params.outprefix} \\
+            --alias-map {params.alias_args} \\
+        2>&1 | tee {log}
+        """
 
 
+# CPTM/MOTR-normalize the AMALGAM gene matrix and compute outlier z-scores, same as the other metrics
 rule _9N6_amalgam_normalize_matrix:
     input:
         gene_matrix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/quantification/gene_amalgam_gene_matrix.tsv",
@@ -631,3 +912,15 @@ rule _9N6_amalgam_normalize_matrix:
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_normalize_matrix.log"
     shell:
+        """
+        mkdir -p $(dirname {output.matrix_raw}) $(dirname {log})
+        python -u {params.script} \\
+            --gene-matrix {input.gene_matrix} \\
+            --bed         {input.bed} \\
+            --gtf         {input.gtf} \\
+            --outprefix   {params.outprefix} \\
+            --title       {params.title:q} \\
+            --alias-map   {params.alias_args} \\
+            {params.outlier_args} \\
+        2>&1 | tee {log}
+        """

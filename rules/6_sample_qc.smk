@@ -1,4 +1,6 @@
 
+# Per-sample QC metrics, used later for cohort-level QC plots/heatmaps
+# Fraction of reads that fall within the targeted panel (BED regions)
 rule _6A_get_on_target_rate:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -12,9 +14,20 @@ rule _6A_get_on_target_rate:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
+        "{outdir}/../logs/{sample}_on_target_rate.log"
     shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --sample  {wildcards.sample} \\
+            --bam     {input.bam} \\
+            --bed     {input.bed} \\
+            --outfile {output.tsv} \\
+        2>&1 | tee {log}
+        """
 
 
+# Read length / quality distributions for this sample
 rule _6B_get_read_attributes:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -28,9 +41,20 @@ rule _6B_get_read_attributes:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
+        "{outdir}/../logs/{sample}_read_attributes.log"
     shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --sample  {wildcards.sample} \\
+            --bam     {input.bam} \\
+            --bed     {input.bed} \\
+            --outfile {output.tsv} \\
+        2>&1 | tee {log}
+        """
 
 
+# Fraction of reads spanning full-length transcripts per gene
 rule _6C_get_full_length_ratio:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -45,4 +69,15 @@ rule _6C_get_full_length_ratio:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
+        "{outdir}/../logs/{sample}_full_length_ratio.log"
     shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --sample  {wildcards.sample} \\
+            --bam     {input.bam} \\
+            --bed     {input.bed} \\
+            --gtf     {input.gtf} \\
+            --outfile {output.tsv} \\
+        2>&1 | tee {log}
+        """

@@ -1,4 +1,5 @@
 
+# Assign reads to haplotypes per gene using trusted het variants, for use in ASE/junction analysis
 rule _3A_phase_reads:
     input:
         bam     = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -23,4 +24,24 @@ rule _3A_phase_reads:
         mem_mb = lambda wc, threads, attempt: max(4096, int(attempt * threads * 1.5 * 1024)),
         runtime    = config["time"],
     log:
+        "{outdir}/../logs/{sample}_phase_reads.log"
     shell:
+        """
+        mkdir -p $(dirname {output.ase_infile})
+        python -u {params.script} \\
+            --bam        {input.bam} \\
+            --bed        {input.bed} \\
+            --nanoTS-vcf       {input.nanots} \\
+            --clair3-vcf       {input.clair3} \\
+            --deepvariant-vcf  {input.deepvar} \\
+            --min-dp     {params.min_dp} \\
+            --min-af     {params.min_af} \\
+            --genome     {params.genome} \\
+            --outdir     {params.phased_dir} \\
+            --name       {wildcards.sample} \\
+            --threads    {threads} \\
+            --phasing-threshold             {params.phasing_thr} \\
+            --terminal-variant-proportion   {params.terminal_prop} \\
+            --min-distance-from-read-end    {params.min_dist} \\
+        2>&1 | tee {log}
+        """

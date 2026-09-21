@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 #
-# setup.sh
-#
 # Builds this pipeline's conda environments and downloads/prepares everything under resources/ that config/config.yaml expects by default
 
 set -euo pipefail
@@ -52,13 +50,8 @@ echo "  Progress: tail -f $CONDA_ENV_LOG"
         if ! "$CONDA_BIN" env create "$@"; then
             cat <<'EOF'
 
-  Environment creation failed. If the error above mentions
-  "SOLVER_RULE_STRICT_REPO_PRIORITY" or reports unrelated packages
-  (htslib/pysam/snakemake/...) as mutually unsatisfiable, this is a known
-  libmamba-solver bug under strict channel priority. This script already
-  sets CONDA_CHANNEL_PRIORITY=flexible to work around it, but if that
-  didn't take effect for some reason, try setting it globally and re-run:
-      conda config --set channel_priority flexible
+  Environment creation failed. If the error above mentions "SOLVER_RULE_STRICT_REPO_PRIORITY" or reports unrelated packages
+  (htslib/pysam/snakemake/...) as mutually unsatisfiable, this is a known libmamba-solver bug under strict channel priority.
 EOF
             return 1
         fi
@@ -146,10 +139,9 @@ log "longcallR v1.12.0"
         cat <<EOF
   MISSING: $LONGCALLR_BIN
 
-  longcallR should have been installed via bioconda as part of the main
-  conda_env build (see environment.yaml) in the "Conda environments" step above.
+  longcallR should have been installed via bioconda as part of the main conda_env build.
   If conda_env built successfully but this binary still isn't here, check
-  "$CONDA_ENV_DIR/bin/" directly for what conda actually installed it as --
+  "$CONDA_ENV_DIR/bin/" directly for what conda actually installed it as and
   update config.yaml's longcallr_bin to match if the name differs from "longcallR".
 EOF
     fi
@@ -182,7 +174,7 @@ SAMPLE_ATTRIBUTES="$GTEX_RAW_DIR/GTEx_Analysis_v11_Annotations_SampleAttributesD
 fetch "https://storage.googleapis.com/adult-gtex/bulk-gex/v11/rna-seq/GTEx_Analysis_2025-08-22_v11_STARv2.7.11b_junctions.gct.gz" "$JUNCTIONS_GZ"
 fetch "https://storage.googleapis.com/adult-gtex/annotations/v11/metadata-files/GTEx_Analysis_v11_Annotations_SampleAttributesDS.txt" "$SAMPLE_ATTRIBUTES"
 
-# Phase 1: identify sample IDs per tissue, building one combined sample->tissue map.
+# Identify sample IDs per tissue
 COMBINED_MAP="$GTEX_RAW_DIR/combined_sample_tissue_map.txt"
 : > "$COMBINED_MAP"
 tissues_to_filter=()
@@ -232,7 +224,7 @@ if [ "${#tissues_to_filter[@]}" -eq 0 ]; then
 else
     echo "  Filtering junction count matrix for ${#tissues_to_filter[@]} tissue(s) in a single pass: ${tissues_to_filter[*]}..."
 
-    # Phase 2: Write each tissue's columns to its own temp output file
+    # Write each tissue's columns to its own temp output file
     zcat "$JUNCTIONS_GZ" | tail -n +3 | awk -F'\t' -v OFS='\t' -v idx_name='Name' -v outdir="$GTEX_RAW_DIR" '
         NR==FNR { tissue_of[$1] = $2; next }
         FNR==1 {
@@ -301,9 +293,8 @@ echo "  expect to add more and want to reclaim the disk space.)"
 ##############################################################################
 log "gnomAD"
 ##############################################################################
-# Downloaded locally by default (gnomAD v4.1 genomes sites, chrM from v3.1 ->).
-# To query the remote HTTPS URL instead, set SKIP_GNOMAD=y and point gnomad_base/
-# gnomad_mito_vcf at their https:// values in config.yaml.
+# Downloaded locally by default (gnomAD v4.1 genomes sites, chrM from v3.1 ->) (~600G).
+# To query the remote HTTPS URL instead, set SKIP_GNOMAD=y and point gnomad_base and gnomad_mito_vcf to their https:// values in config.yaml.
 GNOMAD_LOG="$RESOURCES_DIR/.setup_logs/gnomad.log"
 echo "  Progress: tail -f $GNOMAD_LOG"
 GNOMAD_CHROMS=(chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 \
@@ -335,7 +326,7 @@ GNOMAD_PARALLEL="${GNOMAD_PARALLEL:-6}"
 log "ClinVar"
 ##############################################################################
 # Downloaded locally by default (GRCh38 VCF, ~200MB).
-# Set SKIP_CLINVAR=y to skip and keep clinvar_vcf's https:// value in config.yaml.
+# Set SKIP_CLINVAR=y to skip and set clinvar_vcf's https:// value in config.yaml.
 CLINVAR_LOG="$RESOURCES_DIR/.setup_logs/clinvar.log"
 echo "  Progress: tail -f $CLINVAR_LOG"
 (
@@ -463,26 +454,15 @@ PYEOF
     fi
 
     echo "  Running CADD's own installer, answering its prompts automatically"
-    echo "  (safe to rerun -- annotations/prescored are skipped above if already"
-    echo "  present on disk, since install.sh has no such check of its own;"
-    echo "  conda env creation is always requested since Snakemake's conda"
-    echo "  integration skips any env that's already complete):"
-    echo "    1. Install conda/mamba environments?  -> y (idempotent -- Snakemake"
-    echo "       skips any env under $CADD_DIR/envs/conda already complete)"
+    echo "    1. Install conda/mamba environments?"
     echo "    2. Install CADD for GRCh37/hg19?       -> n (not used by this pipeline;"
-    echo "       NOTE this prompt defaults to YES if left unanswered -- a 261GB+ download)"
-    echo "    3. Install CADD for GRCh38/hg38?       -> y (must always be y -- the"
-    echo "       annotations/prescored downloads below are nested under this answer)"
+    echo "    3. Install CADD for GRCh38/hg38?       -> y"
     echo "    4. Load annotations?                   -> \$ann_answer (~336GB if needed)"
     echo "    5. Load prescored variants?             -> \$pre_answer (~81GB if needed;"
-    echo "       speeds up scoring -- the prescored SNV file covers all possible"
-    echo "       genome-wide SNVs, so any SNV this pipeline queries hits the cache"
-    echo "       instead of being computed from scratch)"
+    echo "       speeds up scoring -- the prescored SNV file covers all possible genome-wide SNVs,"
+    echo "       so any SNV this pipeline queries does not need to be computed from scratch)"
     echo "    6-8. (only asked if #5 is y) with-anno / without-anno / InDels"
-    echo "       prescored -> n / \$pre_answer / \$pre_answer (skipped entirely if #5 is n --"
-    echo "       install.sh does NOT ask these when prescored=n, so sending answers for"
-    echo "       them anyway would misalign with the final 'Ready to continue?' prompt"
-    echo "       and cancel the install)"
+    echo "       prescored -> n / \$pre_answer / \$pre_answer"
     echo "    9. Ready to continue?                   -> y"
     if [ "$pre_answer" = "y" ]; then
         printf 'y\nn\ny\n%s\ny\nn\ny\ny\ny\n' "$ann_answer" | \
@@ -514,7 +494,7 @@ PYEOF
             # 3.20 is the first incompatible release, so a string comparison is enough.
             case "$CURRENT_PROTOBUF" in
                 ""|3.19.*|3.1[0-8].*|3.[0-9].*|2.*)
-                    ;;  # already <3.20 (or pip show failed) -- nothing to do
+                    ;;
                 *)
                     echo "  Downgrading protobuf ($CURRENT_PROTOBUF -> <3.20) in the already-built"
                     echo "  regulatory-sequence env ($BUILT_REGSEQ_ENV_DIR)."
@@ -524,9 +504,8 @@ PYEOF
         fi
     fi
 
-    # Generate CADD_wrapper.sh -- what config.yaml's cadd_script should point to. 
-    # It builds its own clean PATH (stripping conda_env_compile_variants's bin/, so its `perl`
-    # doesn't leak into CADD.sh's per-rule conda environments).
+    # Generate CADD_wrapper.sh -- what config.yaml's cadd_script should point to. It builds its own clean PATH 
+    # (stripping conda_env_compile_variants's bin/, so its `perl` doesn't leak into CADD.sh's per-rule conda environments).
     CADD_WRAPPER="$CADD_DIR/CADD_wrapper.sh"
     cat > "$CADD_WRAPPER" <<WRAPPER_EOF
 #!/bin/bash
@@ -547,9 +526,8 @@ WRAPPER_EOF
     chmod +x "$CADD_WRAPPER"
     echo "  Generated $CADD_WRAPPER (point config.yaml's cadd_script here, not at CADD.sh)."
 
-    # Run a real scoring pass against CADD-scripts' bundled test VCF, once, -- this builds every conda env
-    # CADD.sh needs and confirms scoring works before any real sample touches it, avoiding a race between concurrent
-    # compile_variants.py runs each trying to build the same missing env.
+    # Run a real scoring pass against CADD-scripts' bundled test VCF, once, -- this builds every conda env CADD.sh needs
+    # and confirms scoring works before any real sample touches it, avoiding concurrent compile_variants.py runs each trying to build the same missing env.
     if [ "$RUN_CADD_TEST" = "n" ]; then
         echo "  Skipping the real scoring pass (user chose to trust the installation)."
         echo "  Conda envs will instead get built/finished on first real use."
@@ -587,13 +565,10 @@ log "ANNOVAR (requires free registration -- cannot be auto-downloaded)"
     3. Extract it so that its contents land directly in:
          $ANNOVAR_DIR
        (i.e. $ANNOVAR_DIR/annotate_variation.pl etc., not a nested subfolder)
-    4. Download the refGene annotation database this pipeline uses (NOT
-       refGeneWithVer -- table_annovar.pl is called with -protocol refGene
-       specifically, and the two are different databases):
+    4. Download the refGene annotation database this pipeline uses:
          cd $ANNOVAR_DIR
          perl annotate_variation.pl -downdb -webfrom annovar -buildver hg38 refGene humandb/
-       This should produce humandb/hg38_refGene.txt and
-       humandb/hg38_refGeneMrna.fa (not *WithVer*).
+       This should produce humandb/hg38_refGene.txt and humandb/hg38_refGeneMrna.fa.
 EOF
     fi
 ) || error "ANNOVAR check failed"
@@ -601,7 +576,6 @@ EOF
 ##############################################################################
 log "SpliceAI precomputed scores (requires a free BaseSpace account -- cannot be auto-downloaded)"
 ##############################################################################
-# Masked (not raw) is the right choice -- matches this pipeline's live `spliceai -M 1` invocation.
 (
     SPLICEAI_DIR="$RESOURCES_DIR/spliceai_data"
     SPLICEAI_SNV="$SPLICEAI_DIR/spliceai_scores.masked.snv.hg38.vcf.gz"
@@ -614,9 +588,7 @@ log "SpliceAI precomputed scores (requires a free BaseSpace account -- cannot be
   MISSING: $SPLICEAI_SNV (+.tbi)
            $SPLICEAI_INDEL (+.tbi)
 
-  SpliceAI's precomputed scores are only distributed via Illumina BaseSpace,
-  which requires a free account -- they can't be fetched with a plain
-  wget/curl the way gnomAD/ClinVar are above:
+  SpliceAI's precomputed scores are only distributed via Illumina BaseSpace, which requires a free account.
     1. Create a free BaseSpace account (if you don't already have one):
          https://basespace.illumina.com
     2. Go to the SpliceAI precomputed scores project:
@@ -624,8 +596,6 @@ log "SpliceAI precomputed scores (requires a free BaseSpace account -- cannot be
     3. Download the GRCh38, MASKED SNV and INDEL files:
          spliceai_scores.masked.snv.hg38.vcf.gz (+ .tbi)
          spliceai_scores.masked.indel.hg38.vcf.gz (+ .tbi)
-       (NOT the raw.* files, and NOT the hg37/hg19 build -- see the note
-       above on why masked is the right choice for this pipeline)
     4. Place all four files directly in:
          $SPLICEAI_DIR
        (i.e. $SPLICEAI_SNV etc., not a nested subfolder)
@@ -651,27 +621,17 @@ log "OMIM (bundled with this repo -- see below for how to refresh it)"
   MISSING: $OMIM_FILE
 
   This is unexpected -- OMIM.tsv is normally bundled with this repo, so if
-  it's missing, something didn't copy over correctly when this repo was
-  cloned/copied (check whether $RESOURCES_DIR/omim_data/ itself exists
-  and what it actually contains).
+  it's missing, something didn't copy over correctly when this repo was cloned/copied.
 
-  If you want to update to a newer OMIM release instead (OMIM's own data is
-  periodically updated; this repo's bundled copy is a point-in-time
-  snapshot), OMIM data requires an institutional license
-  (https://omim.org/downloads). Download an updated copy and replace:
+  If you want to update to a newer OMIM release, OMIM data requires an institutional license (https://omim.org/downloads).
+  Download an updated copy and replace:
     $OMIM_FILE
 
-  Whatever you put there must be a tab-separated file containing (at least)
-  these four columns -- scripts/merge_hits.py reads only these, any others are ignored:
-    approved_gene_symbol   Gene symbol -- joined against this pipeline's own
-                            ANNOVAR-derived gene symbols (ANNOVAR_Gene.refGene),
-                            so naming convention/casing needs to match those.
-    phenotypes              Associated disease phenotype(s), passed through
-                            as-is into the final merged output.
-    inheritance_patterns    Associated inheritance pattern(s) (e.g. autosomal
-                            recessive), passed through as-is.
-    haploinsufficient       TRUE/FALSE. Only affects tiering for AD/XLD genes.
-                            Empty/missing is treated the same as FALSE.
+  Whatever you put there must be a tab-separated file containing (at least) these four columns:
+    approved_gene_symbol    Gene symbol
+    phenotypes              Associated disease phenotype(s)
+    inheritance_patterns    Associated inheritance pattern(s)
+    haploinsufficient       TRUE/FALSE. Only affects tiering for AD/XLD genes. Empty/missing is treated the same as FALSE.
 EOF
     fi
 ) || error "OMIM check failed"
@@ -679,9 +639,8 @@ EOF
 ##############################################################################
 log "AMALGAM (used by rules/9_merge_results.smk)"
 ##############################################################################
-# Isoform discovery/quantification pipeline (github.com/RNA-ROB/amalgam).
-# Gets its own dedicated conda env (same pattern as conda_env_compile_variants) so its pinned dependencies can't conflict
-# with the rest of the pipeline's.
+# Isoform discovery/quantification (github.com/RNA-ROB/amalgam).
+# Gets its own dedicated conda env so its pinned dependencies can't conflict with the rest of the pipeline's.
 AMALGAM_LOG="$RESOURCES_DIR/.setup_logs/amalgam.log"
 (
     AMALGAM_DIR="$RESOURCES_DIR/amalgam"

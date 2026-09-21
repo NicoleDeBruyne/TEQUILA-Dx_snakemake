@@ -1,4 +1,5 @@
 
+# Merge the four callers' VCFs into one annotated table, then filter to reportable variants
 def _gnomad_vcf_list(base, mito_vcf):
     chroms = config["gnomad_chroms"]
     vcfs   = [(str(base) + '/gnomad.genomes.v4.1.sites.' + str(c) + '.vcf.bgz') for c in chroms]
@@ -23,6 +24,7 @@ def _final_af_flag(wc):
     return ('--final-AF-threshold ' + str(v)) if str(v).strip() != "" else ""
 
 
+# Merge the 4 callers' calls per sample and annotate with gnomAD/ClinVar/ANNOVAR/CADD/SpliceAI
 rule _2A_compile_variants:
     input:
         longcallr  = "{outdir}/variant_calling/longcallR/{sample}_longcallR_norm.vcf.gz",
@@ -61,9 +63,52 @@ rule _2A_compile_variants:
         mem_mb     = lambda wc, threads, attempt: max(4096, attempt * threads * 16 * 1024),
         runtime    = config["time"],
     log:
+        "{outdir}/../logs/{sample}_compile_variants.log"
     shell:
+        """
+        mkdir -p $(dirname {params.outprefix})
+        export PATH="{params.conda_env_compile_variants}/bin:$PATH"
+        python -u {params.script} \\
+            --vcf-files \\
+                {input.longcallr} \\
+                {input.nanots} \\
+                {input.clair3} \\
+                {input.deepvar} \\
+            --vcf-file-names \\
+                {wildcards.sample}_longcallR \\
+                {wildcards.sample}_nanoTS \\
+                {wildcards.sample}_clair3_rna \\
+                {wildcards.sample}_deepvariant \\
+            --outprefix {params.outprefix} \\
+            --sample-name {wildcards.sample} \\
+            --bed {input.bed} \\
+            --genome {params.genome} \\
+            --gtf {params.annotation} \\
+            --gnomad-vcf {params.gnomad_vcf} \\
+            --gnomad-vcf-fallback {params.gnomad_vcf_fallback} \\
+            --clinvar-vcf {params.clinvar_vcf} \\
+            --clinvar-vcf-fallback {params.clinvar_vcf_fallback} \\
+            --ANNOVAR "{params.annovar_dir}" \\
+            --CADD-script "{params.cadd_script}" \\
+            --CADD-data-dir "{params.cadd_data_dir}" \\
+            --CADD-local-prescored-snv "{params.cadd_local_prescored_snv}" \\
+            --CADD-local-prescored-indel "{params.cadd_local_prescored_indel}" \\
+            --CADD-prescored-url {params.cadd_prescored_url} \\
+            --CADD-gnomadAF-threshold {params.cadd_gnomad_af} \\
+            --CADD-CLNSIG-filter {params.cadd_clnsig} \\
+            --include-SpliceAI-scores \\
+            --SpliceAI-annotation {params.spliceai_annotation} \\
+            --SpliceAI-prescored-snv-vcf "{params.spliceai_prescored_snv}" \\
+            --SpliceAI-prescored-indel-vcf "{params.spliceai_prescored_indel}" \\
+            {params.spliceai_force_prescored} \\
+            --SpliceAI-gnomadAF-threshold {params.spliceai_gnomad_af} \\
+            --SpliceAI-CLNSIG-filter {params.spliceai_clnsig} \\
+            --threads {threads} \\
+        2>&1 | tee {log}
+        """
 
 
+# Apply the final gnomAD AF/CLNSIG/CADD/SpliceAI/DP/AF thresholds to the compiled table
 rule _2B_filter_variants:
     input:
         tsv = "{outdir}/variant_calling/compiled_variants/{sample}_compiled_variants.tsv",
@@ -83,4 +128,18 @@ rule _2B_filter_variants:
         mem_mb  = lambda wc, attempt: max(2048, attempt * 4 * 1024),
         runtime = config["time"],
     log:
+        "{outdir}/../logs/{sample}_filter_variants.log"
     shell:
+        """
+        export PATH="{params.conda_env_compile_variants}/bin:$PATH"
+        python -u {params.script} \\
+            --compiled-tsv {input.tsv} \\
+            --outfile {output.filtered_tsv} \\
+            --final-gnomadAF-threshold {params.gnomad_af} \\
+            --final-CLNSIG-filter {params.clnsig} \\
+            --final-CADD-phred-threshold {params.cadd_thr} \\
+            --final-SpliceAI-threshold {params.spliceai_thr} \\
+            {params.final_dp_flag} \\
+            {params.final_af_flag} \\
+        2>&1 | tee {log}
+        """

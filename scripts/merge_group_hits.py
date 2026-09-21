@@ -48,17 +48,11 @@ def parse_args():
              "--gene-expression-matrix. If omitted/missing, relative_gene_expression_motr/"
              "cohort_relative_gene_expression_motr are filled with '.'.")
     parser.add_argument("--gene-expression-zscores", required=False, default=None,
-        help="Group-level low-expression outlier z-score matrix (rule _9M's "
-             "<outprefix>_zscores_cptm.tsv, from quantify_gene_by_assignment.py -- see "
+        help="Group-level MOTR-normalized low-expression z-score matrix (rule _9M's "
+             "<outprefix>_zscores_motr.tsv, from quantify_gene_by_assignment.py -- see "
              "scripts/expression_outliers.py's module docstring for the algorithm). Same shape "
-             "as --gene-expression-matrix. If omitted/missing, gene_expression_zscore/"
-             "gene_expression_outlier are filled with '.'. Annotation only -- does NOT currently "
-             "factor into a gene's tier.")
-    parser.add_argument("--gene-expression-outlier-threshold", type=float, default=3.0,
-        help="A sample/gene is annotated gene_expression_outlier=True when its z-score (from "
-             "--gene-expression-zscores) is <= -this value. Should match whatever "
-             "--outlier-zscore-threshold quantify_gene_by_assignment.py was run with, for the "
-             "boolean flag to mean what its name says. Default: 3.0")
+             "as --gene-expression-matrix. If omitted/missing, gene_expression_zscore_motr is "
+             "filled with '.'. Annotation only -- does NOT currently factor into a gene's tier.")
     parser.add_argument("--debug-sample", required=False, default=None,
         help="If set, print diagnostic detail (to stderr) for this one sample: the gene list surviving "
              "the per-sample variant_df slice, and the gene list in build_hit_table's output -- useful "
@@ -190,7 +184,6 @@ def main():
             sample, omim_df, gene_expression_df,
             gene_expression_motr_df=gene_expression_motr_df,
             gene_expression_zscore_df=gene_expression_zscore_df,
-            gene_expression_outlier_threshold=args.gene_expression_outlier_threshold,
         )
 
         if args.debug_sample and str(sample) == args.debug_sample:

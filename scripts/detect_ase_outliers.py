@@ -16,7 +16,7 @@ def parse_args():
     parser.add_argument("--phasing-threshold", type=float, default=0.5, help="Minimum proportion of max coverage that phased to haplotypes for analysis")
     parser.add_argument('--sample-coverage-threshold', type=int, default=20, help='Minimum coverage required over the gene in the sample of interest for analysis')
     parser.add_argument('--padj-threshold', default=0.05, type=float, help='Maximum adjusted p-value to be considered an outlier. (default: 0.05)')
-    parser.add_argument('--haplotype-ratio-threshold', default=0.1, type=float, help='Minimum difference in haplotype ratio to be considered an outlier. (default: 0.1)')
+    parser.add_argument('--minor-haplotype-frequency-threshold', default=0.4, type=float, help='A gene is considered an outlier when its minor-haplotype fraction (ratio) is below this value. (default: 0.4)')
     parser.add_argument('--plot-volcano', action='store_true', help='Plot a volcano plot of difference in haplotype ratio vs. -log10(p-value) for all junctions.')
     parser.add_argument('--label-top-n-hits', default=0, type=int, help='Label the top N hits in the volcano plot.')
     parser.add_argument('--outprefix', required=True, type=str, help='Prefix for final output files (i.e. prefix_ase_results.tsv and prefix_ase_outliers.tsv)')
@@ -38,7 +38,7 @@ def process_gene(hap1_count, hap2_count, max_coverage, max_phased_coverage,
     p_value = binomial_test(hap1_count, hap2_count)
     return ratio, float(ratio - 0.5), p_value
 
-def plot_volcano(df, outprefix, padj_threshold, haplotype_ratio_threshold, n=0):
+def plot_volcano(df, outprefix, padj_threshold, minor_haplotype_frequency_threshold, n=0):
 
     df = df.copy()
     df['padj'] = df['padj'].replace(0, np.nextafter(0, 1)).astype('float64')
@@ -50,13 +50,15 @@ def plot_volcano(df, outprefix, padj_threshold, haplotype_ratio_threshold, n=0):
     df['combined_score'] = df['rank_diff'] + df['rank_padj']
     top_hits = df.nsmallest(min(n, len(df)), 'combined_score')
 
+    # diff = ratio - 0.5, so a minor-fraction threshold maps to a single point on the diff axis
+    diff_threshold = minor_haplotype_frequency_threshold - 0.5
+
     fig, ax = plt.subplots(figsize=(10, 8))
     ax.scatter(df['diff'], df['-log10_padj'], color='black', s=1)
     ax.set_xlabel('Difference in haplotype ratio')
     ax.set_ylabel('-log10(p-value)')
     ax.axhline(-np.log10(padj_threshold), color='red', linestyle='--')
-    ax.axvline(haplotype_ratio_threshold, color='red', linestyle='--')
-    ax.axvline(-haplotype_ratio_threshold, color='red', linestyle='--')
+    ax.axvline(diff_threshold, color='red', linestyle='--')
     for _, row in top_hits.iterrows():
         ax.text(row['diff'], row['-log10_padj'], row['gene'],
                 fontsize=6, color='red', ha='left', va='bottom', zorder=100, rotation=45)
@@ -132,7 +134,7 @@ def main():
     print('Identifying outliers based on user-defined thresholds...')
     outliers = df[
         (pd.to_numeric(df['padj'], errors='coerce') < args.padj_threshold) &
-        (abs(pd.to_numeric(df['diff'], errors='coerce')) >= args.haplotype_ratio_threshold)
+        (pd.to_numeric(df['ratio'], errors='coerce') < args.minor_haplotype_frequency_threshold)
     ]
     outliers.to_csv(outlier_outfile, sep='\t', index=False)
     print(f'ASE outliers written to {outlier_outfile}')
@@ -142,7 +144,7 @@ def main():
         plot_df = df.dropna(subset=['diff', 'padj'])
         plot_df = plot_df[plot_df['padj'] != 'n/a']
         plot_volcano(plot_df, args.outprefix, args.padj_threshold,
-                     args.haplotype_ratio_threshold, args.label_top_n_hits)
+                     args.minor_haplotype_frequency_threshold, args.label_top_n_hits)
         print(f'Volcano plot written to {args.outprefix}_volcano_plot.png/.pdf')
 
 if __name__ == "__main__":

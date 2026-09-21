@@ -43,6 +43,7 @@ def parse_args():
 def filter_variants(input_df, args):
     filtered_df = input_df.copy()
 
+    # Drop common variants (allow through anything without a usable gnomAD AF)
     if args.final_gnomadAF_threshold:
         if 'gnomAD_AF' not in filtered_df.columns:
             print(f"\nWARNING: gnomAD_AF column not found in DataFrame. Skipping filter.")
@@ -52,12 +53,15 @@ def filter_variants(input_df, args):
                 (gnomad_num <= args.final_gnomadAF_threshold) | filtered_df['gnomAD_AF'].isin(['.', 'fail'])
             ]
 
+    # Drop variants explicitly classified as one of these (e.g. Benign)
     if args.final_CLNSIG_filter:
         if 'CLNSIG' not in filtered_df.columns:
             print(f"\nWARNING: CLNSIG column not found in DataFrame. Skipping filter.")
         else:
             filtered_df = filtered_df[~filtered_df['CLNSIG'].isin(args.final_CLNSIG_filter)]
 
+    # Require CADD and/or SpliceAI to predict some functional impact; a variant with no
+    # CADD score at all is let through rather than penalized for a missing annotation
     if args.final_CADD_phred_threshold or args.final_SpliceAI_threshold:
         cadd_missing = pd.Series(False, index=filtered_df.index)
         cadd_high = pd.Series(False, index=filtered_df.index)
@@ -94,6 +98,7 @@ def filter_variants(input_df, args):
 
         filtered_df = filtered_df[keep_mask]
 
+    # Require minimum read depth (DP), parsed out of the VCF-style FORMAT:value columns
     if args.final_DP_threshold:
         if 'format' not in filtered_df.columns or 'value' not in filtered_df.columns:
             print(f"\nWARNING: format or value column not found in DataFrame. Skipping filter.")
@@ -107,6 +112,7 @@ def filter_variants(input_df, args):
                 return pd.isna(dp) or dp >= args.final_DP_threshold
             filtered_df = filtered_df[filtered_df.apply(_dp_ok, axis=1)]
 
+    # Require minimum allele frequency (AF or VAF, whichever is present)
     if args.final_AF_threshold:
         if 'format' not in filtered_df.columns or 'value' not in filtered_df.columns:
             print(f"\nWARNING: format or value column not found in DataFrame. Skipping filter.")
@@ -122,6 +128,9 @@ def filter_variants(input_df, args):
                 return True
             filtered_df = filtered_df[filtered_df.apply(_af_ok, axis=1)]
 
+    # A "Conflicting classifications" CLNSIG value bundles several individual calls together
+    # (e.g. "Conflicting_classifications_of_pathogenicity:Pathogenic(2)|Benign(1)") -- unpack it
+    # so a conflicting call still counts if any of its component classifications is pathogenic
     def extract_CLNSIG_from_CLNSIGCONF(CLNSIG):
         if pd.isna(CLNSIG):
             return []
@@ -129,6 +138,7 @@ def filter_variants(input_df, args):
             return [t.strip() for t in [x.split("(")[0] for x in CLNSIG.split(":", 1)[1].split("|")] if t.strip()]
         return [CLNSIG]
 
+    # Rescue pathogenic variants regardless of the filters above -- these are always kept
     if args.keep_CLNSIG:
         if 'CLNSIG' not in filtered_df.columns:
             print(f"\nWARNING: CLNSIG column not found in DataFrame. Skipping filter.")
