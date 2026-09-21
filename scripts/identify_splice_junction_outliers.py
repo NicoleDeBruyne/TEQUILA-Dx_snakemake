@@ -1,16 +1,4 @@
-#!/usr/bin/env python3
 
-# Author: Nicole DeBruyne (Lin Lab)
-# Date: 2024.01.17
-# Adapted from Robert Wang (Xing Lab)
-# Optimized: 2025
-#
-# Single vectorized pandas filter over one input file -- no per-item loop,
-# so there's nothing here for a thread/process pool to parallelize (unlike
-# scripts/perform_splice_junction_beta_binomial_tests.py, which does the
-# actual per-gene statistical testing upstream of this filtering step).
-# Always single-threaded; see rules/5_junction_analysis.smk's
-# _5C_identify_junction_outliers, which requests threads: 1 accordingly.
 
 import os, argparse, warnings
 import pandas as pd
@@ -43,7 +31,6 @@ def parse_args():
 
 
 def plot_volcano(df, outfile, padj_threshold, delta_PSI_threshold, n=0):
-    """Plot a volcano plot of delta PSI vs. -log10(p-value) for all junctions."""
 
     df = df.copy()
     df['padj'] = df['padj'].replace(0, np.nextafter(0, 1)).astype('float64')
@@ -71,7 +58,6 @@ def plot_volcano(df, outfile, padj_threshold, delta_PSI_threshold, n=0):
 
 
 def main():
-    """Main script."""
 
     print("\n\n\n******************************************************************************************")
     print("Identifying splice junction outliers...")

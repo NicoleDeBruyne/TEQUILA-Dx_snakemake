@@ -1,17 +1,10 @@
-#!/usr/bin/env python
 
-# Split out of compile_variants.py so that changing a final filter
-# threshold (gnomAD AF, CLNSIG, CADD, SpliceAI, DP, AF) doesn't require
-# re-running annotation (ANNOVAR, gnomAD, ClinVar, CADD, SpliceAI) --
-# this script just reads compile_variants.py's
-# {outprefix}_compiled_variants.tsv output and re-filters it.
 
 import argparse
 import pandas as pd
 
 
 def parse_args():
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="Apply final filtering thresholds to a variants tsv produced by "
                     "compile_variants.py ({outprefix}_compiled_variants.tsv), and write "
@@ -48,7 +41,6 @@ def parse_args():
 
 
 def filter_variants(input_df, args):
-    """Filter variants based on user-defined criteria."""
     filtered_df = input_df.copy()
 
     if args.final_gnomadAF_threshold:
@@ -67,13 +59,6 @@ def filter_variants(input_df, args):
             filtered_df = filtered_df[~filtered_df['CLNSIG'].isin(args.final_CLNSIG_filter)]
 
     if args.final_CADD_phred_threshold or args.final_SpliceAI_threshold:
-        # A variant is kept if: its CADD score is missing/unscored (we never
-        # want to drop something CADD couldn't evaluate), OR its CADD score
-        # is high enough, OR its SpliceAI score is high enough. A missing
-        # SpliceAI score is NOT treated as a pass on its own -- it only
-        # matters as a tiebreaker when CADD is present but low. So a variant
-        # only gets dropped when CADD was actually computed and is low, and
-        # SpliceAI is either also low or missing.
         cadd_missing = pd.Series(False, index=filtered_df.index)
         cadd_high = pd.Series(False, index=filtered_df.index)
         spliceai_high = pd.Series(False, index=filtered_df.index)
@@ -92,9 +77,6 @@ def filter_variants(input_df, args):
             else:
                 thr = args.final_SpliceAI_threshold
                 def _spliceai_score(x):
-                    """Max of the four DS_* SpliceAI delta scores, or NaN if
-                    missing/unscored -- NaN compares False against >= thr,
-                    so a missing SpliceAI score never counts as 'high'."""
                     if x in ('.', 'fail', '', None):
                         return float('nan')
                     vals = [pd.to_numeric(s, errors='coerce') for s in str(x).split('|')[2:6]]
@@ -116,7 +98,6 @@ def filter_variants(input_df, args):
         if 'format' not in filtered_df.columns or 'value' not in filtered_df.columns:
             print(f"\nWARNING: format or value column not found in DataFrame. Skipping filter.")
         else:
-            # Vectorised DP extraction
             def _dp_ok(row):
                 fmt = row['format'].split(':')
                 if 'DP' not in fmt:
@@ -141,7 +122,6 @@ def filter_variants(input_df, args):
                 return True
             filtered_df = filtered_df[filtered_df.apply(_af_ok, axis=1)]
 
-    # Ensure variants with keep-CLNSIG values are preserved regardless of other filters
     def extract_CLNSIG_from_CLNSIGCONF(CLNSIG):
         if pd.isna(CLNSIG):
             return []
@@ -164,7 +144,6 @@ def filter_variants(input_df, args):
 
 
 def main():
-    """Main function."""
 
     print(f"\n\n\n******************************************************************************************")
     print(f"Filtering variants...")
@@ -179,11 +158,6 @@ def main():
             args.final_DP_threshold or args.final_AF_threshold):
         filtered_df = filter_variants(df, args)
     else:
-        # No thresholds configured at all -- nothing to filter, pass
-        # everything through untouched (keep-CLNSIG's default value alone
-        # shouldn't be treated as "no filters configured", but with no
-        # other threshold active there's nothing for it to rescue from,
-        # so this is equivalent).
         print(f"\nNo final filter thresholds configured. Writing input through unfiltered.")
         filtered_df = df
 

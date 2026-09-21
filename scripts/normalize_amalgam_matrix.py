@@ -1,42 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/normalize_amalgam_matrix.py
-
-Second AMALGAM step, run after scripts/aggregate_amalgam_matrices.py (which
-stays focused on what it already did: assembling every sample's transcript-
-level AMALGAM output into cohort-wide transcript_matrix.tsv/gene_matrix.tsv
-under by_amalgam/quantification/, keyed by AMALGAM's own gene_id namespace
--- reference-matched genes keep the reference GTF's Ensembl gene_id;
-novel loci get GffCompare's own XLOC_... id). This script picks up that
-raw, genome-wide, Ensembl/XLOC-keyed gene_matrix.tsv and produces the same
-targeted-panel outputs the other three quantification methods produce, at
-the base by_amalgam/ directory (a sibling of annotation/ and
-quantification/, not inside either):
-
-  gene_amalgam_matrix_raw.tsv    -- targeted-panel raw counts, gene-SYMBOL keyed
-  gene_amalgam_matrix_cptm.tsv   -- targeted-panel CPTM (+ alias copy)
-  gene_amalgam_matrix_motr.tsv   -- targeted-panel MOTR (+ alias copy)
-  gene_amalgam_zscores.tsv       -- low-expression outlier z-scores
-  <gene>_cptm.pdf / <gene>_motr.pdf -- one pair of boxplots per targeted gene
-
-Gene-symbol translation: AMALGAM's gene_matrix.tsv is keyed by gene_id, but
-the BED panel (like every other quantification method in this pipeline)
-lists genes by SYMBOL. Reference-matched gene_ids are translated to symbol
-via the reference GTF's gene_id -> gene_name mapping (same "gene_name if
-present else gene_id" convention scripts/quantify_gene_by_assignment_sample.py
-uses); novel XLOC_... loci have no reference gene_name and so can never
-match a BED-panel gene by symbol -- they simply aren't eligible as targeted
-genes (they still exist in the genome-wide gene_matrix.tsv this script
-reads from, untouched, for anyone who wants the raw AMALGAM output).
-
-CPTM here is normalized against the sum of TARGETED genes only (not every
-AMALGAM-discovered gene), matching the "counts per TARGET million"
-convention of the other three methods (--metric count/coverage/assignment)
--- unlike the pre-restriction version of this pipeline's AMALGAM CPTM,
-which normalized against every gene AMALGAM saw, targeted or not.
-
-MOTR ("median of target ratios"): see scripts/motr.py's module docstring.
-"""
 
 import argparse
 import gzip
@@ -69,11 +30,6 @@ def _strip_ver(s):
 
 
 def load_gene_id_to_symbol(gtf_path):
-    """{stripped gene_id: gene_name} over every gene_id that has a
-    gene_name in the reference GTF -- same _attr/_strip_ver convention as
-    scripts/quantify_gene_by_assignment_sample.py's parse_gtf(). A gene_id
-    with no gene_name (or not in the GTF at all, e.g. a novel XLOC_ locus)
-    simply has no entry here and is left as its own gene_id downstream."""
     open_fn = gzip.open if gtf_path.endswith(".gz") else open
     mapping = {}
     with open_fn(gtf_path, "rt") as fh:
@@ -92,9 +48,6 @@ def load_gene_id_to_symbol(gtf_path):
 
 
 def load_targeted_genes(bed_path):
-    """Ordered, de-duplicated list of gene symbols from a BED file's 4th
-    column -- same convention as
-    scripts/quantify_gene_by_assignment_sample.py's load_targeted_genes()."""
     genes = []
     seen = set()
     with open(bed_path) as fh:
@@ -139,9 +92,6 @@ def parse_args():
 
 
 def add_outlier_args_local(parser):
-    """Shared CLI options for the low-expression outlier score -- same
-    defaults/semantics across all four quantification methods. See
-    expression_outliers.py's module docstring for the algorithm."""
     parser.add_argument("--outlier-pseudocount", type=float, default=1.0,
         help="Added to CPTM before log2-transforming. Default: 1.0")
     parser.add_argument("--outlier-shrinkage-k", type=float, default=10.0,
@@ -163,9 +113,6 @@ def main():
     gid_to_symbol = load_gene_id_to_symbol(args.gtf)
     symbol_index = [gid_to_symbol.get(_strip_ver(gid), gid) for gid in raw_all_df.index]
 
-    # A handful of distinct gene_ids can translate to the same symbol
-    # (e.g. a readthrough/pseudoautosomal gene_name shared across two
-    # Ensembl gene_ids) -- sum them rather than silently keeping only one.
     raw_all_df.index = symbol_index
     raw_all_df.index.name = "gene"
     raw_by_symbol = raw_all_df.groupby(level=0).sum()
@@ -180,8 +127,6 @@ def main():
 
     alias_map = parse_alias_map(args.alias_map)
 
-    # CPTM normalized against the targeted-panel sum only (not every
-    # AMALGAM-discovered gene) -- see module docstring.
     col_sums = raw_df.sum(axis=0)
     cptm_df = raw_df.div(col_sums.replace(0, np.nan), axis=1).fillna(0) * 1e6
     cptm_df.index.name = "gene"
@@ -196,7 +141,6 @@ def main():
     alias_cptm_df.to_csv(out_matrix_alias, sep="\t")
     print("Saved alias-labeled targeted-panel CPTM matrix: " + out_matrix_alias)
 
-    # MOTR ("median of target ratios") -- see scripts/motr.py's module docstring.
     size_factors = compute_size_factors(raw_df, max_zero_fraction=args.motr_max_zero_fraction)
     motr_df = raw_df.div(size_factors, axis=1)
     motr_df.index.name = "gene"

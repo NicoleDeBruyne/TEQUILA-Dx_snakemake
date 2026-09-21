@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 
 import argparse
 import os
@@ -11,7 +10,6 @@ import traceback
 
 
 def parse_args():
-    """Parses command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Phases reads from an RNA-seq BAM file that cover gene regions of interest.")
     parser.add_argument("--bam", type=str, required=True)
@@ -56,12 +54,8 @@ def parse_args():
     return parser.parse_args()
 
 
-########################################################################################################################
-# Helper functions for extracting gene regions
-########################################################################################################################
 
 def extract_gene_regions(bed):
-    """Extract gene regions from the BED file in the format: {gene: (chrom, start, end)}."""
     gene_regions = {}
 
     with open(bed, 'r') as b:
@@ -73,24 +67,18 @@ def extract_gene_regions(bed):
     return gene_regions
 
 
-########################################################################################################################
-# Helper functions for phasing reads
-########################################################################################################################
 
 def format_variant(key):
-    """Format a variant tuple for human-readable reports."""
     chrom, pos, ref, alt = key
     return f"{chrom}:{pos} {ref}>{alt}"
 
 
 def write_variant_list(report_file, variants):
-    """Write one variant per line."""
     for key in sorted(variants):
         report_file.write(f"    {format_variant(key)}\n")
 
 
 def filter_bam_by_region(inbam, outbam, region, threads):
-    """Filter a BAM file for primary and supplementary alignments over a region."""
     subprocess.run(
         [
             samtools_exec,
@@ -116,7 +104,6 @@ def filter_bam_by_region(inbam, outbam, region, threads):
 
 
 def remove_monoexonic_reads(inbam, outbam, threads=1):
-    """Remove reads lacking an 'N' CIGAR operation and write spliced reads to a new BAM."""
     with pysam.AlignmentFile(inbam, "rb") as infile, \
          pysam.AlignmentFile(outbam, "wb", header=infile.header, threads=threads) as outfile:
 
@@ -145,7 +132,6 @@ def remove_monoexonic_reads(inbam, outbam, threads=1):
 
 
 def _load_ignore_positions(ignore_variants_bed):
-    """Returns a set of (chrom, pos) 1-based positions to exclude from variant selection."""
     if not ignore_variants_bed:
         return None
 
@@ -166,7 +152,6 @@ def _load_ignore_positions(ignore_variants_bed):
 
 
 def write_variants_vcf(outfile, variants, sample_name, contigs):
-    """Writes a minimal VCF for candidate indels."""
     if outfile.endswith(".gz"):
         outfile = outfile[:-3]
 
@@ -214,7 +199,6 @@ def write_variants_vcf(outfile, variants, sample_name, contigs):
 
 
 def write_nanoTS_vcf(outfile, variants, sample_name, contigs):
-    """Writes a minimal VCF for the trusted NanoTS set."""
     if outfile.endswith(".gz"):
         outfile = outfile[:-3]
 
@@ -272,7 +256,6 @@ def write_nanoTS_vcf(outfile, variants, sample_name, contigs):
 
 
 def read_nanoTS_vcf(vcf_path):
-    """Read a NanoTS VCF into the internal variant dictionary."""
     variants = {}
 
     with pysam.VariantFile(vcf_path) as vcf:
@@ -309,7 +292,6 @@ def select_nanoTS_variants_for_gene(
     snvs_only=False,
     ignore_positions=None
 ):
-    """Select trusted heterozygous NanoTS variants."""
 
     def _passes(rec):
 
@@ -418,7 +400,6 @@ def select_candidate_indels_for_gene(
     exclude_keys,
     ignore_positions=None
 ):
-    """Select candidate indels shared by Clair3 and DeepVariant."""
 
     def _get(vcf_path):
 
@@ -484,7 +465,6 @@ def remove_end_variants(
     min_distance_from_read_end=10,
     terminal_variant_proportion=0.5
 ):
-    """Remove variants whose ALT-supporting reads frequently occur near read ends."""
 
     if outvcf.endswith('.gz'):
         outvcf = outvcf[:-3]
@@ -613,26 +593,12 @@ def remove_end_variants(
     )
 
 
-########################################################################################################################
-# Direct allele-based support
-########################################################################################################################
 
 def _get_read_allele(read, pos0, ref, alt):
-    """
-    Determine whether a read directly supports REF, ALT, or neither.
-
-    Returns:
-        "REF"
-        "ALT"
-        None
-    """
 
     if read.is_unmapped:
         return None
 
-    ##################################################################
-    # SNV / MNP
-    ##################################################################
 
     if len(ref) == len(alt):
 
@@ -679,50 +645,18 @@ def _get_read_allele(read, pos0, ref, alt):
 
         return None
 
-    ##################################################################
-    # Indel
-    ##################################################################
 
     return _classify_indel_read(read, pos0, ref, alt)
 
 
 def _classify_indel_read(read, pos0, ref, alt):
-    """
-    Classify a read's support at an indel variant (VCF convention: the
-    anchor base at pos0 is shared by REF and ALT, followed by the
-    inserted/deleted bases), by walking read.cigartuples once and
-    inspecting the actual CIGAR operation(s) immediately after the anchor.
-
-    This deliberately does NOT reproduce the original raw-sequence-only
-    heuristic (compare query_sequence[qpos:qpos+n] to ALT), which had two
-    real accuracy problems, found and confirmed against real CIGAR
-    structures:
-
-      - Deletions: the original check only ever returned "ALT" when the
-        read was truncated right at the anchor base, and returned "REF"
-        for a read carrying the exact deletion CIGAR operation -- an
-        inversion, not a rounding choice. This version instead looks at
-        whether a real D operation of exactly the right length starts
-        immediately after the anchor.
-
-      - Insertions: the original check compared raw query bases to ALT
-        without confirming an actual "I" CIGAR operation was present at
-        that position, so a read with no insertion at all could
-        coincidentally match ALT's sequence and be misclassified. This
-        version requires an actual I operation of the right length before
-        trusting the sequence comparison.
-
-    Returns "REF", "ALT", or None (ambiguous / not confidently either --
-    e.g. the read ends right at the anchor, or a different-length/-type
-    event occupies the position instead of a clean match to either allele).
-    """
 
     if pos0 < read.reference_start or pos0 >= read.reference_end:
         return None
 
-    REF_CONSUMING = (0, 2, 3, 7, 8)    # M, D, N, =, X
-    QUERY_CONSUMING = (0, 1, 4, 7, 8)  # M, I, S, =, X
-    MATCH_OPS = (0, 7, 8)              # M, =, X
+    REF_CONSUMING = (0, 2, 3, 7, 8)
+    QUERY_CONSUMING = (0, 1, 4, 7, 8)
+    MATCH_OPS = (0, 7, 8)
 
     ops = read.cigartuples
     n = len(ops)
@@ -731,9 +665,6 @@ def _classify_indel_read(read, pos0, ref, alt):
     qpos = 0
     op_i = 0
 
-    ##################################################################
-    # Locate the CIGAR operation covering the anchor position, pos0.
-    ##################################################################
 
     while op_i < n:
 
@@ -753,7 +684,6 @@ def _classify_indel_read(read, pos0, ref, alt):
     op, length = ops[op_i]
 
     if op not in MATCH_OPS:
-        # The anchor itself sits inside a deletion/skip -- can't classify.
         return None
 
     anchor_qpos = qpos + (pos0 - rpos)
@@ -764,25 +694,20 @@ def _classify_indel_read(read, pos0, ref, alt):
 
     is_last_base_of_block = (pos0 == rpos + length - 1)
 
-    ##################################################################
-    # Insertion
-    ##################################################################
 
     if len(alt) > len(ref):
 
         insertion_length = len(alt) - len(ref)
 
         if not is_last_base_of_block:
-            # More matched bases follow before any indel -- no insertion here.
             return "REF"
 
         if op_i + 1 >= n:
-            # Read ends exactly at the anchor -- can't confirm either way.
             return None
 
         next_op, next_len = ops[op_i + 1]
 
-        if next_op == 1 and next_len == insertion_length:  # I
+        if next_op == 1 and next_len == insertion_length:
 
             observed = read.query_sequence[
                 anchor_qpos: anchor_qpos + insertion_length + 1
@@ -791,23 +716,17 @@ def _classify_indel_read(read, pos0, ref, alt):
             if observed == alt.upper():
                 return "ALT"
 
-            return None  # right-length insertion, wrong sequence
+            return None
 
         if next_op in MATCH_OPS:
             return "REF"
 
-        return None  # a different-length indel or other event sits here
+        return None
 
-    ##################################################################
-    # Deletion
-    ##################################################################
 
     deletion_length = len(ref) - len(alt)
 
     def _matched_coverage_confirms_ref(start_op_i, remaining_needed):
-        """Walk forward confirming `remaining_needed` more ref-consuming
-        bases are covered by plain matches (M/=/X), with no D/N/I
-        interrupting -- i.e. the deletion is genuinely absent here."""
 
         i2 = start_op_i
 
@@ -817,7 +736,7 @@ def _classify_indel_read(read, pos0, ref, alt):
 
             if op2 in MATCH_OPS:
                 remaining_needed -= len2
-            elif op2 in (2, 3, 1):  # D, N, or I -- conflicts with a clean REF
+            elif op2 in (2, 3, 1):
                 return False
 
             i2 += 1
@@ -844,7 +763,7 @@ def _classify_indel_read(read, pos0, ref, alt):
 
     next_op, next_len = ops[op_i + 1]
 
-    if next_op == 2 and next_len == deletion_length:  # D
+    if next_op == 2 and next_len == deletion_length:
         return "ALT"
 
     if next_op in MATCH_OPS:
@@ -858,17 +777,6 @@ def _classify_indel_read(read, pos0, ref, alt):
 
 
 def compute_variant_support(bam_path, variant):
-    """
-    Compute coverage and direct REF/ALT support for one variant.
-
-    This is the single source of truth for variant-level read support.
-
-    Returns a dictionary containing:
-        coverage
-        ref_reads
-        alt_reads
-        unassigned_reads
-    """
 
     chrom, pos, ref, alt = variant
     pos0 = pos - 1
@@ -906,11 +814,6 @@ def compute_variant_support(bam_path, variant):
             else:
                 unassigned_reads.add(read_name)
 
-    ##################################################################
-    # A read name may occur more than once because supplementary
-    # alignments are retained. A read supporting either allele should
-    # not also be counted as unassigned.
-    ##################################################################
 
     unassigned_reads -= ref_reads
     unassigned_reads -= alt_reads
@@ -935,19 +838,6 @@ def compute_variant_support(bam_path, variant):
 
 
 def compute_all_variant_support(bam_path, variants):
-    """
-    Compute coverage and REF/ALT support for every variant.
-
-    Returns:
-        {
-            variant_key: {
-                "coverage": int,
-                "ref_reads": set,
-                "alt_reads": set,
-                "unassigned_reads": set
-            }
-        }
-    """
 
     support = {}
 
@@ -962,7 +852,6 @@ def compute_all_variant_support(bam_path, variants):
 
 
 def _is_snv(key):
-    """A variant key is a SNV iff both REF and ALT are single bases."""
     _, _, ref, alt = key
     return len(ref) == 1 and len(alt) == 1
 
@@ -974,36 +863,6 @@ def evaluate_snv(
     terminal_variant_proportion,
     check_end_bias
 ):
-    """
-    Single BAM pass for one SNV that computes, together:
-
-      (a) REF/ALT/unassigned read support -- identical semantics to
-          compute_variant_support()/_get_read_allele()'s SNV branch, and
-      (b) whether the variant should be dropped for having its ALT support
-          concentrated too close to read ends -- identical semantics to
-          remove_end_variants().
-
-    This only ever runs for SNVs (len(ref) == len(alt) == 1), because that
-    is the one case where compute_variant_support()'s fetch window
-    (pos0, pos0 + max(1, len(ref))) and remove_end_variants()' fetch window
-    (pos, pos + len(alt)) are the same interval (pos0, pos0 + 1), so the two
-    original passes can be safely collapsed into one without changing which
-    reads either function would have seen. Indels keep the original,
-    unmerged code path unchanged (see select_candidate_indels_for_gene /
-    compute_all_variant_support / remove_end_variants), since their fetch
-    windows differ and their allele classification still requires a real
-    CIGAR walk.
-
-    Reads are classified using pysam.pileup(), which resolves the CIGAR at
-    the single reference column in pysam's C layer, instead of each read's
-    full get_aligned_pairs() being materialized in Python as the original
-    _get_read_allele()/remove_end_variants() did.
-
-    Returns:
-        (support, drop_for_end_bias)
-        support is the same shape compute_variant_support() returns:
-            {"coverage", "ref_reads", "alt_reads", "unassigned_reads"}
-    """
 
     chrom, pos, ref, alt = variant
     pos0 = pos - 1
@@ -1080,9 +939,6 @@ def evaluate_snv(
 
                 unassigned_reads.add(read_name)
 
-    ##################################################################
-    # Same overlap-removal / dedup rules as compute_variant_support().
-    ##################################################################
 
     unassigned_reads -= ref_reads
     unassigned_reads -= alt_reads
@@ -1127,7 +983,6 @@ def write_direct_haplotag(
     alt_reads,
     unassigned_reads
 ):
-    """Write a Whatshap-compatible haplotag list from direct allele assignments."""
 
     haplotag_outfile = os.path.join(
         gene_outdir,
@@ -1156,9 +1011,6 @@ def write_direct_haplotag(
     return haplotag_outfile
 
 
-########################################################################################################################
-# Whatshap / coverage helpers
-########################################################################################################################
 
 def get_phased_coverage(
     bam_path,
@@ -1166,7 +1018,6 @@ def get_phased_coverage(
     hap2_bam_path,
     region
 ):
-    """Get the max coverage and max phased coverage safely."""
 
     chrom, positions = region.split(":")
     start, end = map(
@@ -1213,7 +1064,6 @@ def run_haplotag(
     genome,
     gene_outdir
 ):
-    """Run Whatshap haplotag and return H1/H2/unassigned read names."""
 
     haplotag_outfile = os.path.join(
         gene_outdir,
@@ -1287,7 +1137,6 @@ def finalize_haplotype_bams(
     hap2_reads,
     unassigned_reads
 ):
-    """Write and QC the final haplotype-specific BAMs."""
 
     report_message = ""
 
@@ -1458,9 +1307,6 @@ def finalize_haplotype_bams(
     return report_message, summary_row
 
 
-########################################################################################################################
-# Main function for phasing reads
-########################################################################################################################
 
 def phase_reads(
     bam,
@@ -1525,9 +1371,6 @@ def phase_reads(
 
     with open(report, 'w') as report_file:
 
-        ##################################################################
-        # Filter BAM
-        ##################################################################
 
         report_file.write(
             f"\nFiltering BAM file for reads aligned to "
@@ -1593,9 +1436,6 @@ def phase_reads(
         )
         report_file.flush()
 
-        ##################################################################
-        # Select NanoTS variants
-        ##################################################################
 
         report_file.write(
             f"\n\nSelecting trusted, heterozygous NanoTS variants "
@@ -1628,9 +1468,6 @@ def phase_reads(
 
         report_file.flush()
 
-        ##################################################################
-        # Select candidate indels
-        ##################################################################
 
         report_file.write(
             f"\nSelecting candidate (Clair3/DeepVariant-shared) indels "
@@ -1664,25 +1501,6 @@ def phase_reads(
 
         report_file.flush()
 
-        ##################################################################
-        # End-of-read filtering
-        #
-        # SNVs and indels are now handled by two different code paths that
-        # are required to reach the *same* filtering decision as the
-        # original single VCF-round-trip implementation:
-        #
-        #   - indels keep the original remove_end_variants() VCF round trip,
-        #     unchanged (their fetch window differs from
-        #     compute_variant_support()'s, and their allele classification
-        #     genuinely needs a CIGAR walk, so there is nothing safe to
-        #     collapse here).
-        #   - SNVs are filtered directly against the in-memory dict, using
-        #     evaluate_snv() (see its docstring) instead of a temp-VCF +
-        #     bcftools sort/tabix + remove_end_variants() + VCF-reread
-        #     round trip. This also computes their REF/ALT support in the
-        #     same pass, so SNVs skip the separate
-        #     compute_all_variant_support() call entirely, below.
-        ##################################################################
 
         end_filter_enabled = (
             min_distance_from_read_end > 0
@@ -1710,10 +1528,6 @@ def phase_reads(
             if _is_snv(k)
         }
 
-        ##################################################################
-        # Indels (NanoTS indel subset + candidate indels): unchanged
-        # VCF-round-trip end-filtering.
-        ##################################################################
 
         if end_filter_enabled:
 
@@ -1800,10 +1614,6 @@ def phase_reads(
 
                 candidate_indels = filtered_candidate_indels
 
-        ##################################################################
-        # SNVs (NanoTS SNV subset): end-filtering and REF/ALT support in a
-        # single pysam.pileup()-based pass per variant (evaluate_snv()).
-        ##################################################################
 
         snv_support = {}
         surviving_snv_variants = {}
@@ -1829,9 +1639,6 @@ def phase_reads(
             **surviving_snv_variants
         }
 
-        ##################################################################
-        # Report surviving variants
-        ##################################################################
 
         report_file.write(
             f"\n    {len(nanoTS_variants)} NanoTS variant(s) remain."
@@ -1857,12 +1664,6 @@ def phase_reads(
 
         report_file.flush()
 
-        ##################################################################
-        # Compute REF/ALT allele support for every surviving variant.
-        # SNV support was already computed above (snv_support); only the
-        # remaining indel keys (NanoTS indel survivors + candidate indels)
-        # still need compute_all_variant_support()'s CIGAR-walk path.
-        ##################################################################
 
         pool_keys = (
             list(nanoTS_variants.keys()) +
@@ -1925,10 +1726,6 @@ def phase_reads(
                         f"  ALT={len(result['alt_reads'])}"
                     )
 
-            ##################################################################
-            # Select the variant with the highest number of allele-
-            # supporting reads (REF + ALT) from the already-computed data.
-            ##################################################################
 
             best_key = max(
                 pool_keys,
@@ -1960,9 +1757,6 @@ def phase_reads(
             best_key = None
             best_dp = 0
 
-        ##################################################################
-        # No variants = nothing to phase
-        ##################################################################
 
         if best_key is None:
 
@@ -1983,9 +1777,6 @@ def phase_reads(
 
             return None
 
-        ##################################################################
-        # Get already-computed allele support for the best variant
-        ##################################################################
 
         best_support = variant_support[best_key]
 
@@ -1998,9 +1789,6 @@ def phase_reads(
             len(best_alt_reads)
         )
 
-        ##################################################################
-        # Determine whether a NanoTS phased block exists
-        ##################################################################
 
         ps_counts = {}
 
@@ -2018,9 +1806,6 @@ def phase_reads(
             if n >= 2
         }
 
-        ##################################################################
-        # Helper for constructing a single-variant phased VCF
-        ##################################################################
 
         def _single_variant_vcf():
 
@@ -2047,9 +1832,6 @@ def phase_reads(
 
             return out
 
-        ##################################################################
-        # If NanoTS has a phased block, try Whatshap first
-        ##################################################################
 
         if phased_block_ps:
 
@@ -2114,9 +1896,6 @@ def phase_reads(
 
             report_file.flush()
 
-            ##################################################################
-            # Whatshap fallback
-            ##################################################################
 
             if n_block_phased < allele_support:
 
@@ -2154,10 +1933,6 @@ def phase_reads(
 
                 report_file.flush()
 
-        ##################################################################
-        # No NanoTS phased block: directly phase using the highest-
-        # coverage surviving variant.
-        ##################################################################
 
         else:
 
@@ -2173,9 +1948,6 @@ def phase_reads(
 
             report_file.flush()
 
-            ##################################################################
-            # Reuse the support already computed above.
-            ##################################################################
 
             write_direct_haplotag(
                 gene_outdir,
@@ -2202,9 +1974,6 @@ def phase_reads(
 
             report_file.flush()
 
-        ##################################################################
-        # Create final haplotype BAMs
-        ##################################################################
 
         report_file.write(
             f"\n\nCreating haplotype-specific BAM files..."
@@ -2243,12 +2012,8 @@ def phase_reads(
     return summary_row
 
 
-########################################################################################################################
-# Main script
-########################################################################################################################
 
 def main():
-    """Main function."""
 
     print(
         "\n\n\n******************************************************************************************"
@@ -2463,9 +2228,6 @@ def main():
         if row is not None:
             summary_rows.append(row)
 
-    ##################################################################
-    # Combined haplotype table
-    ##################################################################
 
     ase_infile = os.path.join(
         args.outdir,
@@ -2512,9 +2274,6 @@ def main():
         f"{len(summary_rows)} gene(s) to {ase_infile}"
     )
 
-    ##################################################################
-    # Gene/BAM mapping file
-    ##################################################################
 
     if args.bed:
 

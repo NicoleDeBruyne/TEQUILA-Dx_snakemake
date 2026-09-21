@@ -1,23 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/get_read_attributes.py
-Computes one sample's read-length five-number summary (min, Q1, median, Q3,
-max) per target type (on_target/off_target/mapped/unmapped), directly from
-its own BAM (+ optional BED for on/off-target classification). Invoked
-per-sample by rules/6_sample_qc.smk (_6B).
-
-Read length is taken from each *primary* alignment's SEQ field
-(secondary/supplementary records are skipped, since these can be
-hard-clipped and would understate the true read length).
-
-Only the five-number summary is kept, not every individual read length --
-that's all the cohort-level boxplot (scripts/plot_read_attributes.py) needs,
-and it turns a many-GB per-sample read-length table into a handful of
-numbers that can cross the pipeline's rule/log boundaries cheaply.
-
-Adapted from the BAM-scanning logic in the old (pre-split) version of
-plot_read_attributes.py, pulled from Github 2026.04.08.
-"""
 
 import argparse
 import bisect
@@ -39,8 +19,6 @@ def parse_args():
 
 
 def load_on_target_intervals(bed):
-    """{chrom: [(start, end), ...]} of merged, sorted on-target intervals
-    from a BED file, plus a matching {chrom: [start, ...]} for bisecting."""
     raw = defaultdict(list)
     with open(bed) as bedfile:
         for line in bedfile:
@@ -64,13 +42,6 @@ def load_on_target_intervals(bed):
 
 
 def is_on_target(chrom, start, end, merged, starts):
-    """True if [start, end) overlaps any merged on-target interval on chrom.
-    merged/starts intervals are sorted and non-overlapping (see
-    load_on_target_intervals), so it's enough to check the interval whose
-    start is <= this read's start (the closest candidate from the left) and
-    the very next one (the closest candidate from the right): if any
-    interval overlapped but wasn't one of those two, it would have to sit
-    strictly between them, which is impossible once they're merged."""
     ivs = merged.get(chrom)
     if not ivs:
         return False
@@ -84,11 +55,6 @@ def is_on_target(chrom, start, end, merged, starts):
 
 
 def get_read_lengths(sample, bam, bed):
-    """Single pass over the BAM; returns {target_type: numpy int32 array of
-    read lengths}. on-target/off-target status is decided inline per read
-    via a binary-search interval lookup against the BED, instead of
-    pre-fetching on-target read IDs region-by-region and then re-reading the
-    whole file a second time."""
     merged, starts = load_on_target_intervals(bed) if bed else (None, None)
 
     lengths_by_type = defaultdict(list)
@@ -100,9 +66,6 @@ def get_read_lengths(sample, bam, bed):
             if n_seen % heartbeat_every == 0:
                 print(f"  ...{sample}: {n_seen:,} alignments read so far", flush=True)
 
-            # Skip secondary/supplementary records: they can be hard-clipped,
-            # which would understate the read's true length, and would
-            # double-count the same underlying read alongside its primary.
             if read.is_secondary or read.is_supplementary:
                 continue
 

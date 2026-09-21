@@ -1,17 +1,4 @@
-#!/usr/bin/env python3
 
-# Author: Nicole DeBruyne (Lin Lab)
-# Date: 2024.01.17
-# Adapted from Robert Wang (Xing Lab)
-# Optimized: 2025
-# Refactored 2026.09.17: beta-distribution fitting moved out to
-# fit_gtex_beta_distributions.py (rule _5B1, once per tissue+thresholds,
-# genome-wide) and fit_novel_junction_beta_distributions.py (rule _5B2, once
-# per sample+tissue, for junctions absent from the raw GTEx matrix). This
-# script (_5C) now only merges those precomputed fits against this sample's
-# own junction data and runs the beta-binomial significance test -- it no
-# longer fits anything itself, and no longer reads the raw (large)
-# per-GTEx-sample count matrix at all.
 
 import os, argparse, warnings, traceback
 import pandas as pd
@@ -54,7 +41,6 @@ def parse_args():
 
 
 def parse_gtf_splice_junctions(gtf_file):
-    """Parse a GTF file and return a dict of splice junctions (chr_ss1_ss2) to annotation type."""
 
     transcripts = defaultdict(list)
     transcript_type = {}
@@ -131,7 +117,6 @@ def parse_gtf_splice_junctions(gtf_file):
 
 
 def calculate_coverage(df, col_prefix=''):
-    """Calculate coverage for each splice site and junction."""
     try:
         jxn_col = col_prefix + 'jxn_alignment_count'
         df[jxn_col] = pd.to_numeric(df[jxn_col], errors='coerce').fillna(0).astype(int)
@@ -147,7 +132,6 @@ def calculate_coverage(df, col_prefix=''):
 
 
 def calculate_PSI(df, PSI_rescale_factor, col_prefix=''):
-    """Calculate PSI values."""
     try:
         jxn_col = col_prefix + 'jxn_alignment_count'
         cov_col = col_prefix + 'jxn_coverage'
@@ -167,13 +151,6 @@ def calculate_PSI(df, PSI_rescale_factor, col_prefix=''):
 
 
 def beta_binomial_test_vectorized(x, n, alpha_value, beta_value):
-    """Vectorized replacement for the old per-row beta_binomial_test(): computes the same
-    two-sided beta-binomial p-value for every row at once via array-valued scipy calls,
-    instead of one Python-level scipy call per row.
-
-    Returns an object array with "n/a"/"error" strings preserved where the inputs were
-    invalid, exactly matching the old per-row function's sentinel behavior.
-    """
     x = np.asarray(x, dtype=float)
     n = np.asarray(n, dtype=float)
     alpha_value = np.asarray(alpha_value, dtype=float)
@@ -199,8 +176,6 @@ def beta_binomial_test_vectorized(x, n, alpha_value, beta_value):
 
 def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_coverage_threshold,
                    PSI_rescale_factor, phasing_threshold, annotated_junctions, report_outdir):
-    """Process region of interest -- merges this sample's junction data against the
-    precomputed GTEx beta fits and runs the beta-binomial test. No fitting happens here."""
 
     start_time = time.time()
     report = os.path.join(report_outdir, f"{region.replace(':', '_').replace('-', '_')}_report.tsv")
@@ -208,7 +183,6 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
     with open(report, 'w') as report_file:
         report_file.write(f"Processing region {region}...\n\n")
 
-        ############################## STEP 1: INITIALIZE DATAFRAMES ##############################
 
         bulk_df = jxn_info_df_filtered[jxn_info_df_filtered['phasing'] == 'bulk'].copy()
         phasing_values = jxn_info_df_filtered['phasing'].unique()
@@ -240,7 +214,6 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
             report_file.write(f"\nNo junctions found over region {region} in the GTEx beta-fit tables. Exiting...\n")
             return
 
-        ############################## STEP 2: ADD MISSING JUNCTIONS ##############################
 
         def _add_ss(df):
             parts = df.index.str.split('_')
@@ -319,7 +292,6 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
 
         report_file.write(f"There are {len(bulk_df_full)} total junctions to analyze.\n\n")
 
-        ############################## STEP 3: CALCULATE COVERAGE ##############################
 
         report_file.write(f"Calculating coverage...\n")
         calculate_coverage(bulk_df_full)
@@ -327,7 +299,6 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
             calculate_coverage(hap1_df_full)
             calculate_coverage(hap2_df_full)
 
-        ############################## STEP 4: CALCULATE PSI VALUES ##############################
 
         report_file.write(f"Calculating PSI values...\n")
         calculate_PSI(bulk_df_full, PSI_rescale_factor)
@@ -335,7 +306,6 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
             calculate_PSI(hap1_df_full, PSI_rescale_factor)
             calculate_PSI(hap2_df_full, PSI_rescale_factor)
 
-        ############################## STEP 5: MERGE PRECOMPUTED BETA FITS ##############################
 
         report_file.write(f"Merging precomputed GTEx beta fits...\n")
         fit_cols = ['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI',
@@ -345,7 +315,6 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
         )
         final_df['in_gtex_matrix'] = final_df['in_gtex_matrix'].fillna(False)
 
-        ############################## STEP 6: RUN BETA-BINOMIAL TESTS ##############################
 
         if haplotype_specific:
             hap1_coverage = pd.to_numeric(hap1_df_full['jxn_coverage'], errors='coerce').reindex(final_df.index, fill_value=0)
@@ -386,7 +355,6 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
         delta_PSI[final_df['expected_PSI'] == 'error'] = 'error'
         final_df['delta_PSI'] = delta_PSI
 
-        ############################## STEP 6: ADD FLAGS ##############################
 
         final_df['flag'] = ""
         final_df['flag'] = np.where(
@@ -408,7 +376,6 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
         final_df['flag'] = final_df['flag'].str[1:]
         final_df['flag'] = final_df['flag'].apply(lambda x: x if x else "no_flag")
 
-        ############################## STEP 7: IDENTIFY ANNOTATED JUNCTIONS ##############################
 
         if annotated_junctions:
             final_df["annotation"] = final_df.index.map(annotated_junctions).fillna("unannotated")
@@ -418,7 +385,6 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
         else:
             final_df["annotation"] = "n/a"
 
-        ############################## STEP 8: SAVE RESULTS ##############################
 
         final_df.reset_index(inplace=True)
         final_df.rename(columns={'index': 'junction'}, inplace=True)
@@ -434,7 +400,6 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
 
 
 def main():
-    """Main script."""
 
     print(f"\n\n\n******************************************************************************************")
     print(f"Testing splice junction usage against precomputed GTEx beta fits...")
@@ -470,9 +435,6 @@ def main():
 
     all_fits = pd.concat([gtex_fits, novel_fits])
     all_fits['in_gtex_matrix'] = all_fits['in_gtex_matrix'].astype(bool)
-    # A junction should never appear in both tables (fit_novel_junction_beta_distributions.py
-    # only fits junctions absent from the GTEx table), but guard defensively rather than
-    # silently double-counting if it ever does.
     all_fits = all_fits[~all_fits.index.duplicated(keep='first')]
 
     if args.annotation_file:

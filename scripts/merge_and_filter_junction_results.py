@@ -1,7 +1,4 @@
-#!/usr/bin/env python
 
-# Author: Nicole DeBruyne (Lin Lab)
-# Original Date: 2024.10.23
 
 import argparse
 import pandas as pd
@@ -18,7 +15,6 @@ from matplotlib import rcParams
 rcParams['pdf.fonttype'] = 42
 
 def parse_args():
-    """ Parse command line arguments """
     parser = argparse.ArgumentParser(description="Remove outlier junctions from long-read RNA-seq data.")
     parser.add_argument("--infiles", nargs="+", required=True, help="Input TSV files (merged junctions).")
     parser.add_argument("--outprefix", required=True, help="Prefix for output files.")
@@ -40,9 +36,6 @@ def parse_args():
     parser.add_argument("--title", default="Number of Genes with Outlier Junction Hits by Sample", help="Title for the plot.")
     return parser.parse_args()
 
-##################################################
-# Helper functions
-##################################################
 
 def define_events(df):
     df[['chr', 'ss1', 'ss2']] = df['junction'].str.split('_', expand=True)
@@ -195,28 +188,21 @@ def compute_cohort_statistics(df, args):
 
     return df
 
-##################################################
-# Plotting functions
-##################################################
 
 def plot_outlier_counts(samples, dfs, legends, suptitle, outfile):
-    """Generate bar plots and box plots."""
 
-    # Count unique genes per sample for each dataset
     counts_list = []
     for df in dfs:
         counts_list.append(df.groupby('sample')['gene'].nunique().sort_index())
 
-    # Ensure all samples are represented in each series in the same order
     sample_order = sorted(samples)
     for i, counts in enumerate(counts_list):
         counts_list[i] = counts.reindex(sample_order, fill_value=0)
 
-    # ---------------- Bar plots ----------------
     barplot_file = os.path.splitext(outfile)[0] + "_barplot.pdf"
     fig, axes = plt.subplots(len(dfs), 1, figsize=(max(16, len(sample_order)*0.2), max(6, len(dfs)*4)), sharex=True)
     if len(dfs) == 1:
-        axes = [axes]  # ensure iterable
+        axes = [axes]
 
     for ax, counts, (color, label) in zip(axes, counts_list, legends):
         ax.bar(counts.index, counts.values, color=color)
@@ -233,15 +219,12 @@ def plot_outlier_counts(samples, dfs, legends, suptitle, outfile):
     plt.close()
     print(f"Bar plot saved to {barplot_file}")
 
-    # ---------------- Box plot ----------------
     boxplot_file = os.path.splitext(outfile)[0] + "_boxplot.pdf"
     fig, ax = plt.subplots(1, 1, figsize=(8, 6))
 
-    # Data for boxplot: one box per dataset
     data = [counts.values for counts in counts_list]
     colors = [c for c, _ in legends]
 
-    # Draw empty boxes with black edges and black median
     box = ax.boxplot(
         data,
         patch_artist=False,
@@ -252,20 +235,17 @@ def plot_outlier_counts(samples, dfs, legends, suptitle, outfile):
         showfliers=False
     )
 
-    # Plot points with jitter and dataset colors
     jitter_strength = 0.08
     for i, counts in enumerate(data):
         x = np.full(len(counts), i + 1) + np.random.uniform(-jitter_strength, jitter_strength, len(counts))
         ax.scatter(x, counts, color=colors[i], alpha=0.7, s=20)
 
-    # Clean x-axis (no labels, just spacing)
     ax.set_xticks(range(1, len(dfs) + 1))
     ax.set_xticklabels([])
 
     ax.set_ylabel('Number of genes')
     ax.set_title(suptitle)
 
-    # Legend with stats included, with stats on new line
     legend_handles = []
     for counts, color, (_, label) in zip(counts_list, colors, legends):
         stats_text = f"{label}\nAvg={counts.mean():.2f}, Med={counts.median()}, Range={counts.min()}–{counts.max()}"
@@ -278,7 +258,6 @@ def plot_outlier_counts(samples, dfs, legends, suptitle, outfile):
     print(f"Box plot saved to {boxplot_file}")
 
 def plot_outlier_types(df, suptitle, outfile):
-    """ Make a pie chart of outlier types: phasing type, annotation type, event type """
 
     annotation_colors = {
         'unannotated': '#d95d5b',
@@ -372,7 +351,6 @@ def main():
     if args.include_downreg_annotation_types and args.exclude_downreg_annotation_types:
         raise ValueError( "--include-downreg-annotation-types and --exclude-downreg-annotation-types are mutually exclusive")
 
-    # Print summary
     print(f"Preparing to filter for junctions with coverage >= {args.jxn_coverage_threshold}, padj <= {args.padj_threshold}, and abs(delta_PSI) >= {args.delta_PSI_threshold}.")
     if args.delta_PSI_direction:
         print(f"Will keep an additional file with only outlier junctions with delta_PSI direction: {args.delta_PSI_direction}")
@@ -408,14 +386,12 @@ def main():
     if args.sample_number_threshold:
         print(f"Will keep an additional file with only junctions which are outliers in <= {args.sample_number_threshold} samples.")
 
-    # Input checks
     if len(args.infiles) == 0:
         raise ValueError("No input files provided.")
     for input_file in args.infiles:
         if not os.path.isfile(input_file):
             raise FileNotFoundError(f"Input file {input_file} not found.")
 
-    # Stage 1: read and apply jxn_coverage, padj, deltaPSI
     print(f"\nReading in {len(args.infiles)} input files...")
     dfs = []
     samples = set()
@@ -426,31 +402,11 @@ def main():
             print(f"WARNING: Input file {input_file} is empty.")
             continue
         samples.add(df['sample'].iloc[0])
-        # delta_PSI can hold non-numeric sentinels ("n/a", "low_n", "error" --
-        # see perform_splice_junction_beta_binomial_tests.py's fit_beta_dist)
-        # whenever the underlying GTEx reference distribution couldn't be
-        # fit/evaluated for that junction. Any single such value makes
-        # pandas infer the whole column as object dtype, and calling
-        # .abs() directly on that raises TypeError -- coerce first. A
-        # sentinel becomes NaN here, which correctly fails the >= threshold
-        # comparison below (an untestable junction shouldn't pass a
-        # "significant delta" filter), same as every other sentinel
-        # comparison elsewhere in this pipeline.
         delta_num = pd.to_numeric(df['delta_PSI'], errors='coerce')
         mask = (df['jxn_coverage'] >= args.jxn_coverage_threshold) & \
             (df['padj'] <= args.padj_threshold) & \
             (delta_num.abs() >= args.delta_PSI_threshold)
         df = df.loc[mask].copy()
-        # Actually replace the column with the coerced numeric version, not
-        # just use delta_num for the mask above -- pandas infers a column's
-        # dtype from the WHOLE file when reading it, so if even one row
-        # anywhere in this file had a non-numeric sentinel, every row's
-        # delta_PSI (including these numerically-valid, filter-passing
-        # ones) is stored as a Python str, not a float, even after
-        # filtering down to just this subset. Every downstream comparison
-        # against delta_PSI (define_events()'s j0['delta_PSI'] < 0, the
-        # stage 2/4 filters below) assumes a real number and will raise
-        # the same TypeError this masking-only version still left in place.
         df['delta_PSI'] = delta_num.loc[mask]
         if df.empty:
             continue
@@ -464,13 +420,10 @@ def main():
         f"    {len(outlier_df)} total hits ({len(outlier_df['junction'].unique())} unique junctions) in {len(outlier_df['sample'].unique())} samples."
     )
 
-    # Define alternative splicing events
     outlier_df = define_events(outlier_df.copy())
 
-    # Add sample_count column
     outlier_df['sample_count'] = outlier_df.groupby('junction')['sample'].transform('nunique')
 
-    # Compute cohort statistics if requested
     if len(samples) >= 8 and (args.filter_by_cohort_IQR or ((args.fit_beta_dist_on_cohort or args.compare_PSI_to_cohort_median) and args.delta_PSI_vs_cohort_threshold)):
         print(f"\nComputing cohort-level statistics...")
         outlier_df = compute_cohort_statistics(outlier_df, args)
@@ -482,12 +435,10 @@ def main():
             args.compare_PSI_to_cohort_median = False
             args.delta_PSI_vs_cohort_threshold = None
 
-    # Save file
     os.makedirs(os.path.dirname(args.outprefix), exist_ok=True)
     outfile_stage1 = f"{args.outprefix}_{args.jxn_coverage_threshold}jxncov_{args.padj_threshold}padj_{args.delta_PSI_threshold}deltaPSI.tsv"
     outlier_df.to_csv(outfile_stage1, sep="\t", index=False)
 
-    # Stage 2: delta_PSI_direction
     if args.delta_PSI_direction:
         df_stage2 = outlier_df.copy()
         if args.delta_PSI_direction == "positive":
@@ -498,7 +449,6 @@ def main():
         df_stage2.to_csv(outfile_stage2, sep="\t", index=False)
         print(f"After delta-PSI-direction filtering: {len(df_stage2)} rows ({len(df_stage2['junction'].unique())} unique junctions).")
 
-    # Stage 3: Filter by event_types
     if args.event_types:
         df_stage3 = df_stage2.copy() if "df_stage2" in locals() else outlier_df.copy()
         df_stage3 = df_stage3[df_stage3['event'].apply(lambda x: any(evt in x.split(';') for evt in args.event_types))]
@@ -507,7 +457,6 @@ def main():
         df_stage3.to_csv(outfile_stage3, sep="\t", index=False)
         print(f"After event-type filtering: {len(df_stage3)} rows ({len(df_stage3['junction'].unique())} unique junctions).")
 
-    # Stage 4: Filter by annotation_types
     if args.include_upreg_annotation_types or args.include_downreg_annotation_types:
         df_stage4 = df_stage3.copy() if "df_stage3" in locals() else (
             df_stage2.copy() if "df_stage2" in locals() else outlier_df.copy()
@@ -535,7 +484,6 @@ def main():
         df_stage4.to_csv(outfile_stage4, sep="\t", index=False)
         print(f"After annotation-type filtering: {len(df_stage4)} rows ({len(df_stage4['junction'].unique())} unique junctions).")
 
-    # Stage 5: Filter by delta_PSI_vs_cohort threshold
     if args.filter_by_cohort_IQR or ((args.fit_beta_dist_on_cohort or args.compare_PSI_to_cohort_median) and args.delta_PSI_vs_cohort_threshold):
         df_stage5 = df_stage4.copy() if "df_stage4" in locals() else (
             df_stage3.copy() if "df_stage3" in locals() else (
@@ -543,7 +491,6 @@ def main():
             )
         )
         
-        # Apply threshold filtering
         if args.filter_by_cohort_IQR and 'cohort_q1' in df_stage5.columns and 'cohort_q3' in df_stage5.columns:
             iqr = df_stage5['cohort_q3'] - df_stage5['cohort_q1']
             lower_fence = df_stage5['cohort_q1'] - 1.5 * iqr
@@ -562,7 +509,6 @@ def main():
         df_stage5.to_csv(outfile_stage5, sep="\t", index=False)
         print(f"    After cohort-level filtering: {len(df_stage5)} rows ({len(df_stage5['junction'].unique())} unique junctions).")
 
-    # Stage 6: Filter by sample_number_threshold
     if args.sample_number_threshold:
         df_stage6 = df_stage5.copy() if "df_stage5" in locals() else (
             df_stage4.copy() if "df_stage4" in locals() else (
@@ -580,7 +526,6 @@ def main():
         df_stage6.to_csv(outfile_stage6, sep="\t", index=False)
         print(f"After sample-number filtering: {len(df_stage6)} rows ({len(df_stage6['junction'].unique())} unique junctions).")
 
-    # Plotting if requested
     if args.plot:
         dfs_for_plot = []
         legends = []

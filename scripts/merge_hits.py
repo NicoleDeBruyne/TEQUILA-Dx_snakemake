@@ -1,11 +1,4 @@
-#! /usr/bin/env python3
 
-# scripts/merge_hits.py
-# Builds one sample's ranked candidate-hits table from that sample's
-# variant/ASE/junction/cohort-junction rows. Exposes load_*()/build_hit_table()
-# as a library (imported by scripts/merge_group_hits.py, which calls
-# build_hit_table() once per sample in a group and concatenates the results)
-# as well as a standalone single-sample CLI (below) for manual use/debugging.
 
 import argparse
 import os
@@ -14,13 +7,8 @@ import pandas as pd
 import numpy as np
 import warnings
 
-# Ignore FutureWarnings from pandas
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-# Maps each raw delta source column to its output-column suffix. The
-# GTEx-comparison junction_df only ever has 'delta_PSI' (one metric); the
-# cohort-comparison cohort_junction_df has all six (see
-# scripts/merge_group_hits.py's normalize_cohort_junction_df).
 _DELTA_COL_TO_SUFFIX = {
     'delta_PSI':        'deltaPSI',
     'delta_PSI_approx': 'deltaPSIapprox',
@@ -30,11 +18,6 @@ _DELTA_COL_TO_SUFFIX = {
     'delta_IPA':        'deltaIPA',
 }
 
-# Which delta-metric suffixes exist per prefix -- '' (GTEx-comparison) only
-# ever has deltaPSI; 'cohort_' has all six. max_deltas() (inside
-# build_hit_table) takes the max magnitude across whichever of these are
-# present for a given prefix: no per-metric weighting, just the single
-# largest |delta| across all populated metrics.
 _DELTA_SUFFIXES_BY_PREFIX = {
     '':        ('deltaPSI',),
     'cohort_': ('deltaPSI', 'deltaPSIapprox', 'delta5ssIR', 'delta3ssIR', 'deltaFullIR', 'deltaIPA'),
@@ -42,7 +25,6 @@ _DELTA_SUFFIXES_BY_PREFIX = {
 
 
 def parse_args():
-    """ Parse command line arguments """
 
     parser = argparse.ArgumentParser(description='Merge hits from variant, ASE, and junction analyses for a single sample.')
     parser.add_argument('--outfile', type=str, required=True, help='Path to output file')
@@ -62,37 +44,10 @@ def parse_args():
     return parser.parse_args()
 
 
-# Caller priority for phase resolution, highest-trust first. Only these
-# three callers ever phase (see rules/1_call_variants.smk: nanoTS has a
-# model_phased option, clair3_rna runs --enable_phasing_model via
-# whatshap, longcallR does native joint calling+phasing) -- deepvariant
-# never phases and is intentionally absent here, so a deepvariant-only
-# call for a variant simply can't contribute phase evidence.
 _CALLER_PHASE_PRIORITY = ('nanoTS', 'clair3_rna', 'longcallR')
 
 
 def _clnsig_category_rank(clnsig):
-    """Rank a raw ClinVar CLNSIG string (compile_variants.py's extract_CLNSIG
-    format: 'BASE' normally, or 'BASE:CLNSIGCONF' when ClinVar reports
-    conflicting submissions) among the pathogenic-implicated categories used
-    as a merge_hits tiebreaker. Lower rank = stronger evidence. Returns None
-    for anything not pathogenic-implicated (VUS/benign/etc. never reach
-    this -- callers only invoke it on variants where the broader
-    'Pathogenic|Likely_pathogenic' substring match already matched).
-
-    Priority (best to worst):
-      0: Pathogenic
-      1: Pathogenic/Likely_pathogenic
-      2: Likely_pathogenic
-      3: Conflicting_classifications_of_pathogenicity, but only when the
-         CLNSIGCONF submission breakdown includes Pathogenic and/or
-         Likely_pathogenic submissions (checked against the full string,
-         which includes the ':CLNSIGCONF' suffix)
-      4: any other string that still matched 'Pathogenic|Likely_pathogenic'
-         (e.g. a multi-condition CLNSIG like 'Pathogenic|association') --
-         kept as a catch-all so the tiebreaker never errors on real data,
-         ranked below the four explicitly requested categories.
-    """
     s = str(clnsig)
     base = s.split(':', 1)[0]
     if base == 'Pathogenic':
@@ -111,20 +66,12 @@ def _clnsig_category_rank(clnsig):
 
 
 def _caller_from_name(name):
-    """compile_variants.py's --vcf-file-names are '{sample}_{caller}'
-    (e.g. 'IDT-160_PID843_nanoTS') -- match against the known caller
-    tokens rather than splitting on '_', since sample names themselves
-    may contain underscores."""
     for caller in _CALLER_PHASE_PRIORITY + ('deepvariant',):
         if name.endswith('_' + caller):
             return caller
     return None
 
 
-# Internal _caller token -> display suffix used for the per-caller
-# variant_GT_{suffix} output columns. Kept separate from the internal
-# token (rather than renaming _caller itself) since 'clair3_rna' is used
-# elsewhere (VCF filenames, _CALLER_PHASE_PRIORITY) and shouldn't change.
 _CALLER_GT_DISPLAY = {
     'nanoTS':     'nanoTS',
     'longcallR':  'longcallR',
@@ -134,14 +81,6 @@ _CALLER_GT_DISPLAY = {
 
 
 def _build_gt_by_caller(variant_df):
-    """Pivot variant_df (one row per sample/variant/caller) into one row
-    per (gene, variant_ID) with a separate GT column per caller --
-    'variant_GT_nanoTS', 'variant_GT_longcallR', 'variant_GT_clair3-RNA',
-    'variant_GT_deepvariant' -- instead of merging every caller's GT into
-    a single comma-joined string. A variant not called by a given caller
-    gets '.' in that caller's column; the rare case of >1 row from the
-    same caller for the same variant (see resolve_phase()'s docstring)
-    is comma-joined within that caller's own cell."""
     gt_long = (
         variant_df
             .groupby(['gene', 'variant_ID', '_caller'])['GT']
@@ -165,31 +104,7 @@ def _build_gt_by_caller(variant_df):
 
 
 def resolve_phase(variant_a, variant_b):
-    """Determine the trans/cis/unclear relationship between two variants
-    in the same gene, using each caller's raw (unmodified) GT + PS.
-
-    variant_a, variant_b: each a dict/Series-like with '_caller', '_raw_GT',
-    'PS' for one (caller, variant) row. Callers are checked in priority
-    order (nanoTS > clair3_rna > longcallR, see _CALLER_PHASE_PRIORITY) --
-    the first caller that phased BOTH variants against the SAME PS wins;
-    no fallback to a lower-priority caller once a higher one has already
-    given an answer, even if that answer conflicts with what a
-    lower-priority caller would have said.
-
-    A caller's phasing for a variant is only trusted if GT is phased
-    ('|' present) AND PS is present and not '.' -- PS is meaningless on
-    an unphased GT, and comparing '.' PS values would be a false match.
-    PS is only comparable within the same caller (see compile_variants.py's
-    process_vcf); this function only ever compares same-caller PS pairs
-    by construction, since it iterates one caller at a time.
-
-    Returns: 'trans', 'cis', or 'unclear'.
-    """
     def _phased_calls(variant, caller):
-        """All (raw_GT, PS) pairs for `variant` reported by `caller`,
-        restricted to genuinely phased, non-'.' PS entries. A variant can
-        have >1 row from the same caller only in unusual multi-record
-        VCF situations; in the normal case this is 0 or 1 entries."""
         rows = variant if isinstance(variant, list) else [variant]
         out = []
         for row in rows:
@@ -208,60 +123,29 @@ def resolve_phase(variant_a, variant_b):
             for gt_b, ps_b in calls_b:
                 if ps_a != ps_b:
                     continue
-                # Same phase set from the same caller -- allele order is
-                # directly comparable. hap-1-allele is the first GT digit.
                 hap1_a = gt_a.split('|')[0]
                 hap1_b = gt_b.split('|')[0]
                 return 'cis' if hap1_a == hap1_b else 'trans'
-        # This caller phased neither variant (or phased them into
-        # different/unrelated phase sets) -- fall through to the next
-        # caller in priority order rather than deciding 'unclear' yet.
 
     return 'unclear'
 
 
 def load_variant_df(path):
-    """Read + preprocess a variant-hits tsv (single-sample or group-level --
-    same schema either way, just more rows for the latter)."""
     variant_df = pd.read_csv(path, sep='\t', usecols=[
         'sample', 'chrom', 'pos', 'ref', 'alt', 'name', 'GT', 'PS', 'gnomAD_AF', 'CLNSIG', 'gene', 'CADD_PHRED', 'SpliceAI',
         'num_callers', 'sample_count', 'ANNOVAR_AAChange.refGene', 'ANNOVAR_GeneDetail.refGene',
     ]).drop_duplicates()
     variant_df = variant_df.rename(columns={'sample_count': 'variant_nsamples'})
     variant_df = variant_df[variant_df['gene'] != '.']
-    # 'gene' lists every BED-panel gene a variant overlaps (comma-separated
-    # if more than one) -- explode so a variant overlapping multiple genes
-    # is grouped into each of those genes' hit rows individually.
     variant_df['gene'] = variant_df['gene'].str.split(',')
     variant_df = variant_df.explode('gene')
-    # Raw copy of GT before any canonicalization -- 'name' is
-    # "{sample}_{caller}" (see compile_variants.py's --vcf-file-names), so
-    # this identifies which caller reported this specific GT/PS pair.
-    # resolve_phase() below needs the untouched original GT + caller
-    # identity to determine trans/cis, and is kept separate from the
-    # working 'GT' column so a future change to that column's display
-    # canonicalization can't silently affect resolve_phase()'s input.
     variant_df['_caller'] = variant_df['name'].apply(_caller_from_name)
-    # Only collapse allele order for genuinely UNPHASED genotypes ('/') --
-    # 0/1 and 1/0 are the same unordered call for an unphased GT, so
-    # canonicalize those to one consistent display form. A phased genotype
-    # ('|') has a real, caller-determined haplotype order -- 0|1 and 1|0
-    # are NOT the same call (they place the ALT allele on the opposite
-    # haplotype), so those are left untouched. This column (not just
-    # _raw_GT) now also feeds the variant_GT_{caller} display columns via
-    # _build_gt_by_caller() below, so phase is visible in the final output,
-    # not just used internally by resolve_phase().
     variant_df['_raw_GT'] = variant_df['GT']
     variant_df['GT'] = variant_df['GT'].where(
         variant_df['GT'].str.contains('|', regex=False),
         variant_df['GT'].str.replace('1/0', '0/1', regex=False),
     )
     variant_df['variant_ID'] = variant_df.apply(lambda x: f"{x.chrom}-{x.pos}-{x.ref}-{x.alt}", axis=1)
-    # ANNOVAR only ever populates one of these two per variant (AAChange.refGene
-    # for exonic variants with a codon change to report, GeneDetail.refGene for
-    # everything else it has position detail for -- splicing/UTR/intronic/etc.)
-    # -- coalesce into a single human-readable consequence column rather than
-    # carrying two mostly-empty columns through to the final hits table.
     aachange = variant_df['ANNOVAR_AAChange.refGene']
     genedetail = variant_df['ANNOVAR_GeneDetail.refGene']
     variant_df['variant_consequence'] = aachange.where(aachange.notna() & (aachange != '.'), genedetail)
@@ -270,22 +154,17 @@ def load_variant_df(path):
 
 
 def load_ase_df(path):
-    """Read + preprocess an ASE-hits tsv (single-sample or group-level)."""
     ase_df = pd.read_csv(path, sep='\t', usecols=['sample', 'gene', 'ratio', 'sample_count']).drop_duplicates()
     return ase_df.rename(columns={'ratio': 'ASE_ratio', 'sample_count': 'ASE_nsamples'})
 
 
 def load_junction_df(path):
-    """Read a GTEx-comparison junction-hits tsv (single-sample or group-level) -- one metric (delta_PSI)."""
     return pd.read_csv(path, sep='\t', usecols=[
         'sample', 'gene', 'phasing', 'junction', 'jxn_coverage', 'delta_PSI', 'sample_count', 'annotation', 'event',
     ]).drop_duplicates()
 
 
 def load_cohort_junction_df(path):
-    """Read a cohort-comparison junction-hits tsv (already normalized to one
-    delta column per metric by scripts/merge_group_hits.py's
-    normalize_cohort_junction_df -- six metrics, unlike load_junction_df's one)."""
     return pd.read_csv(path, sep='\t', usecols=[
         'sample', 'gene', 'phasing', 'junction', 'jxn_coverage',
         'delta_PSI', 'delta_PSI_approx', 'delta_5ss_IR', 'delta_3ss_IR', 'delta_full_IR', 'delta_IPA',
@@ -298,8 +177,6 @@ def load_omim_df(path):
         'approved_gene_symbol', 'phenotypes', 'inheritance_patterns', 'haploinsufficient',
     ])
     omim_df = omim_df.rename(columns={'approved_gene_symbol': 'gene'})
-    # TRUE/FALSE (any case) or empty/missing -- empty is treated the same
-    # as FALSE (see setup.sh's OMIM section for the full column spec).
     omim_df['haploinsufficient'] = (
         omim_df['haploinsufficient'].astype(str).str.strip().str.upper() == 'TRUE'
     )
@@ -307,31 +184,6 @@ def load_omim_df(path):
 
 
 def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
-    """Aggregate a junction_df-shaped table (gene, phasing, junction,
-    jxn_coverage, one-or-more delta columns, sample_count, annotation,
-    event) into one gene-level row per phasing tier, with columns named
-    '{prefix}bulk_jxns', '{prefix}bulk_jxn_coverage', one
-    '{prefix}bulk_{suffix}' per entry in delta_cols, etc. Used for both
-    the GTEx-comparison junction_df (prefix='', delta_cols=('delta_PSI',))
-    and the cohort-comparison cohort_junction_df (prefix='cohort_',
-    delta_cols=all six metrics).
-
-    If df has a 'gtex_tissue' column (see merge_group_hits.py, which tags
-    every row with which GTEx tissue it was compared against before
-    concatenating across tissues), rows for the SAME (gene, phasing,
-    junction) that came from different tissue comparisons are collapsed
-    into one entry per junction before joining -- otherwise a junction
-    that's an outlier against e.g. both GTEx fibroblasts and GTEx brain
-    would appear twice in bulk_jxns (once per tissue), duplicating the
-    junction string itself rather than the semicolon-separator actually
-    separating distinct junctions. jxn_coverage/annotation are computed
-    purely from the sample's own alignment data / a GTF lookup -- neither
-    depends on which GTEx tissue was compared against, so a single value
-    is kept for those. delta_PSI/event/sample_count, by contrast, ARE each
-    computed relative to that specific tissue's own reference distribution
-    or outlier set, so every contributing tissue's value is preserved,
-    each tagged "value (tissue)", rather than picking one or silently
-    duplicating the whole row."""
     has_tissue = 'gtex_tissue' in df.columns
     tiers = {}
     for phasing, sep in (('bulk', ';'), ('hap1', ','), ('hap2', ',')):
@@ -344,10 +196,6 @@ def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
                     g = g.sort_values('gtex_tissue')
                     tissues = g['gtex_tissue'].astype(str)
 
-                    # Tissue-independent -- same underlying value regardless
-                    # of which tissue this row came from, so just take one.
-                    # (If they genuinely disagree, that's a real data
-                    # anomaly worth surfacing rather than silently masking.)
                     if g['jxn_coverage'].astype(str).nunique() > 1:
                         print(f"WARNING: jxn_coverage disagrees across GTEx tissues for "
                               f"{gene} {junction} ({dict(zip(tissues, g['jxn_coverage']))}) -- using the first value.")
@@ -360,8 +208,6 @@ def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
                         'jxn_coverage': g['jxn_coverage'].iloc[0],
                         'annotation': g['annotation'].iloc[0],
                     }
-                    # Tissue-dependent -- every contributing tissue's value
-                    # is kept, tagged, rather than collapsed to one.
                     for col in delta_cols:
                         row[col] = ' '.join(f"{v} ({t})" for v, t in zip(g[col], tissues))
                     row['event'] = ' '.join(f"{v} ({t})" for v, t in zip(g['event'], tissues))
@@ -393,40 +239,17 @@ def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
 
 
 def load_gene_expression_df(path):
-    """Read the CPTM matrix from rule _9M (quantify_gene_by_assignment.py's
-    <outprefix>_matrix.tsv) -- one row per targeted-panel gene, one column
-    per sample in that (bed_id, sample_type) cohort. Since this matrix is
-    already scoped to exactly one (panel, sample_type) group, every
-    sample column in it IS the cohort for n_cohort purposes -- no separate
-    cohort-membership lookup needed."""
     return pd.read_csv(path, sep='\t', index_col=0)
 
 
 def load_gene_expression_zscore_df(path):
-    """Read the low-expression outlier z-score matrix from rule _9M
-    (quantify_gene_by_assignment.py's <outprefix>_zscores_cptm.tsv --
-    see scripts/expression_outliers.py's module docstring for the
-    algorithm). Same shape/format as load_gene_expression_df's matrix; kept
-    as a separate loader since the two files serve different annotation
-    columns (raw CPTM value vs. the robust outlier score) and may be
-    supplied independently."""
     return pd.read_csv(path, sep='\t', index_col=0)
 
 
 def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_name, omim_df=None,
                      gene_expression_df=None, gene_expression_motr_df=None,
                      gene_expression_zscore_df=None, gene_expression_outlier_threshold=3.0):
-    """Build one sample's ranked candidate-hits table. All four input
-    DataFrames are assumed already loaded (via load_*() above) and already
-    filtered down to this sample only -- this function itself is agnostic
-    to whether they came from single-sample files or were filtered out of
-    group-level tables. cohort_junction_df/omim_df may be None (same
-    fallback behavior as omitting --cohort-junction-hits/--omim on the CLI:
-    cohort_* columns filled with '.', phenotypes/inheritance_patterns
-    filled with '.')."""
 
-    # Create modified DataFrames
-    # mod_variant_df should contain genes, variant_pos, variant_GT_{caller}, variant_CLNSIG, variant_nsamples
     gt_by_caller = _build_gt_by_caller(variant_df)
     gt_caller_cols = [f'variant_GT_{suffix}' for suffix in _CALLER_GT_DISPLAY.values()]
     mod_variant_df = (
@@ -443,8 +266,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
                 variant_nsamples=('variant_nsamples', lambda x: ','.join(dict.fromkeys(x.astype(str)))),
             )
             .reset_index()
-            # Bring in the per-caller GT columns (one row per (gene, variant_ID),
-            # same grain as the aggregation above) before collapsing to gene level.
             .merge(gt_by_caller, on=['gene', 'variant_ID'], how='left')
             .groupby('gene', sort=False)
             .agg(
@@ -460,8 +281,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
             )
             .reset_index()
     )
-    # mod_junction_df should contain genes, bulk_jxns, bulk_jxn_coverage, bulk_deltaPSI, bulk_jxn_nsamples, 
-    # hap1_jxns, hap1_jxn_coverage, hap1_deltaPSI, hap1_jxn_nsamples, hap2_jxns, hap2_jxn_coverage, hap2_delta_PSI, hap2_jxn_nsamples
     mod_junction_df = build_phased_junction_df(junction_df, '')
     if cohort_junction_df is not None:
         mod_cohort_junction_df = build_phased_junction_df(
@@ -471,36 +290,24 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     else:
         mod_cohort_junction_df = None
 
-    # Merge hits
     hit_df = pd.merge(mod_variant_df, ase_df, on='gene', how='outer')
     hit_df = pd.merge(hit_df, mod_junction_df, on='gene', how='outer')
     if mod_cohort_junction_df is not None:
         hit_df = pd.merge(hit_df, mod_cohort_junction_df, on='gene', how='outer')
     else:
-        # No cohort-comparison junction data provided -- keep the same
-        # output schema, just unannotated, rather than dropping these
-        # columns entirely (mirrors the phenotypes/inheritance_patterns
-        # fallback below when omim_df is omitted).
         for phasing in ('bulk', 'hap1', 'hap2'):
             for suffix in ('jxns', 'jxn_coverage', 'deltaPSI', 'deltaPSIapprox', 'delta5ssIR',
                            'delta3ssIR', 'deltaFullIR', 'deltaIPA', 'jxn_annotation', 'jxn_event', 'jxn_nsamples'):
                 hit_df['cohort_' + phasing + '_' + suffix] = '.'
     if omim_df is not None:
         hit_df = pd.merge(hit_df, omim_df, on='gene', how='left')
-        # Genes not present in the OMIM table get NaN from the left merge --
-        # treat missing haploinsufficiency data the same as FALSE, same
-        # convention as an explicitly empty cell (see setup.sh's OMIM
-        # column spec).
         hit_df['haploinsufficient'] = hit_df['haploinsufficient'].fillna(False)
     else:
-        # No OMIM data provided -- keep the same output schema, just
-        # unannotated, rather than dropping these columns entirely.
         hit_df['phenotypes'] = '.'
         hit_df['inheritance_patterns'] = '.'
         hit_df['haploinsufficient'] = False
     hit_df = hit_df.drop_duplicates()
 
-    # Create boolean columns to indicate whether there is a candidate variant or allele-specific expression
     hit_df["variant"] = hit_df["variant_ID"].notna()
     hit_df["pathogenic_variant"] = (
         hit_df["variant_CLNSIG"]
@@ -509,12 +316,10 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     )
     hit_df["ASE"] = pd.to_numeric(hit_df["ASE_ratio"], errors="coerce").notna()
 
-    # Add a column to indicate whether a gene has strong, moderate, weak, splicing dysregulation
 
     _FLOAT_TOKEN_RE = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
 
     def max_deltas(row, prefix=''):
-        """ Extract the max |delta| across all populated delta metrics for a gene, per phasing tier """
         def parse_vals(s):
             if not pd.notna(s):
                 return []
@@ -523,34 +328,11 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
                 v = v.strip()
                 if not v:
                     continue
-                # Each [,;]-split chunk is one junction's value(s) for this
-                # delta metric -- for the GTEx-comparison columns this is no
-                # longer always a bare number: build_phased_junction_df now
-                # tags every value with which GTEx tissue it came from (e.g.
-                # "0.24 (wholeblood)", or "0.11 (brain) 0.11 (fibroblasts)"
-                # if more than one tissue flagged the same junction), so
-                # calling float() on the whole chunk directly would always
-                # raise here. Extract every numeric token in the chunk
-                # instead -- this also naturally still handles the
-                # untagged, comma/semicolon-only case (cohort_* columns,
-                # which have no per-tissue axis) since a bare number is
-                # itself a single matching token.
                 for token in _FLOAT_TOKEN_RE.findall(v):
                     try:
                         vals.append(float(token))
                     except ValueError:
-                        # Shouldn't happen given the regex already
-                        # constrains to float-shaped tokens, but skip
-                        # rather than crash if it somehow does.
                         continue
-                # Non-numeric sentinels (from rules/7_cohort_junction_analysis.smk's
-                # identify_cohort_junction_outliers.py: "low_n" -- too few
-                # cohort samples with good coverage, "error" -- beta_binomial
-                # fit failed, "no_variance" -- modified_zscore found zero
-                # variance in the reference distribution) contain no digits
-                # at all, so the regex above naturally finds no tokens and
-                # contributes nothing for them -- same "not statistically
-                # testable, skip rather than crash" behavior as before.
             return vals
 
         def max_for_phasing(phasing):
@@ -566,7 +348,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         return max_bulk, max_hap1, max_hap2
 
     def inspect_row(row, prefix=''):
-        """ Determine if a gene has splicing dysregulation """
         max_bulk, max_hap1, max_hap2 = max_deltas(row, prefix)
         dominant = any(x in row['inheritance_patterns'] for x in ['AD', 'XLD']) if pd.notna(row.get('inheritance_patterns')) else False
         if (
@@ -583,72 +364,13 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
             return "None"
     hit_df['outlier_junction'] = hit_df.apply(inspect_row, axis=1)
     if mod_cohort_junction_df is not None:
-        # NOTE: cohort_bulk_deltaPSI (etc.) is delta_junction_PSI for groups
-        # analyzed with the beta_binomial method (a PSI-scale value in
-        # [-1, 1], same units the 0.2/0.5 thresholds below assume) but
-        # modz_junction_PSI for groups analyzed with modified_zscore (an
-        # unbounded z-score) -- rules/7_cohort_junction_analysis.smk picks
-        # the method per group based on its sample count. Strong/Moderate/
-        # Weak is therefore not on a consistent scale across groups that
-        # used different methods; treat cross-group comparisons of this
-        # column with that in mind.
         hit_df['cohort_outlier_junction'] = hit_df.apply(lambda row: inspect_row(row, prefix='cohort_'), axis=1)
     else:
         hit_df['cohort_outlier_junction'] = 'None'
 
-    # Fill missing values
-    # Cast to object before fillna: on pandas >=3.0, filling a still-numeric
-    # column (e.g. ASE_ratio, which is never string-joined the way the
-    # variant/junction columns are) with the string "." raises
-    # LossySetitemError instead of silently upcasting like older pandas did.
     hit_df = hit_df.astype(object)
     hit_df.fillna(".", inplace=True)
 
-    # ------------------------------------------------------------------
-    # Tier assignment (replaces the old points-based 'score').
-    #
-    # Tiers are assigned by the decision tree below, branching first on
-    # the gene's inheritance pattern (bucket 1/2/3), then walking down a
-    # fixed, ordered list of conditions per bucket -- the first condition
-    # that matches wins; lower-priority conditions are never reached once
-    # a higher one has already matched. Lower tier number = higher
-    # priority / more likely to be diagnostic.
-    #
-    # Bucket 1 -- AD or XLD only (inheritance_patterns has AD/XLD, no AR/XLR):
-    #   1: any pathogenic variant present
-    #   2: ASE, or a Strong junction outlier (GTEx- or cohort-comparison)
-    #   3: a Moderate junction outlier (not currently reachable -- see
-    #      inspect_row()'s dominant-gene Strong condition, which subsumes
-    #      the Moderate condition entirely for dominant genes; kept as an
-    #      explicit branch rather than silently dropped, in case that
-    #      ever changes)
-    #   4: a Weak junction outlier
-    #   5: at least one VUS present (nothing else above matched)
-    #
-    # Bucket 2 -- AD/AR or XLD/XLR combined (has both a dominant AND a
-    # recessive marker in inheritance_patterns):
-    #   1: 2 pathogenic variants in trans, or 1 homozygous pathogenic variant
-    #   2: any other pathogenic variant present
-    #   3: ASE or Strong junction
-    #   4: Moderate junction (same reachability caveat as bucket 1)
-    #   5: Weak junction
-    #   6: at least one VUS present
-    #
-    # Bucket 3 -- anything else (no dominant marker at all: pure AR/XLR,
-    # unknown, or no inheritance_patterns data):
-    #   1: 2 pathogenic variants in trans, or 1 homozygous pathogenic variant
-    #   2: (1 pathogenic + 1 VUS in trans) or (2 pathogenic, unclear phasing)
-    #   3-5: (1 pathogenic alone) or (2 VUS in trans) or (1 homozygous VUS)
-    #        -- 3 if ASE/Strong, 4 if Moderate, 5 if Weak, else base tier 5... 
-    #        wait: base case here is tier 2 if none of ASE/moderate/weak,
-    #        see _assign_tier's bucket-3 branch below for the exact tiers
-    #   4-6: 2 VUS, unclear phasing -- 3 if ASE/Strong, 4 if Moderate, 5 if
-    #        Weak, else tier 6
-    #   4-7: anything else with at least one VUS or orthogonal evidence --
-    #        4 if ASE/Strong, 5 if Moderate, 6 if Weak, else 7 if >=1 VUS
-    #
-    # See _assign_tier() for the exact tier numbers per branch -- the
-    # prose above is a summary, the code is authoritative.
     def _clean_inheritance(s):
         return str(s).strip().strip('"') if pd.notna(s) else ''
 
@@ -664,16 +386,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
             return 3
 
     def _classify_gene_variants(gene_variant_rows):
-        """gene_variant_rows: raw (pre-aggregation) variant_df rows for
-        ONE gene -- one row per (caller, physical variant). Groups those
-        rows by variant_ID (chrom-pos-ref-alt) to get one entry per
-        distinct physical variant, classifies each as pathogenic/VUS and
-        homozygous/het, then checks every pathogenic/VUS pair for
-        trans/cis/unclear phasing via resolve_phase() (which itself
-        applies the nanoTS > clair3_rna > longcallR caller-priority
-        chain). Checking every pair (not just the two highest-scoring
-        variants individually) is what lets e.g. a phased pathogenic+VUS
-        pair beat two pathogenic variants that turned out to be in cis."""
         empty = dict(
             n_pathogenic_variants=0, has_pathogenic=False, has_vus=False,
             has_homozygous_pathogenic=False, has_homozygous_vus=False,
@@ -689,14 +401,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         for variant_id, sub in gene_variant_rows.groupby('variant_ID'):
             clnsig_values = sub['CLNSIG'].astype(str)
             is_pathogenic = clnsig_values.str.contains(r'Pathogenic|Likely_pathogenic', regex=True).any()
-            # '1/1' or the phased '1|1' -- phased homozygous-ALT calls no
-            # longer get collapsed to '/' above, so both forms need
-            # checking here now.
             is_homozygous = sub['GT'].isin(['1/1', '1|1']).any()
-            # CLNSIG is a per-variant (not per-caller) annotation -- every
-            # caller row for this variant carries the same value (see
-            # compile_variants.py's extract_CLNSIG), so any row is
-            # representative for ranking purposes.
             clnsig_rank = _clnsig_category_rank(clnsig_values.iloc[0]) if is_pathogenic else None
             variants[variant_id] = dict(
                 is_pathogenic=is_pathogenic,
@@ -769,19 +474,10 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         ase_or_strong = ase or strong
         bucket = _inheritance_bucket(row['inheritance_patterns'])
 
-        # For AD/XLD genes specifically, ASE means something different
-        # depending on whether the gene is known to be haploinsufficient:
-        # for a haploinsufficient gene, one fully-silenced allele (ASE) is
-        # itself near-diagnostic, on par with a Strong junction outlier.
-        # For a non-haploinsufficient gene, the same ASE call is weaker
-        # evidence (the gene tolerates one silenced allele), so it's
-        # ranked down with Moderate junction instead. Strong/Moderate
-        # junction themselves are unconditional either way -- only ASE's
-        # weight depends on haploinsufficient.
         ase_hapi_or_strong = (ase and haploinsufficient) or strong
         ase_not_hapi_or_moderate = (ase and not haploinsufficient) or moderate
 
-        if bucket == 1:  # AD or XLD only
+        if bucket == 1:
             if vc['has_pathogenic']:
                 return 1
             if ase_hapi_or_strong:
@@ -794,7 +490,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
                 return 5
             return None
 
-        if bucket == 2:  # AD/AR or XLD/XLR combined
+        if bucket == 2:
             if vc['has_2_pathogenic_trans'] or vc['has_homozygous_pathogenic']:
                 return 1
             if vc['has_pathogenic']:
@@ -809,7 +505,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
                 return 6
             return None
 
-        # bucket == 3: anything else (AR/XLR, unknown, or no inheritance data)
         if vc['has_2_pathogenic_trans'] or vc['has_homozygous_pathogenic']:
             return 1
         if vc['has_1_pathogenic_1_vus_trans'] or vc['has_2_pathogenic_unclear']:
@@ -857,9 +552,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     hit_df['_tb_max_bulk_delta'] = hit_df.apply(_max_bulk_delta, axis=1)
 
     def _max_cadd(row):
-        """Highest CADD_PHRED across this gene's variants (semicolon-joined
-        per-variant values in variant_CADD_PHRED; '.'/blank means
-        unscored/not run and is skipped, not treated as 0)."""
         s = row.get('variant_CADD_PHRED')
         if not pd.notna(s):
             return -1
@@ -876,20 +568,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
 
     hit_df['_tb_max_cadd'] = hit_df.apply(_max_cadd, axis=1)
 
-    # Tiebreak chain (applied only when two genes have the same tier), in
-    # priority order:
-    #   1. # pathogenic variants (descending)
-    #   2. ClinVar CLNSIG category rank of the gene's best pathogenic
-    #      variant (ascending -- lower rank = stronger evidence; see
-    #      _clnsig_category_rank: Pathogenic < Pathogenic/Likely_pathogenic
-    #      < Likely_pathogenic < Conflicting_classifications_of_pathogenicity
-    #      with P/LP submissions < any other pathogenic-matching CLNSIG).
-    #      Genes with no pathogenic variant have no rank (NaN, sorts last).
-    #   3. presence of ASE (True first)
-    #   4. max junction delta magnitude (descending, across both GTEx- and
-    #      cohort-comparison junctions)
-    #   5. highest CADD score across the gene's variants (descending)
-    #   6. gene name alphabetically, as a final stable tiebreak
     hit_df.sort_values(
         by=['tier', '_tb_n_pathogenic', '_tb_clnsig_rank', 'ASE', '_tb_max_bulk_delta', '_tb_max_cadd', 'gene'],
         ascending=[True, False, True, False, False, False, True],
@@ -899,41 +577,8 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     hit_df.drop(columns=['_tb_n_pathogenic', '_tb_clnsig_rank', '_tb_max_bulk_delta', '_tb_max_cadd'], inplace=True)
     hit_df['ranking'] = np.arange(1, len(hit_df) + 1)
 
-    # Gene expression (rule _9M's targeted-panel matrices, one row per gene
-    # / one column per sample in this exact (bed_id, sample_type) cohort --
-    # see load_gene_expression_df()). Two independent normalizations of the
-    # same underlying targeted-panel raw counts are annotated side by side:
-    #   - CPTM ("counts per target million"): relative_gene_expression /
-    #     cohort_relative_gene_expression, from gene_expression_df.
-    #   - MOTR ("median of target ratios"): relative_gene_expression_motr /
-    #     cohort_relative_gene_expression_motr, from gene_expression_motr_df
-    #     -- DESeq2's classic median-of-ratios size-factor normalization
-    #     (Anders & Huber 2010), computed only over BED-panel genes (see
-    #     scripts/quantify_gene_by_assignment.py's compute_size_factors()).
-    # Each pair is independently optional/'.'-filled if its matrix wasn't
-    # supplied, via _annotate_relative_expression() below.
-    #
-    # gene_expression_zscore/gene_expression_outlier come from a SEPARATE
-    # matrix (rule _9M's <outprefix>_zscores_cptm.tsv, load_gene_expression_zscore_df(),
-    # computed on the CPTM matrix only) -- this sample's robust, leave-one-
-    # out, shrinkage-based z-score for the gene (see
-    # scripts/expression_outliers.py's module docstring for the algorithm),
-    # and whether it crosses gene_expression_outlier_threshold (one-sided:
-    # only unusually LOW expression is flagged, per design discussion --
-    # more negative z = lower expression relative to the rest of this
-    # sample's own cohort). This is annotation only for now -- it does NOT
-    # currently factor into a gene's tier.
 
     def _annotate_relative_expression(hit_df, expr_df, value_col, cohort_col, n_cohort_col=None):
-        """Shared logic for one normalization's pair of columns: `value_col`
-        (this sample's own value for the gene) and `cohort_col` ([min, Q1,
-        median, Q3, max] of the gene's values across every sample in this
-        cohort, packed into one delimited string -- same "many values, one
-        column" convention as e.g. variant_gnomAD_AF's ';'-joined values
-        elsewhere in this table). Quantiles use numpy's default (linear)
-        interpolation. `n_cohort_col`, if given, is also set to the
-        matrix's sample count (only meaningful to compute once, off
-        whichever normalization's matrix is treated as canonical)."""
         if expr_df is None:
             hit_df[value_col] = '.'
             hit_df[cohort_col] = '.'
@@ -947,11 +592,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         def _relative_expression(gene):
             if gene in expr_df.index and sample_name in expr_df.columns:
                 value = expr_df.loc[gene, sample_name]
-                # A MOTR sample excluded for too many zero-count genes
-                # (see quantify_gene_by_assignment.py's compute_size_factors())
-                # has a genuine NaN here, not a missing lookup -- fall
-                # through to the same '.' sentinel as everywhere else in
-                # this table rather than writing a raw NaN into the file.
                 if pd.isna(value):
                     return '.'
                 return value
@@ -996,11 +636,9 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         hit_df['gene_expression_zscore'] = hit_df['gene'].apply(_expression_zscore)
         hit_df['gene_expression_outlier'] = hit_df['gene'].apply(_expression_outlier)
     else:
-        # No z-score matrix provided -- same fallback convention as above.
         hit_df['gene_expression_zscore'] = '.'
         hit_df['gene_expression_outlier'] = '.'
 
-    # Reorder
     hit_df['sample'] = sample_name
     hit_df = hit_df[[
         'sample', 'gene', 'phenotypes', 'inheritance_patterns', 'haploinsufficient', 'ranking', 'tier', 'variant', 'pathogenic_variant', 'ASE', 'outlier_junction', 'cohort_outlier_junction',
@@ -1027,9 +665,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
 
 
 def main():
-    """ Main function -- standalone single-sample CLI. """
 
-    # Parse command line arguments
     args = parse_args()
     for attr, value in vars(args).items():
         if value == "None":
@@ -1044,13 +680,11 @@ def main():
 
     hit_df = build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, args.sample_name, omim_df)
 
-    # Make output directory if it doesn't exist
     if args.outfile:
         outdir = os.path.dirname(args.outfile)
         if outdir and not os.path.exists(outdir):
             os.makedirs(outdir)
 
-    # Save hits
     hit_df.to_csv(args.outfile, sep='\t', index=False)
     print(f"Saved merged hits to {args.outfile}")
 

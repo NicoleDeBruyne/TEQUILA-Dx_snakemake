@@ -1,8 +1,4 @@
-#!/usr/bin/env python
 
-# Author: Nicole DeBruyne (Lin Lab)
-# Date: 2024.10.23
-# Optimized: 2025
 
 import argparse
 import traceback
@@ -20,7 +16,6 @@ import time
 from math import ceil
 
 def parse_args():
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="Compile variants from multiple VCF files and add annotations "
                     "(gnomAD, ClinVar, Annovar, CADD, SpliceAI) into a single .tsv file "
@@ -162,27 +157,12 @@ def parse_args():
              "compute time when the prescored files are known to already cover your variant set. "
              "Has no effect if neither prescored VCF is provided -- falls through to '.' the "
              "same as an unconfigured, failed live run would.")
-    # NOTE: the --final-*/--keep-CLNSIG "final filter" arguments used to
-    # live here, but that step has been split out into the separate
-    # filter_variants.py script (operating on this script's
-    # {outprefix}_compiled_variants.tsv output) so that changing a final
-    # filter threshold doesn't require re-running annotation (ANNOVAR,
-    # gnomAD, ClinVar, CADD, SpliceAI). See filter_variants.py.
     parser.add_argument("--threads", type=int, default=1,
         help="Number of threads to use (for running CADD and SpliceAI).")
     return parser.parse_args()
 
 
 def process_gtf(gtf, outfile):
-    """Build a SpliceAI-compatible custom gene annotation file from a GTF.
-
-    GTF coordinates are 1-based, but SpliceAI's own loader does
-    `tx_starts = df['TX_START'].to_numpy() + 1` -- i.e. it expects START
-    values to already be 0-based (matching its bundled grch37.txt/
-    grch38.txt). So START gets -1 here; END needs no adjustment, since a
-    0-based-exclusive end and a 1-based-inclusive end are numerically the
-    same value.
-    """
     df = pd.read_csv(gtf, sep='\t', comment='#',
                      names=["CHROM", "SOURCE", "FEATURE", "START", "END", "SCORE", "STRAND", "FRAME", "ATTRIBUTES"])
     df = df[df['FEATURE'] == 'exon']
@@ -203,28 +183,6 @@ def process_gtf(gtf, outfile):
 
 def _run_remote_bcftools_pipeline(view_cmd, query_cmd, max_retries=5, initial_delay=15, cwd=None, label=None,
                                    quiet_success=False):
-    """Run `bcftools view ... | bcftools query ...` and return the query's stdout text.
-
-    Remote gnomAD/ClinVar/SpliceAI VCFs stream directly over HTTP(S) via
-    htslib's libcurl backend, which intermittently drops long-lived HTTP/2
-    streams with "Error in the HTTP2 framing layer" -- a known, generic
-    libcurl/HTTP2 issue (curl/curl#3750), not specific to this pipeline or
-    to any one host. Retries with exponential backoff before giving up.
-
-    Querying a remote file also makes htslib cache a local copy of the
-    small .tbi/.csi index (not the VCF itself) in whatever directory the
-    process runs from. `cwd` pins that to a predictable per-sample
-    location instead, so concurrent per-sample jobs don't collide writing
-    index-cache files into a shared directory.
-
-    `label`, if given, tags the success/failure log lines (e.g. 'chunk
-    5/1208') so multi-chunk callers can show which chunk succeeded and how
-    many attempts it took.
-
-    `quiet_success`, if True, skips the "Succeeded on attempt X/Y" line --
-    useful for local (non-HTTP) queries, which never need a retry, so that
-    line would just be noise. Failures still print regardless.
-    """
     tag = f' ({label})' if label else ''
     delay = initial_delay
     last_err = ''
@@ -259,10 +217,6 @@ def _run_remote_bcftools_pipeline(view_cmd, query_cmd, max_retries=5, initial_de
 
 
 def _bcftools_header_with_retry(vcf_file, max_retries=5, initial_delay=15, cwd=None):
-    """subprocess.check_output(['bcftools', 'view', '-h', vcf_file]) with retry,
-    to survive the same transient remote-streaming errors as
-    _run_remote_bcftools_pipeline (see docstring there). `cwd` is passed through
-    for the same local-index-cache-location reason described there."""
     delay = initial_delay
     last_err = None
     for attempt in range(1, max_retries + 1):
@@ -278,19 +232,6 @@ def _bcftools_header_with_retry(vcf_file, max_retries=5, initial_delay=15, cwd=N
 
 
 def _run_remote_tabix_with_retry(url, extra_args, max_retries=5, initial_delay=15, cwd=None, label=None):
-    """tabix <url> <extra_args...> with retry, to survive the same transient
-    remote-streaming errors as _run_remote_bcftools_pipeline (see docstring
-    there). Returns stdout text. `cwd` pins tabix's local index-cache
-    (.tbi) write to a predictable directory, same reasoning as
-    _run_remote_bcftools_pipeline/_bcftools_header_with_retry.
-
-    `label`, if given, is included in the log lines (see
-    _run_remote_bcftools_pipeline). Success is always logged here (unlike
-    _run_remote_bcftools_pipeline's quiet_success option) -- this function
-    is only ever used for genuinely remote queries (CADD's pre-scored SNV
-    lookup), so knowing which attempt it took is useful the same way it is
-    for gnomAD/ClinVar.
-    """
     tag = f' ({label})' if label else ''
     cmd = ['tabix', url] + list(extra_args)
     delay = initial_delay
@@ -318,38 +259,6 @@ def _is_remote_url(path):
 
 
 def _query_vcf_regions(vcf_file, bed_file, format_string, threads, cwd, chunk_size=10, max_workers=None):
-    """bcftools view -R bed_file <vcf_file> | bcftools query -f format_string,
-    returning the combined stdout text.
-
-    For a *remote* vcf_file, regions are split into chunks of `chunk_size`
-    (default 10) and queried as separate connections, to work around a
-    known htslib/libcurl HTTP/2 bug ("Error in the HTTP2 framing layer",
-    curl/curl#3750). Chunk size matters empirically -- 10 keeps the
-    per-attempt failure rate low; larger chunks (e.g. 100) fail more often,
-    likely because a bigger connection streams more data/frames. A failed
-    chunk only has to retry that chunk, not the whole panel.
-
-    Pass chunk_size=None (or 0) to always query in one shot, even for a
-    remote file -- useful when the remote file itself is small enough that
-    one connection is unlikely to trip the bug (see extract_CLNSIG, whose
-    ClinVar VCF is ~200MB vs. gnomAD's tens-of-GB-per-chromosome files).
-
-    max_workers defaults to `threads` -- chunks are queried concurrently.
-    Testing at max_workers=1 showed the same per-chunk retry pattern as
-    parallel runs, so concurrency doesn't appear to affect the failure
-    rate; there's no reason to pay for serial querying's longer wall-clock
-    time. Every chunk's outcome (success or failure, and which attempt) is
-    logged, so the retry rate stays visible if this needs re-tuning.
-
-    Regions are deduped here too (belt-and-suspenders -- the real dedup
-    happens once upstream, wherever bed_file is written, since df can have
-    duplicate positions: one row per caller that reported a variant there,
-    or per ALT at a multiallelic site). Cheap on an already-clean file,
-    and guards against any future caller that forgets to dedupe first.
-
-    Local vcf_file paths are always queried in one shot, since this bug is
-    specific to remote HTTP(S)/FTP streaming.
-    """
     if max_workers is None:
         max_workers = threads
 
@@ -360,9 +269,6 @@ def _query_vcf_regions(vcf_file, bed_file, format_string, threads, cwd, chunk_si
         return _run_remote_bcftools_pipeline(
             view_base_cmd + ['-R', bed_file, vcf_file], query_cmd, cwd=None, quiet_success=True)
 
-    # Past this point vcf_file is confirmed remote, so this is the one
-    # place cache_dir needs to exist -- created lazily here so a purely
-    # local run never touches this directory.
     os.makedirs(cwd, exist_ok=True)
 
     if not chunk_size:
@@ -383,10 +289,6 @@ def _query_vcf_regions(vcf_file, bed_file, format_string, threads, cwd, chunk_si
           f'time, to avoid a known libcurl HTTP/2 bug triggered by too many requests on '
           f'one persistent connection.')
 
-    # Each chunk is tiny, so there's nothing worth parallel-decompressing
-    # per chunk -- concurrency comes from running multiple chunks at once
-    # instead (below). Using the full `threads` count here too would mean
-    # threads*max_workers OS threads for a handful of bytes per chunk.
     chunk_view_cmd = ['bcftools', 'view', '--threads', '1']
 
     def _query_chunk(chunk_num, chunk_regions):
@@ -415,7 +317,6 @@ def _query_vcf_regions(vcf_file, bed_file, format_string, threads, cwd, chunk_si
 
 
 def process_vcf(vcf_file, vcf_file_name, bed_file, genome):
-    """Extract variant information from VCF file."""
 
     vcf_data = {}
 
@@ -430,7 +331,7 @@ def process_vcf(vcf_file, vcf_file_name, bed_file, genome):
     result = subprocess.run(command, stdout=subprocess.PIPE, universal_newlines=True, check=True)
     lines = result.stdout.split('\n')
 
-    for line in lines[:-1]:   # skip trailing empty element
+    for line in lines[:-1]:
         fields = line.split('\t')
         chrom, pos, _, ref, alt, qual, filt, info, form, genotype = (f.strip() for f in fields[:10])
         format_keys = form.split(':')
@@ -439,12 +340,6 @@ def process_vcf(vcf_file, vcf_file_name, bed_file, genome):
         gt = format_dict.get('GT', '.')
         dp = format_dict.get('DP', '.')
         af = format_dict.get('VAF') or format_dict.get('AF') or '.'
-        # PS (phase set): only meaningful when GT is phased (contains '|').
-        # Two variants share real phase information only when they come
-        # from the SAME caller AND have the same non-'.' PS value -- PS is
-        # local to one sample/contig/caller's phasing run, never
-        # comparable across callers even if the integer happens to match.
-        # See merge_hits.py's resolve_phase() for how this gets used.
         ps = format_dict.get('PS', '.')
         vcf_data[(vcf_file_name, chrom, pos, ref, alt)] = [qual, filt, info, form, genotype, gt, dp, af, ps]
 
@@ -453,25 +348,6 @@ def process_vcf(vcf_file, vcf_file_name, bed_file, genome):
 
 
 def extract_gnomAD_AF(df, gnomad_vcf, outprefix, bed_file, threads, cache_dir, gnomad_vcf_fallback=None):
-    """Extract gnomAD allele frequencies from gnomAD VCF file(s). Each entry in
-    gnomad_vcf may be a local path or a remote http(s)/ftp URL -- a remote
-    bgzip+tabix-indexed VCF is queried directly for only the byte ranges
-    needed, never downloaded in full. Local-file/index existence is only
-    checked for local paths, since remote index files are fetched
-    transparently.
-
-    cache_dir: where to pin htslib's local index-cache (.tbi/.csi) writes
-    for remote queries (see _run_remote_bcftools_pipeline).
-
-    gnomad_vcf_fallback: retried once if gnomad_vcf fails for any reason
-    and isn't identical to gnomad_vcf -- typically the canonical public
-    gnomAD URL, so a broken/missing local install doesn't halt the
-    pipeline. If that also fails (or isn't given), 'gnomAD_AF' is filled
-    with 'fail' for every variant instead of raising, so the rest of the
-    pipeline still runs and the output always has this column. ('fail'
-    is distinct from '.', which means the query ran successfully but the
-    variant genuinely isn't in gnomAD.)
-    """
 
     start_time = time.time()
 
@@ -479,8 +355,6 @@ def extract_gnomAD_AF(df, gnomad_vcf, outprefix, bed_file, threads, cache_dir, g
         return re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', path) is not None
 
     def _attempt(gnomad_vcf_value):
-        """One attempt against a given comma-separated gnomad_vcf value.
-        Returns the updated df, or raises on any failure."""
         nonlocal df
 
         for gnomad_vcf_file in gnomad_vcf_value.split(','):
@@ -522,9 +396,7 @@ def extract_gnomAD_AF(df, gnomad_vcf, outprefix, bed_file, threads, cache_dir, g
                 sep='\t', header=None,
                 names=['chrom', 'pos', 'ref', 'alt', 'gnomAD_AF'], dtype=str)
 
-            # Vectorised AF parsing — avoids per-row apply
             def _parse_af_series(series):
-                # Replace '.' with NaN, then take first comma-separated value
                 s = series.where(series != '.', other=np.nan)
                 s = s.str.split(',').str[0]
                 return pd.to_numeric(s, errors='coerce')
@@ -569,37 +441,15 @@ def extract_gnomAD_AF(df, gnomad_vcf, outprefix, bed_file, threads, cache_dir, g
 
 
 def extract_CLNSIG(df, clinvar_vcf, outprefix, bed_file, threads, cache_dir, clinvar_vcf_fallback=None):
-    """Extract ClinVar CLNSIG annotations from ClinVar VCF file. clinvar_vcf may
-    be a local path or a remote http(s)/ftp URL (see extract_gnomAD_AF).
-
-    cache_dir: where to pin htslib's local index-cache writes for remote
-    queries (see extract_gnomAD_AF / _run_remote_bcftools_pipeline).
-
-    clinvar_vcf_fallback: retried once if clinvar_vcf fails and isn't
-    identical to clinvar_vcf -- typically the canonical public ClinVar URL.
-    If that also fails (or isn't given), 'CLNSIG' is filled with 'fail'
-    for every variant instead of raising, so the rest of the pipeline
-    still runs and the output always has this column. ('fail' is distinct
-    from '.', which means the query ran successfully but the variant
-    genuinely isn't in ClinVar.)
-    """
 
     start_time = time.time()
 
-    # ClinVar's VCF uses bare Ensembl-style contig names ("19", not
-    # "chr19") -- confirmed directly (see test_remote_annotation_access.sh)
-    # -- even though the rest of this pipeline, including bed_file, is
-    # chr-prefixed. True for both local and remote ClinVar, since both come
-    # from the same NCBI file. Querying with the chr-prefixed bed_file
-    # directly returns zero matches silently, so build a chr-stripped copy
-    # here (same pattern as _run_CADD_remote_prescored's cadd_bed_file).
     clinvar_bed_file = outprefix + '_clinvar_lookup_positions.bed'
     clinvar_bed_df = pd.read_csv(bed_file, sep='\t', header=None, names=['chrom', 'start', 'end'], dtype=str)
     clinvar_bed_df['chrom'] = clinvar_bed_df['chrom'].str.replace(r'^chr', '', regex=True)
     clinvar_bed_df.to_csv(clinvar_bed_file, sep='\t', index=False, header=False)
 
     def _attempt(clinvar_vcf_value):
-        """One attempt against a given ClinVar VCF value. Raises on failure."""
         nonlocal df
 
         if not re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', clinvar_vcf_value):
@@ -617,8 +467,6 @@ def extract_CLNSIG(df, clinvar_vcf, outprefix, bed_file, threads, cache_dir, cli
             io.StringIO(query_stdout),
             sep='\t', header=None,
             names=['chrom', 'pos', 'ref', 'alt', 'CLNSIG', 'CLNSIGCONF'], dtype=str)
-        # Add the 'chr' prefix back so this merges correctly against df's
-        # chr-prefixed chrom column.
         clnsig_df['chrom'] = 'chr' + clnsig_df['chrom'].astype(str)
         clnsig_df['CLNSIG'] = np.where(
             clnsig_df['CLNSIGCONF'].notna() & (clnsig_df['CLNSIGCONF'] != '.'),
@@ -658,15 +506,6 @@ def extract_CLNSIG(df, clinvar_vcf, outprefix, bed_file, threads, cache_dir, cli
 
 
 def add_gene_overlap_column(df, panel_bed):
-    """Add a 'gene' column listing every BED-panel gene whose interval overlaps
-    each variant's position (comma-separated if more than one gene overlaps,
-    '.' if none). Reads the panel BED the same way phase_reads.py's
-    extract_gene_regions() does (chrom, start, end, gene name in column 4),
-    so variant-level gene labels agree with the gene labels ASE/junction hits
-    are already keyed on -- independent of ANNOVAR, whose refGene symbol can
-    differ from the panel's own gene naming, or be unavailable entirely (see
-    merge_hits.py, which uses this column -- not ANNOVAR_Gene.refGene -- to
-    group variants by gene)."""
     if not panel_bed:
         df['gene'] = '.'
         return df
@@ -679,7 +518,6 @@ def add_gene_overlap_column(df, panel_bed):
             genes_by_chrom[chrom].append((start, end, gene))
 
     def genes_at(chrom, pos):
-        # BED is 0-based half-open; pos here is 1-based (matches df['pos']).
         hits = [gene for start, end, gene in genes_by_chrom.get(chrom, []) if start < pos <= end]
         return ','.join(hits) if hits else '.'
 
@@ -688,14 +526,6 @@ def add_gene_overlap_column(df, panel_bed):
 
 
 def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
-    """Run Annovar on all variants.
-
-    If ANNOVAR fails for any reason (a failed convert2annovar.pl/
-    table_annovar.pl call, an unreadable output file, etc.), the
-    ANNOVAR_* columns are filled with 'fail' for every variant instead of
-    raising, so the rest of the pipeline still runs and the output always
-    has these columns. ('fail' is distinct from '.', which is used for
-    variants ANNOVAR did successfully process but had no annotation for.)"""
 
     ANNOVAR_COLUMNS = [
         'ANNOVAR_Func.refGene', 'ANNOVAR_Gene.refGene', 'ANNOVAR_GeneDetail.refGene',
@@ -706,7 +536,6 @@ def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
         ANNOVAR_outdir = os.path.join(os.path.dirname(outprefix), 'ANNOVAR')
         os.makedirs(ANNOVAR_outdir, exist_ok=True)
         print(f'\nMaking a VCF file with all variants for Annovar analysis...')
-        # Use a set of tuples for deduplication — avoids itertuples overhead on large DFs
         variants = set(map(tuple, df[['chrom', 'pos', 'ref', 'alt']].values.tolist()))
         with open(os.path.join(ANNOVAR_outdir, 'compiled_variants.vcf'), 'w') as f:
             f.write('##fileformat=VCFv4.2\n')
@@ -743,15 +572,15 @@ def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
                     continue
                 parts = line.strip().split(',')
                 chrom, start, end, ref, alt = parts[0:5]
-                if ref == '-':   # Insertion
+                if ref == '-':
                     pos = int(start)
                     ref = pysam_genome.fetch(chrom, pos - 1, pos)
                     alt = ref + alt
-                elif alt == '-':  # Deletion
+                elif alt == '-':
                     pos = int(start) - 1
                     alt = pysam_genome.fetch(chrom, pos - 1, pos)
                     ref = pysam_genome.fetch(chrom, pos - 1, pos + (int(end) - int(start)) + 1)
-                else:             # SNP
+                else:
                     pos = int(start)
                 f2.write(f'{chrom},{pos},{end},{ref},{alt},' + ','.join(parts[5:]) + '\n')
 
@@ -764,10 +593,6 @@ def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
         df.drop(columns=['ANNOVAR_Chr', 'ANNOVAR_Start', 'ANNOVAR_End', 'ANNOVAR_Ref', 'ANNOVAR_Alt'], inplace=True)
         df = df.fillna('.')
 
-        # Keep all of ANNOVAR's raw output in ANNOVAR_outdir (input .vcf,
-        # .avinput, .log, the raw multianno.csv, and the pipeline's
-        # position-corrected version built above) rather than deleting the
-        # intermediate files -- useful for debugging/audit.
         print(f'\nAnnovar analysis complete.\n')
 
     except Exception as e:
@@ -783,31 +608,7 @@ def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
 
 
 def run_CADD_chunk(chunk_variants, idx, outprefix, CADD_script, CADD_data_dir, include_CADD_annotations):
-    """Run CADD on a chunk of variants, via CADD-scripts' own conda envs.
 
-    Invokes CADD_script directly (see setup_resources.sh's CADD-scripts
-    install section). CADD_script is whatever config.yaml's cadd_script
-    points at -- normally a wrapper script generated by setup_resources.sh
-    (CADD_wrapper.sh, alongside CADD.sh itself), not CADD.sh directly.
-    Environment requirements CADD.sh has (e.g. its conda mode needing
-    Snakemake >=8.25.2 on PATH to launch its internal
-    `snakemake --sdm conda ...` call, a version this pipeline's own
-    Snakemake 7.x doesn't provide, without leaking other unrelated tooling
-    onto PATH where it could shadow something CADD.sh's own per-rule conda
-    envs need -- see setup_resources.sh's CADD-scripts section) are handled
-    entirely by whatever config.yaml points cadd_script at, not by any
-    environment-management logic here. This keeps compile_variants.py
-    itself free of environment-specific assumptions, so it stays portable
-    and runnable outside Snakemake too -- it just execs whatever
-    CADD_script path it's given, inheriting its own environment as-is.
-
-    Runs CADD.sh in conda-only mode (`-m`) directly -- singularity/
-    apptainer is not attempted on this system.
-    """
-
-    # Grouped under {work_dir}/CADD/ rather than flat sibling files in
-    # work/ -- work_dir is already sample-scoped, so a per-chunk sample
-    # prefix would be redundant.
     work_dir = os.path.dirname(outprefix)
     CADD_dir = os.path.join(work_dir, 'CADD', f'CADD_chunk_{idx}')
     os.makedirs(CADD_dir, exist_ok=True)
@@ -822,9 +623,6 @@ def run_CADD_chunk(chunk_variants, idx, outprefix, CADD_script, CADD_data_dir, i
             f.write(f'{chrom}\t{pos}\t.\t{ref}\t{alt}\t.\t.\t.\n')
     subprocess.run(['bgzip', vcf_path])
 
-    # CADD.sh finds its data directory relative to its own location
-    # (<CADD_script's dir>/data), so CADD_data_dir just needs to already be
-    # that directory -- nothing to bind-mount for a local conda-based run.
     out_gz = os.path.join(CADD_dir, f'CADD_chunk_{idx}.tsv.gz')
 
     cmd = [CADD_script, '-m']
@@ -834,20 +632,6 @@ def run_CADD_chunk(chunk_variants, idx, outprefix, CADD_script, CADD_data_dir, i
 
     log_file = os.path.join(CADD_dir, f'CADD_chunk_{idx}.log')
 
-    # CADD.sh's *internal* Snakemake process (its own `--sdm conda ...`
-    # call) resolves its own rules' relative data paths (e.g.
-    # 'data/annotations/GRCh38_v1.7/esm/pep.110.fa') against whatever
-    # directory it's actually launched from -- not against CADD.sh's own
-    # script location, and not against CADD_data_dir. So this subprocess
-    # MUST run with cwd set to CADD-scripts' own install directory
-    # (wherever CADD_script/CADD_wrapper.sh itself lives), or every one of
-    # those relative paths silently fails to resolve -- surfacing as a
-    # Snakemake MissingInputException for rules further into CADD's own
-    # DAG (e.g. annotate_esm), even though the files themselves are present
-    # on disk. (CADD_dir, above, is this *pipeline's own* per-chunk work
-    # directory -- unrelated, and wrong for this purpose despite the
-    # similar name.) -o/-p above are absolute paths regardless, so they're
-    # unaffected by this.
     CADD_install_dir = os.path.dirname(os.path.abspath(CADD_script))
 
     with open(log_file, 'w') as log:
@@ -856,8 +640,6 @@ def run_CADD_chunk(chunk_variants, idx, outprefix, CADD_script, CADD_data_dir, i
         try:
             subprocess.run(cmd, stdout=log, stderr=log, check=True, cwd=CADD_install_dir)
         except subprocess.CalledProcessError:
-            # Surface the log's tail so run_CADD's WARNING message shows
-            # what actually went wrong, not just an exit code.
             with open(log_file) as f:
                 tail = ''.join(f.readlines()[-40:])
             raise RuntimeError(
@@ -865,27 +647,10 @@ def run_CADD_chunk(chunk_variants, idx, outprefix, CADD_script, CADD_data_dir, i
                 f'Last lines of {log_file}:\n{tail}')
 
     df_CADD = pd.read_csv(os.path.join(CADD_dir, f'CADD_chunk_{idx}.tsv.gz'), sep='\t', skiprows=1)
-    # Keep all of CADD's raw output for this chunk (input VCF, log, and the
-    # CADD_chunk_{idx}.tsv.gz result) rather than deleting the intermediate
-    # files -- useful for debugging/audit.
     return df_CADD
 
 
 def _gnomad_clnsig_filter_mask(df, gnomad_af_threshold, clnsig_filter):
-    """Boolean mask (aligned to df.index): True for variants passing a
-    gnomAD-AF-threshold / CLNSIG-exclusion filter. Used to restrict which
-    variants get sent to CADD (local or remote) and to SpliceAI -- each
-    stage calls this with its own threshold/filter (--CADD-gnomadAF-
-    threshold/--CADD-CLNSIG-filter vs. --SpliceAI-gnomadAF-threshold/
-    --SpliceAI-CLNSIG-filter), so the two can be tuned to score different
-    variant subsets, or set to matching values to always score the same one.
-
-    Missing 'gnomAD_AF'/'CLNSIG' columns (source not provided at all) are
-    treated as "no constraint from that source", not as excluding
-    everything. Same for '.' (queried, genuinely not found/no value) and
-    'fail' (the gnomAD stage itself failed at runtime) -- neither should
-    cause a variant to be excluded just because its AF is unknown.
-    """
     mask = pd.Series(True, index=df.index)
     if gnomad_af_threshold is not None and 'gnomAD_AF' in df.columns:
         gnomad_numeric = pd.to_numeric(df['gnomAD_AF'], errors='coerce')
@@ -896,21 +661,6 @@ def _gnomad_clnsig_filter_mask(df, gnomad_af_threshold, clnsig_filter):
 
 
 def _print_filter_summary(label, df, mask, gnomad_af_threshold, clnsig_filter):
-    """Prints a human-readable summary of a _gnomad_clnsig_filter_mask
-    result -- what criteria were applied and how many UNIQUE variants
-    (deduplicated by chrom/pos/ref/alt, same convention as
-    _run_CADD_local/_run_SpliceAI_live's own variant counts) passed, out
-    of how many unique variants total. Printed once for CADD's mask and
-    once for SpliceAI's, right after both are computed in main() -- lets
-    you directly compare the two selected counts before either stage
-    actually runs, e.g. to confirm they're selecting the same variant set
-    when --CADD-gnomadAF-threshold/--CADD-CLNSIG-filter and
-    --SpliceAI-gnomadAF-threshold/--SpliceAI-CLNSIG-filter are configured
-    to match. (Downstream per-stage counts can still differ from this
-    even when the masks match exactly -- e.g. CADD's local-run vs.
-    pre-scored-lookup tiers, or a prescored file simply not covering every
-    selected variant -- but this isolates whether the *selection* itself
-    matches, before any of that.)"""
 
     unique_cols = ['chrom', 'pos', 'ref', 'alt']
     n_total = df[unique_cols].drop_duplicates().shape[0]
@@ -924,23 +674,9 @@ def _print_filter_summary(label, df, mask, gnomad_af_threshold, clnsig_filter):
 
 
 def _run_CADD_local(df, outprefix, CADD_script, CADD_data_dir, include_CADD_annotations, mask, threads):
-    """Run CADD locally via CADD-scripts (CADD_script/CADD_data_dir), on
-    variants passing `mask` (see _gnomad_clnsig_filter_mask). Raises on any
-    failure rather than catching -- see run_CADD, the dispatcher that
-    decides between this, the remote pre-scored lookup, and filling '.',
-    and that does the checkpoint-tsv write either way.
-
-    Assumes CADD-scripts' shared per-rule conda envs are already built
-    (see setup_resources.sh's CADD-scripts section, which forces this via
-    a real scoring pass against CADD-scripts' own bundled test VCF) --
-    all chunks run concurrently from the start, with no serial
-    first-chunk-alone step to build them. See run_CADD_chunk's chunk-
-    submission comment below for what happens if that assumption doesn't
-    hold."""
 
     print(f'\nPreparing variants for CADD analysis...')
     filtered_df = df[mask].copy()
-    # Strip 'chr' prefix vectorially
     filtered_df['chrom'] = filtered_df['chrom'].str.replace(r'^chr', '', regex=True)
     filtered_variants = list(set(map(tuple, filtered_df[['chrom', 'pos', 'ref', 'alt']].values.tolist())))
 
@@ -956,19 +692,6 @@ def _run_CADD_local(df, outprefix, CADD_script, CADD_data_dir, include_CADD_anno
           f'of {len(chunked_variants[0])} variants each, using {threads} threads...')
     del filtered_variants
 
-    # Each chunk shells out to CADD_script, which runs CADD-scripts' conda
-    # mode (see run_CADD_chunk), building/reusing shared per-rule conda
-    # envs (under <CADD install dir>/envs/conda) via its internal
-    # `snakemake --sdm conda ...` call. Those envs are assumed to already
-    # be built at this point -- setup_resources.sh's CADD-scripts section
-    # forces a real scoring pass against CADD-scripts' own bundled test
-    # VCF specifically to build every env CADD.sh needs before any real
-    # sample ever reaches this code path -- so all chunks (including the
-    # first) run concurrently from the start, with no serial "build the
-    # envs first" chunk. If that setup step was skipped, or a new env
-    # somehow wasn't covered by it, concurrent chunks could race trying to
-    # build the same missing env into the same shared --conda-prefix --
-    # rerun setup_resources.sh's CADD-scripts section if that happens.
     with concurrent.futures.ProcessPoolExecutor(max_workers=threads) as executor:
         futures = {
             executor.submit(run_CADD_chunk, chunk, idx, outprefix, CADD_script,
@@ -988,9 +711,6 @@ def _run_CADD_local(df, outprefix, CADD_script, CADD_data_dir, include_CADD_anno
         raise RuntimeError('No chunks completed successfully.')
 
     df_CADD = pd.concat(results, ignore_index=True)
-    # (CADD's raw per-chunk output now persists as CADD_chunk_{idx}.tsv.gz
-    # under work/CADD/CADD_chunk_{idx}/ -- see run_CADD_chunk -- rather than
-    # a separate combined file here.)
     df_CADD = df_CADD.add_prefix('CADD_')
     df_CADD['CADD_#Chrom'] = 'chr' + df_CADD['CADD_#Chrom'].astype(str)
     df_CADD['CADD_Pos'] = df_CADD['CADD_Pos'].astype(str)
@@ -1005,11 +725,6 @@ def _run_CADD_local(df, outprefix, CADD_script, CADD_data_dir, include_CADD_anno
 
 
 def _query_local_tabix_tsv(path, bed_file, cwd, columns):
-    """tabix <path> -R <bed_file>, run locally (no retry -- unlike the
-    remote/URL case, a local file read failing isn't a transient network
-    issue worth retrying). Returns a DataFrame parsed from stdout using
-    `columns` as the (headerless) column names. Raises on any tabix
-    failure."""
     cmd = ['tabix', path, '-R', bed_file]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                            universal_newlines=True, cwd=cwd)
@@ -1020,35 +735,12 @@ def _query_local_tabix_tsv(path, bed_file, cwd, columns):
 
 def _run_CADD_local_prescored(df, outprefix, CADD_local_prescored_snv, CADD_local_prescored_indel,
                                cache_dir, mask, threads):
-    """Look up CADD scores from CADD-scripts' own downloaded local
-    pre-scored files (SNV and/or InDel) via a local tabix query,
-    restricted to variants passing `mask` -- no local CADD-scripts *run*
-    needed, just the downloaded prescored/ data. Each of
-    CADD_local_prescored_snv/CADD_local_prescored_indel is optional: SNVs
-    are looked up in the former, InDels in the latter; if one is missing,
-    that variant type simply gets '.' from this stage (may still be
-    covered by --CADD-prescored-url's remote SNV fallback afterwards, if
-    it was an SNV). Raises on any failure -- see run_CADD, the dispatcher
-    that decides between local run, this, the remote pre-scored lookup,
-    and filling '.'."""
 
     print(f'\nLooking up CADD scores from local pre-scored file(s)...')
     os.makedirs(cache_dir, exist_ok=True)
 
     filtered_df = df[mask].copy()
-    # Dedupe by (chrom, pos, ref, alt) before counting/looking up -- matches
-    # _run_CADD_local's and _run_SpliceAI_live's variant counting (both use
-    # set(map(tuple, ...))), so all three report/process a consistent
-    # variant count regardless of duplicate rows in df (e.g. the same
-    # variant surviving from more than one caller). Without this, a
-    # duplicated row gets queried (and counted in the printed "Looking up N
-    # variant(s)" message) once per occurrence -- harmless to the result
-    # (same lookup, same score, merged back onto every duplicate row via
-    # the final merge below regardless), but confusingly inconsistent
-    # against SpliceAI's deduplicated count for the same mask/threshold.
     filtered_df = filtered_df.drop_duplicates(subset=['chrom', 'pos', 'ref', 'alt'])
-    # CADD's score files use bare Ensembl-style contig names ("19", not
-    # "chr19") even on GRCh38 -- same convention as the remote lookup.
     filtered_df['chrom'] = filtered_df['chrom'].astype(str).str.replace(r'^chr', '', regex=True)
     is_snv = (filtered_df['ref'].str.len() == 1) & (filtered_df['alt'].str.len() == 1)
     snv_df, indel_df = filtered_df[is_snv], filtered_df[~is_snv]
@@ -1100,22 +792,11 @@ def _run_CADD_local_prescored(df, outprefix, CADD_local_prescored_snv, CADD_loca
 
 
 def _run_CADD_remote_prescored(df, outprefix, CADD_prescored_url, cache_dir, mask, threads):
-    """Look up CADD scores from the public pre-scored whole-genome SNV file
-    via a remote tabix byte-range query, restricted to variants passing
-    `mask` -- no local CADD-scripts install needed. SNVs only: any InDel,
-    or any SNV simply not found, ends up '.' via the fillna below. Raises
-    on any failure -- see run_CADD."""
 
     print(f'\nLooking up CADD scores from the remote pre-scored SNV file...')
     os.makedirs(cache_dir, exist_ok=True)
 
-    # CADD's score files use bare Ensembl-style contig names ("19", not
-    # "chr19") even on GRCh38 -- same convention as ClinVar.
     cadd_bed_file = outprefix + '_cadd_lookup_positions.bed'
-    # Dedupe by (chrom, pos, ref, alt) first -- see _run_CADD_local_prescored's
-    # matching comment. Doesn't change results (a duplicate row would just
-    # query/merge the same score twice), but keeps this function's behavior
-    # consistent with the other two CADD backends and avoids redundant work.
     filtered_df = df[mask].drop_duplicates(subset=['chrom', 'pos', 'ref', 'alt'])
     bed_df = pd.DataFrame({
         'chrom': filtered_df['chrom'].astype(str).str.replace(r'^chr', '', regex=True),
@@ -1158,26 +839,6 @@ def _run_CADD_remote_prescored(df, outprefix, CADD_prescored_url, cache_dir, mas
 def run_CADD(df, outprefix, cache_dir, CADD_script, CADD_data_dir,
              CADD_local_prescored_snv, CADD_local_prescored_indel, CADD_prescored_url,
              include_CADD_annotations, mask, threads):
-    """Dispatcher: three-tier fallback.
-
-    1. Local CADD-scripts scoring, if CADD_script is given (empty means
-       not configured, or "remote" was requested in config.yaml --
-       resolved upstream in the Snakefile/rule).
-    2. Local pre-scored lookup (CADD_local_prescored_snv/
-       CADD_local_prescored_indel), if step 1 wasn't attempted or failed
-       at runtime.
-    3. Remote pre-scored SNV lookup (CADD_prescored_url), if step 2 wasn't
-       attempted (nothing configured) or failed at runtime -- SNVs only,
-       so any InDel ends up '.' whenever this path is used.
-
-    If none of the three are available/succeed, CADD_PHRED is filled with
-    'fail' (distinct from '.', which means the lookup ran successfully but
-    found no score for that variant) instead of raising, so the rest of
-    the pipeline still runs.
-
-    `mask` restricts which variants are sent to CADD -- all three tiers
-    score the same passing subset, so switching between them doesn't
-    change which variants get a score."""
 
     used_local_run = False
     if CADD_script:
@@ -1229,9 +890,7 @@ def run_CADD(df, outprefix, cache_dir, CADD_script, CADD_data_dir,
 
 
 def run_SpliceAI_chunk(chunk_variants, idx, outprefix, genome, annotation_arg):
-    """Run the live spliceai tool on a chunk of variants."""
 
-    # Grouped under {work_dir}/SpliceAI/ -- same convention as CADD's chunk dirs.
     work_dir = os.path.dirname(outprefix)
     SpliceAI_dir = os.path.join(work_dir, 'SpliceAI', f'SpliceAI_chunk_{idx}')
     os.makedirs(SpliceAI_dir, exist_ok=True)
@@ -1249,30 +908,13 @@ def run_SpliceAI_chunk(chunk_variants, idx, outprefix, genome, annotation_arg):
 
     log_file = os.path.join(SpliceAI_dir, f'SpliceAI_chunk_{idx}.log')
     env = os.environ.copy()
-    # SpliceAI/TensorFlow uses all cores by default (via OpenMP), with no
-    # flag to limit it. We're already running `threads` copies in parallel
-    # (one per chunk), so pin each to one thread to avoid oversubscription
-    # (see github.com/Illumina/SpliceAI/issues/20).
     env['OMP_NUM_THREADS'] = '1'
     with open(log_file, 'w') as log:
         try:
             subprocess.run(
-                # -M 1: masked scores. Illumina's SpliceAI FAQ recommends
-                # raw (-M 0, the default) for alternative splicing analysis
-                # and masked for variant interpretation, which is what this
-                # pipeline does -- masked zeroes out delta scores for
-                # splicing changes that are typically much less pathogenic
-                # (strengthening an annotated site, weakening an
-                # unannotated one). Keep this consistent with any masked
-                # precomputed-score lookup (see _run_SpliceAI_prescored_lookup) --
-                # mixing masked and raw scores across samples would give
-                # systematically different results, not just noisier ones.
                 ['spliceai', '-I', in_vcf, '-O', out_vcf, '-R', genome, '-A', annotation_arg, '-M', '1'],
                 stdout=log, stderr=log, check=True, env=env)
         except subprocess.CalledProcessError as e:
-            # spliceai's actual error is in log_file, not this exception --
-            # surface its tail so run_SpliceAI's error message shows what
-            # actually went wrong, not just an exit code.
             log.flush()
             with open(log_file) as f:
                 tail = ''.join(f.readlines()[-20:])
@@ -1287,52 +929,14 @@ def run_SpliceAI_chunk(chunk_variants, idx, outprefix, genome, annotation_arg):
         io.StringIO(result.stdout), sep='\t', header=None,
         names=['chrom', 'pos', 'ref', 'alt', 'SpliceAI'], dtype=str)
 
-    # Keep all of SpliceAI's raw output for this chunk (input VCF, log, and
-    # the output VCF out_vcf) rather than deleting the intermediate files --
-    # useful for debugging/audit (matches ANNOVAR_outdir / CADD's chunk dirs).
     return df_chunk
 
 
 def _run_SpliceAI_prescored_lookup(df, outprefix, snv_vcf, indel_vcf, mask, cache_dir, threads):
-    """Look up SpliceAI scores from precomputed SNV/InDel VCFs (e.g.
-    Illumina's masked hg38 files -- see setup_resources.sh) for variants
-    passing `mask`.
-
-    snv_vcf/indel_vcf are each optional -- whichever is given is queried
-    for that variant type; if only one is given, the other type gets '.'
-    (no fallback for the missing one, by design, for consistency within a
-    run). These files carry the same 'SpliceAI' INFO tag/format as the
-    live tool's own output (Illumina generated them by running spliceai
-    itself, genome-wide), so the same query format works for both.
-
-    Uses _query_vcf_regions, so snv_vcf/indel_vcf may be local or remote --
-    remote gets the same dedup/chunk/retry/logging as gnomAD/ClinVar.
-
-    Uses bare Ensembl-style contig names ('1', not 'chr1') for the region
-    query -- confirmed against the actual file (same convention as
-    ClinVar/CADD's prescored files), despite the 'hg38' naming in
-    Illumina's filenames suggesting UCSC/chr-prefixed style. df's own
-    'chrom' column is chr-prefixed, so this is stripped for the query and
-    re-added when merging results back.
-
-    Raises on any failure rather than catching -- see run_SpliceAI, the
-    dispatcher that decides between the live run, this, and filling '.',
-    and that does the checkpoint-tsv write either way."""
 
     print(f'\nLooking up SpliceAI scores from precomputed VCF(s)...')
 
     filtered_df = df[mask].copy()
-    # Dedupe by (chrom, pos, ref, alt) before counting/looking up -- matches
-    # _run_SpliceAI_live's and both CADD prescored-lookup functions' variant
-    # counting, so all of these report/process a consistent variant count
-    # regardless of duplicate rows in df (e.g. the same variant surviving
-    # from more than one caller). Without this, a duplicated row gets
-    # queried (and counted in the printed "Looking up N variant(s)"
-    # message) once per occurrence -- harmless to the result (same lookup,
-    # same score, merged back onto every duplicate row via the final merge
-    # below regardless), but confusingly inconsistent against the earlier
-    # filter-summary count and against CADD's own (deduplicated) counts for
-    # the same mask/threshold.
     filtered_df = filtered_df.drop_duplicates(subset=['chrom', 'pos', 'ref', 'alt'])
     is_snv = (filtered_df['ref'].str.len() == 1) & (filtered_df['alt'].str.len() == 1)
     snv_df = filtered_df[is_snv]
@@ -1363,8 +967,6 @@ def _run_SpliceAI_prescored_lookup(df, outprefix, snv_vcf, indel_vcf, mask, cach
             io.StringIO(query_stdout), sep='\t', header=None,
             names=['chrom', 'pos', 'ref', 'alt', 'SpliceAI'], dtype=str)
         if not subset_result.empty:
-            # Query used bare contig names to match the file; re-add 'chr'
-            # so this merges correctly against df's own chr-prefixed 'chrom'.
             subset_result['chrom'] = 'chr' + subset_result['chrom'].astype(str)
             results.append(subset_result)
 
@@ -1381,19 +983,6 @@ def _run_SpliceAI_prescored_lookup(df, outprefix, snv_vcf, indel_vcf, mask, cach
 
 
 def _run_SpliceAI_live(df, outprefix, genome, gtf, SpliceAI_annotation, mask, threads):
-    """Run the live spliceai tool on variants passing `mask` (see
-    _gnomad_clnsig_filter_mask), in parallel chunks.
-
-    Practical because by this point the variant set is small (a targeted
-    panel's worth, post gnomAD/ClinVar/ANNOVAR/CADD filtering), not
-    genome-wide -- same reasoning as live CADD scoring above. Uses its own
-    --SpliceAI-gnomadAF-threshold/--SpliceAI-CLNSIG-filter, independent of
-    CADD's, so the two stages can score different variant subsets if
-    desired.
-
-    Raises on any failure rather than catching -- see run_SpliceAI, the
-    dispatcher that decides between this, the prescored lookup fallback,
-    and filling '.', and that does the checkpoint-tsv write either way."""
 
     print(f'\nPreparing variants for SpliceAI analysis...')
 
@@ -1440,9 +1029,6 @@ def _run_SpliceAI_live(df, outprefix, genome, gtf, SpliceAI_annotation, mask, th
         raise RuntimeError('No chunks completed successfully.')
 
     df_SpliceAI = pd.concat(results, ignore_index=True)
-    # (SpliceAI's raw per-chunk output now persists as SpliceAI_chunk_{idx}_out.vcf
-    # under work/SpliceAI/SpliceAI_chunk_{idx}/ -- see run_SpliceAI_chunk --
-    # rather than a separate combined file here.)
 
     df['pos'] = df['pos'].astype(str)
     df = df.merge(df_SpliceAI, on=['chrom', 'pos', 'ref', 'alt'], how='left')
@@ -1453,23 +1039,6 @@ def _run_SpliceAI_live(df, outprefix, genome, gtf, SpliceAI_annotation, mask, th
 
 def run_SpliceAI(df, outprefix, genome, gtf, SpliceAI_annotation, snv_vcf, indel_vcf,
                   force_prescored_lookup, mask, cache_dir, threads):
-    """Dispatcher: try the live spliceai tool first if `genome` is given
-    and force_prescored_lookup isn't set. If live isn't attempted (no
-    genome, or force_prescored_lookup) or fails at runtime, fall back to
-    the prescored VCF lookup (snv_vcf/indel_vcf -- see
-    _run_SpliceAI_prescored_lookup). If both are unavailable/fail,
-    'SpliceAI' is filled with 'fail' (distinct from '.', which means the
-    run/lookup succeeded but found no score for that variant) instead of
-    raising, so the rest of the pipeline still runs.
-
-    force_prescored_lookup: skip the live run outright even if `genome`
-    is given -- e.g. to always save the compute cost of live scoring when
-    the prescored files are already known to cover the variant set,
-    rather than only falling back to them on failure.
-
-    `mask` restricts which variants are scored -- both backends score the
-    same passing subset, so switching between them doesn't change which
-    variants get a score."""
 
     used_live = False
     if force_prescored_lookup:
@@ -1508,7 +1077,6 @@ def run_SpliceAI(df, outprefix, genome, gtf, SpliceAI_annotation, snv_vcf, indel
 
 
 def main():
-    """Main function."""
 
     print(f"\n\n\n******************************************************************************************")
     print(f"Compiling variants...")
@@ -1519,28 +1087,15 @@ def main():
     outdir = os.path.dirname(args.outprefix)
     os.makedirs(outdir, exist_ok=True)
 
-    # All intermediate/checkpoint output goes under work/ rather than
-    # alongside the final output. The annotation functions below just
-    # write their checkpoint to whatever prefix they're handed and never
-    # re-read from disk (the DataFrame passes through in memory), so
-    # routing them at work_prefix instead of args.outprefix is enough.
     work_dir = os.path.join(outdir, 'work')
     os.makedirs(work_dir, exist_ok=True)
     work_prefix = os.path.join(work_dir, args.sample_name)
 
-    # Per-tool subdirectories under work/, one per annotation source (see
-    # run_ANNOVAR, run_CADD_chunk, run_SpliceAI_chunk for ANNOVAR/CADD/
-    # SpliceAI's own dirs). "_remote" suffix on gnomAD/ClinVar/CADD/
-    # SpliceAI's cache dirs: only created when a remote query is actually
-    # made, so a purely local run never creates them. CADD_remote is
-    # separate from CADD's own local-scoring dir since both can run in the
-    # same sample (remote as a fallback).
     gnomad_cache_dir = os.path.join(work_dir, 'gnomAD_remote')
     clinvar_cache_dir = os.path.join(work_dir, 'ClinVar_remote')
     cadd_remote_cache_dir = os.path.join(work_dir, 'CADD_remote')
     spliceai_remote_cache_dir = os.path.join(work_dir, 'SpliceAI_remote')
 
-    # Build a name→index map once to avoid repeated .index() calls
     vcf_name_map = {}
     if args.vcf_file_names:
         vcf_name_map = dict(enumerate(args.vcf_file_names))
@@ -1561,11 +1116,6 @@ def main():
     df.to_csv(os.path.join(work_prefix + '_compiled_variants.tsv'), sep='\t', index=False)
     del data
 
-    # Write a BED of variant positions, deduped -- df has one row per
-    # (caller, chrom, pos, ref, alt), so the same position can repeat
-    # (called by multiple callers, or a multiallelic site). Dedup once
-    # here so every consumer (extract_gnomAD_AF, extract_CLNSIG) gets a
-    # clean region list.
     bed_file = work_prefix + '_variant_positions.bed'
     bed_df = pd.DataFrame({
         'chrom': df['chrom'].astype(str),
@@ -1590,18 +1140,11 @@ def main():
         else:
             df = run_ANNOVAR(df, work_prefix, args.ANNOVAR_dir, args.genome)
 
-    # Computed once each, after gnomAD/ClinVar have populated their
-    # columns (if provided). CADD and SpliceAI each have their own
-    # threshold/filter, so they can be tuned separately -- set both to the
-    # same values to always score the same variant subset.
     cadd_mask = _gnomad_clnsig_filter_mask(df, args.CADD_gnomadAF_threshold, args.CADD_CLNSIG_filter)
     spliceai_mask = _gnomad_clnsig_filter_mask(df, args.SpliceAI_gnomadAF_threshold, args.SpliceAI_CLNSIG_filter)
     _print_filter_summary('CADD', df, cadd_mask, args.CADD_gnomadAF_threshold, args.CADD_CLNSIG_filter)
     _print_filter_summary('SpliceAI', df, spliceai_mask, args.SpliceAI_gnomadAF_threshold, args.SpliceAI_CLNSIG_filter)
 
-    # Runs if any of the three CADD sources is available -- the dispatcher
-    # itself decides which one(s) to actually use/fall back to (local run
-    # -> local pre-scored lookup -> remote pre-scored lookup).
     if args.CADD_script or args.CADD_local_prescored_snv or args.CADD_local_prescored_indel or args.CADD_prescored_url:
         include_CADD = args.include_CADD_annotations if args.include_CADD_annotations else False
         df = run_CADD(df, work_prefix, cadd_remote_cache_dir, args.CADD_script, args.CADD_data_dir,
@@ -1609,24 +1152,15 @@ def main():
                       args.CADD_prescored_url, include_CADD, cadd_mask, args.threads)
 
     if args.include_SpliceAI_scores:
-        # Dispatcher decides between the live run (if --genome is given and
-        # --SpliceAI-force-prescored-lookup isn't set) and the prescored
-        # VCF lookup fallback (see run_SpliceAI's docstring).
         df = run_SpliceAI(df, work_prefix, args.genome, args.gtf, args.SpliceAI_annotation,
                            args.SpliceAI_prescored_snv_vcf, args.SpliceAI_prescored_indel_vcf,
                            args.SpliceAI_force_prescored_lookup,
                            spliceai_mask, spliceai_remote_cache_dir, args.threads)
 
-    # All annotation stages are done -- this is the one and only write to the real,
-    # final output location (everything above only ever touched work_prefix).
     df.to_csv(args.outprefix + '_compiled_variants.tsv', sep='\t', index=False)
 
     if os.path.isfile(args.outprefix + '_compiled_variants.tsv'):
         print(f'\nResults saved to {args.outprefix + "_compiled_variants.tsv"}')
-        # The working checkpoint in work/ has served its purpose now that the
-        # real final file is confirmed written -- remove it rather than leaving
-        # a duplicate copy behind. (Only removed after confirming the final
-        # write succeeded, so a failed write doesn't lose both copies.)
         work_tsv = work_prefix + '_compiled_variants.tsv'
         if os.path.isfile(work_tsv):
             os.remove(work_tsv)
@@ -1634,11 +1168,6 @@ def main():
         print(f'\nERROR: Results file not found. Please check the output directory for errors.')
         return
 
-    # Final threshold/CLNSIG filtering is a separate step now -- see
-    # filter_variants.py, which reads this script's
-    # {outprefix}_compiled_variants.tsv output. Splitting it out means
-    # changing a final filter threshold only requires re-running that
-    # cheap filter step, not the (slow, expensive) annotation above.
 
 
 if __name__ == '__main__':

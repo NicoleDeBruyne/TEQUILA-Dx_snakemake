@@ -1,43 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/quantify_gene_by_assignment.py
-Cohort-level merge step: combines every sample's own
-{sample}_gene_assignment.tsv (per-gene raw_count + CPTM, written per-sample
-by scripts/quantify_gene_by_assignment_sample.py via
-rules/7_sample_gene_quantification.smk's _7C) and {sample}_read_outcomes.tsv
-into the cohort's genome-wide raw matrix, BED-panel raw + CPTM matrices,
-per-gene boxplots, and the read-assignment-outcome summary plot. No BAM or
-GTF access here -- adding/removing a sample from a cohort only reruns this
-cheap merge, not the per-sample BAM scan + GTF parse. Invoked by
-rules/9_merge_results.smk's _9M.
-
-CPTM is read straight from the per-sample TSVs, not recomputed here (same
-reasoning as scripts/quantify_gene_expression.py). Which genes are
-"BED-panel genes" for the CPTM/boxplot subset is inferred from which rows
-have a non-null cptm value (populated only for panel genes by the
-per-sample step) -- so this merge step doesn't need its own BED file.
-
-Also writes a low-expression outlier score for every (gene, sample), on
-the targeted-panel CPTM matrix -- see scripts/expression_outliers.py's
-module docstring for the algorithm. This is the outlier score
-scripts/merge_hits.py annotates onto merged_all_hits.tsv (the
-splice-site-assignment method was chosen for that annotation since,
-unlike --metric count/coverage, it isn't restricted to simple BED-region
-overlap/pileup and so isn't as easily confounded by a neighboring gene's
-reads spilling into a tightly-packed panel region).
-
-Also computes a second normalization of the same targeted-panel raw
-counts: MOTR ("median of target ratios") -- DESeq2's "poscounts"
-median-of-ratios size-factor normalization (their own fix for the classic
-method's all-or-nothing zero-count handling), restricted to genes on this
-run's BED panel rather than the whole transcriptome, since that's the
-only gene set this pipeline ever reports on. See
-compute_size_factors()'s docstring for the algorithm and its per-sample
-fallback. Written to a separate <outprefix>_matrix_motr.tsv (+ _alias
-copy) -- the existing CPTM matrix is renamed to <outprefix>_matrix_cptm.tsv
-(from plain _matrix.tsv) so the two normalizations are unambiguous side
-by side.
-"""
 
 import argparse
 import os
@@ -56,14 +16,8 @@ from gene_boxplots import make_gene_boxplots
 rcParams['pdf.fonttype'] = 42
 
 
-# ---------------------------------------------------------------------------
-# Args
-# ---------------------------------------------------------------------------
 
 def add_outlier_args(parser):
-    """Shared CLI options for the low-expression outlier score -- same
-    defaults/semantics across all four quantification methods. See
-    expression_outliers.py's module docstring for the algorithm."""
     parser.add_argument("--outlier-pseudocount", type=float, default=1.0,
         help="Added to CPTM before log2-transforming. Default: 1.0")
     parser.add_argument("--outlier-shrinkage-k", type=float, default=10.0,
@@ -103,9 +57,6 @@ def parse_args():
     return parser.parse_args()
 
 
-# Category display order/labels/colors for the assignment-outcome plot below.
-# Greens for assigned, reds/oranges for the specific unassigned reasons --
-# grouped spliced-then-unspliced so the two read types are visually adjacent.
 _STATS_CATEGORIES = [
     ("spliced_assigned",                   "Spliced: assigned",                        "#2ca25f"),
     ("spliced_unassigned_zero_shared",     "Spliced: 0 shared splice sites",           "#fc9272"),
@@ -118,10 +69,6 @@ _STATS_CATEGORIES = [
 
 
 def make_assignment_summary_plot(stats_df, out_pdf, title):
-    """One stacked horizontal bar per sample: how many of that sample's
-    alignments landed in each assigned/unassigned-reason category (see
-    _STATS_CATEGORIES). Read counts, not gene counts -- this is about
-    assignment outcome, not the per-gene quantification matrices."""
     samples = list(stats_df.index)
     n_samples = len(samples)
 
@@ -137,7 +84,7 @@ def make_assignment_summary_plot(stats_df, out_pdf, title):
 
     ax.set_yticks(y_pos)
     ax.set_yticklabels(samples)
-    ax.invert_yaxis()  # first sample at the top
+    ax.invert_yaxis()
     ax.set_xlabel("Alignments")
     ax.set_title(title)
     ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=9)
@@ -146,9 +93,6 @@ def make_assignment_summary_plot(stats_df, out_pdf, title):
     plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     args = parse_args()
@@ -157,9 +101,6 @@ def main():
     samples = [d['sample'].iloc[0] for d in per_sample_dfs if not d.empty]
     long_df = pd.concat(per_sample_dfs, ignore_index=True)
 
-    # Every gene that received >=1 assigned read anywhere in the cohort
-    # (union across samples' per-sample files -- each already lists only
-    # its own nonzero genes plus its own panel genes).
     all_genes = sorted(long_df['gene'].drop_duplicates())
     raw_all_df = (
         long_df.pivot(index='gene', columns='sample', values='raw_count')
@@ -171,10 +112,6 @@ def main():
     raw_all_df.to_csv(out_raw_all, sep="\t")
     print("Saved all-gene raw-value matrix: " + out_raw_all)
 
-    # BED-panel subset: rows with a non-null cptm anywhere are panel genes
-    # (populated only for panel genes by the per-sample step) -- explicit
-    # zero row for any panel gene with no assigned reads at all, matching
-    # --metric count/coverage's convention of always listing every panel gene.
     targeted_genes = sorted(long_df.loc[long_df['cptm'].notna(), 'gene'].drop_duplicates())
     raw_df = raw_all_df.reindex(targeted_genes).fillna(0).astype(int)
     raw_df.index.name = "gene"
@@ -193,9 +130,6 @@ def main():
     cptm_df.to_csv(out_matrix, sep="\t")
     print("Saved targeted-panel CPTM matrix: " + out_matrix)
 
-    # Alias-labeled copy: always produced (mirrors the real-ID matrix
-    # verbatim when --alias-map is empty), so the rule's declared output
-    # exists regardless of whether this group actually has any aliases.
     alias_map = parse_alias_map(args.alias_map)
     alias_cptm_df = cptm_df.copy()
     alias_cptm_df.columns = resolve_all(alias_cptm_df.columns, alias_map)
@@ -203,9 +137,6 @@ def main():
     alias_cptm_df.to_csv(out_matrix_alias, sep="\t")
     print("Saved alias-labeled targeted-panel CPTM matrix: " + out_matrix_alias)
 
-    # MOTR ("median of target ratios"): DESeq2-style median-of-ratios
-    # normalization, restricted to targeted-panel genes only (raw_df, not
-    # raw_all_df) -- see compute_size_factors()'s docstring.
     size_factors = compute_size_factors(raw_df, max_zero_fraction=args.motr_max_zero_fraction)
     motr_df = raw_df.div(size_factors, axis=1)
     motr_df.index.name = "gene"
@@ -226,12 +157,6 @@ def main():
     make_gene_boxplots(motr_df, plot_outdir, "MOTR (" + metric_label + ")", "_motr")
     print("Saved per-gene CPTM/MOTR boxplots to: " + plot_outdir)
 
-    # Low-expression outlier score (see expression_outliers.py's module
-    # docstring for the algorithm), computed once per normalization -- the
-    # CPTM version is the file rules/9_merge_results.smk's _9D2 passes to
-    # merge_hits.py to annotate merged_all_hits.tsv (unchanged from
-    # before); the MOTR version is new, for anyone comparing the two
-    # normalizations' outlier calls directly.
     z_cptm_df, _ = compute_outlier_scores(
         cptm_df,
         pseudocount=args.outlier_pseudocount,
@@ -254,9 +179,6 @@ def main():
     z_motr_df.to_csv(out_zscores_motr, sep="\t")
     print("Saved MOTR z-score matrix: " + out_zscores_motr)
 
-    # Per-sample breakdown of assigned vs. unassigned-and-why (see
-    # _STATS_CATEGORIES), one row per sample, columns in the same order the
-    # plot stacks them in -- ordered by the sample order --infiles was given in.
     stats_df = pd.concat([pd.read_csv(f, sep="\t") for f in args.stats_infiles], ignore_index=True)
     stats_df = stats_df.set_index("sample").reindex(samples)
     stats_df = stats_df[["n_total"] + [col for col, _, _ in _STATS_CATEGORIES]]

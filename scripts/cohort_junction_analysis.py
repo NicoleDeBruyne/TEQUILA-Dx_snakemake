@@ -1,25 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/cohort_junction_analysis.py
-
-Core per-gene splice-junction metric computation for cohort-level outlier
-analysis. Companion script scripts/identify_cohort_junction_outliers.py
-performs the downstream statistical testing/filtering stage.
-
-For each gene in the input BED file, reads every cohort sample's bulk/hap1/
-hap2 BAMs (from --mapping-file) and computes per-junction, per-sample,
-per-phasing coverage and ratio metrics (junction usage/PSI, 5'/3' intron-
-retention ratios, intronic-polyadenylation ratio) -- no statistical testing,
-no cross-sample comparison.
-
-Writes one raw metrics TSV per gene into --outdir, plus a manifest TSV
-(--manifest) with one row per gene in the input BED file: the gene name and
-the path to that gene's result file, or the literal string "None" if the
-gene produced no output (not present in --mapping-file, no BAMs found, an
-error during processing, etc.). The manifest's presence marks this rule as
-complete for Snakemake's purposes. scripts/identify_cohort_junction_outliers.py
-reads the manifest to find each gene's raw results for statistical testing.
-"""
 
 from __future__ import annotations
 
@@ -42,14 +20,10 @@ warnings.filterwarnings("ignore", category=PerformanceWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
-_REF_OPS  = frozenset((0, 2, 3, 7, 8))   # M D N = X
-_SKIP_OP  = 3                              # N  — intron
+_REF_OPS  = frozenset((0, 2, 3, 7, 8))
+_SKIP_OP  = 3
 
-# Maps each metric column to its phasing-check denominator column
 _METRIC_DENOMINATOR: Dict[str, str] = {
     "junction_PSI_approx":    "junction_coverage_approx",
     "junction_PSI":           "junction_coverage",
@@ -60,9 +34,6 @@ _METRIC_DENOMINATOR: Dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -98,9 +69,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-# ---------------------------------------------------------------------------
-# BED / mapping I/O
-# ---------------------------------------------------------------------------
 
 def load_bed(path: str) -> Dict[str, Tuple[str, str, str]]:
     gene_info: Dict[str, Tuple[str, str, str]] = {}
@@ -152,9 +120,6 @@ def load_and_validate_mapping(path: str) -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
-# BAM helpers
-# ---------------------------------------------------------------------------
 
 def _parse_region(region: str) -> Tuple[str, int, int]:
     chrom, se = region.split(":")
@@ -173,18 +138,6 @@ def collect_read_data(
 ) -> Tuple[Dict[Tuple[int, int], int], int,
            List[Tuple[List[Tuple[int, int]], List[int], Optional[Tuple]]],
            ]:
-    """
-    Step 1 BAM walk: collect junction counts, read blocks, splice positions,
-    and soft-clip info for every qualifying read.
-
-    Returns:
-        jxn_raw      – {(ss1, ss2): count}
-        gene_cov     – qualifying read count
-        reads        – list of (blocks, splice_junctions, softclip_tuple_or_None)
-                       blocks: [(start, end), ...] 0-based half-open per exon
-                       splice_junctions: [(ss1, ss2), ...] 1-based per intron
-                       softclip_tuple: (sc, g, pos3, leading) or None
-    """
     chrom_r, region_start, region_end = _parse_region(region)
     jxn_raw:  Dict[Tuple[int, int], int] = defaultdict(int)
     gene_cov  = 0
@@ -214,7 +167,7 @@ def collect_read_data(
                         jxn_raw[(j_start, j_end)] += 1
                         read_jxns.append((j_start, j_end))
                     pos += length
-                elif op == 4:   # S
+                elif op == 4:
                     has_softclip = True
                 elif op in _REF_OPS:
                     if block_start is None:
@@ -231,7 +184,6 @@ def collect_read_data(
                 reads.append((blocks, [], None))
                 continue
 
-            # Soft-clip info
             sc_tuple = None
             if collect_softclips and has_softclip and genome_seq is not None:
                 qs   = aln.query_sequence
@@ -268,34 +220,10 @@ def compute_coverage_metrics(
     alu:                Optional[dict],
     chrom:              str,
 ) -> Dict[Tuple[int, int], List[int]]:
-    """
-    Step 2: vectorized coverage computation over pre-collected read data.
-
-    For each read (blocks, splice_junctions, sc_tuple):
-      ss1_cov: 3-base exon window [ss1-4,ss1-2] (0-based) fully within a block
-               AND read overlaps intron [ss1-1, ss1+1] (0-based)
-               i.e. ref_start <= ss1-2 and ref_end > ss1+1
-      ss2_cov: 3-base exon window [ss2,ss2+2] (0-based) fully within a block
-               AND read overlaps intron [ss2-3, ss2-1] (0-based)
-               i.e. ref_start <= ss2-3 and ref_end > ss2+2
-      junction_cov: ss1_cov OR ss2_cov
-      ss1_ir:  all 6 positions [ss1-4, ss1+1] (0-based) within a single block
-      ss2_ir:  all 6 positions [ss2-3, ss2+2] (0-based) within a single block
-      full_ir: single block spans [ss1-4, ss2+2] (0-based, i.e. block_start<=ss1-4
-               and block_end>=ss2+3)
-      ipa:     passes 5ss_cov (ss1_cov on +, ss2_cov on -)
-               AND ref_end (0-based excl) satisfies ss1 <= ref_end <= ss2
-               (1-based: last covered base is within intron)
-               AND no splice junction at or past 5ss
-               AND poly-A soft-clip
-
-    Returns: {(ss1,ss2): [ss1_cov, ss2_cov, jxn_cov, ss1_ir, ss2_ir, full_ir, ipa]}
-    """
     n_jxns = len(jxn_coords_for_cov)
     if n_jxns == 0:
         return {}
 
-    # Per-junction accumulator arrays (indexed by junction position in jxn_coords_for_cov)
     ss1_cov  = np.zeros(n_jxns, dtype=np.int32)
     ss2_cov  = np.zeros(n_jxns, dtype=np.int32)
     jxn_cov  = np.zeros(n_jxns, dtype=np.int32)
@@ -304,35 +232,28 @@ def compute_coverage_metrics(
     full_ir  = np.zeros(n_jxns, dtype=np.int32)
     ipa_arr  = np.zeros(n_jxns, dtype=np.int32)
 
-    # Pre-compute per-junction coordinate arrays (0-based)
     ss1_arr  = np.array([ss1     for ss1, ss2 in jxn_coords_for_cov], dtype=np.int64)
     ss2_arr  = np.array([ss2     for ss1, ss2 in jxn_coords_for_cov], dtype=np.int64)
-    # ss1 coverage: exon window [ss1-4, ss1-2], intron overlap: ref_start<=ss1-2, ref_end>ss1+1
-    ss1_exon_lo = ss1_arr - 4   # 0-based start of exon window
-    ss1_exon_hi = ss1_arr - 2   # 0-based end of exon window (inclusive)
-    ss1_intr_hi = ss1_arr + 1   # 0-based end of intron overlap (inclusive)
-    # ss2 coverage: exon window [ss2, ss2+2], intron overlap: ref_start<=ss2-3, ref_end>ss2+2
-    ss2_exon_lo = ss2_arr       # 0-based start of exon window
-    ss2_exon_hi = ss2_arr + 2   # 0-based end of exon window (inclusive)
-    ss2_intr_lo = ss2_arr - 3   # 0-based: ref_start must be <= ss2-3 (covers intron positions ss2-2..ss2 in 1-based)
-    # ss1_ir: single block spans [ss1-4, ss1+1] (0-based inclusive)
+    ss1_exon_lo = ss1_arr - 4
+    ss1_exon_hi = ss1_arr - 2
+    ss1_intr_hi = ss1_arr + 1
+    ss2_exon_lo = ss2_arr
+    ss2_exon_hi = ss2_arr + 2
+    ss2_intr_lo = ss2_arr - 3
     ss1_ir_lo = ss1_arr - 4
-    ss1_ir_hi = ss1_arr + 1    # 0-based inclusive → block_end > ss1+1
-    # ss2_ir: single block spans [ss2-3, ss2+2] (0-based inclusive)
+    ss1_ir_hi = ss1_arr + 1
     ss2_ir_lo = ss2_arr - 3
-    ss2_ir_hi = ss2_arr + 2    # 0-based inclusive → block_end > ss2+2
-    # full_ir: single block spans [ss1-4, ss2+2] (0-based inclusive)
+    ss2_ir_hi = ss2_arr + 2
     fir_lo = ss1_arr - 4
-    fir_hi = ss2_arr + 2       # 0-based inclusive → block_end > ss2+2
+    fir_hi = ss2_arr + 2
 
-    # 5ss is ss1 for + strand, ss2 for - strand (1-based)
     five_ss_arr = ss1_arr if strand == "+" else ss2_arr
 
     for blocks, splice_jxns, sc_tuple in reads:
         if not blocks:
             continue
-        ref_start = blocks[0][0]   # 0-based
-        ref_end   = blocks[-1][1]  # 0-based exclusive
+        ref_start = blocks[0][0]
+        ref_end   = blocks[-1][1]
 
         h1 = np.zeros(n_jxns, dtype=bool)
         h2 = np.zeros(n_jxns, dtype=bool)
@@ -342,18 +263,13 @@ def compute_coverage_metrics(
 
         for block_start, block_end in blocks:
             bs = np.int64(block_start)
-            be = np.int64(block_end)   # 0-based exclusive
-            # ss1_cov: block contains exon window AND read overlaps intron
+            be = np.int64(block_end)
             mask1 = (bs <= ss1_exon_lo) & (be > ss1_exon_hi) & (ref_end > ss1_intr_hi)
             h1   |= mask1
-            # ss2_cov: block contains exon window AND read overlaps intron
             mask2 = (bs <= ss2_exon_lo) & (be > ss2_exon_hi) & (ref_start <= ss2_intr_lo)
             h2   |= mask2
-            # ss1_ir: single block spans [ss1-4, ss1+1]
             h1_ir_mask |= (bs <= ss1_ir_lo) & (be > ss1_ir_hi)
-            # ss2_ir: single block spans [ss2-3, ss2+2]
             h2_ir_mask |= (bs <= ss2_ir_lo) & (be > ss2_ir_hi)
-            # full_ir: single block spans [ss1-4, ss2+2]
             fir_mask   |= (bs <= fir_lo)    & (be > fir_hi)
 
         ss1_cov  += h1.astype(np.int32)
@@ -363,21 +279,15 @@ def compute_coverage_metrics(
         ss2_ir   += h2_ir_mask.astype(np.int32)
         full_ir  += fir_mask.astype(np.int32)
 
-        # IPA: must pass 5ss_cov, terminate within intron, no downstream splice
         if sc_tuple is None:
             continue
-        # 5ss_cov: ss1_cov for + strand, ss2_cov for - strand
         five_ss_cov = h1 if strand == "+" else h2
         if not five_ss_cov.any():
             continue
-        # ref_end (0-based excl) must satisfy ss1 <= ref_end <= ss2
-        # i.e. last covered base (1-based) is within intron
-        # 0-based: ss1-1 < ref_end <= ss2  →  ss1 <= ref_end <= ss2 (since ref_end is excl)
         within_intron = (ss1_arr <= ref_end) & (ref_end <= ss2_arr)
         cand_ipa = five_ss_cov & within_intron
         if not cand_ipa.any():
             continue
-        # No splice junction at or past 5ss (1-based)
         splice_set = set(j[0] if strand == "+" else j[1] for j in splice_jxns)
         sc, g, pos3, leading = sc_tuple
         is_polya = _is_oligo_dt_priming(sc, g, leading)
@@ -393,7 +303,6 @@ def compute_coverage_metrics(
             if not any(s >= five_ss for s in splice_set):
                 ipa_arr[ji] += 1
 
-    # Build result dict
     result = {}
     for i, jc in enumerate(jxn_coords_for_cov):
         result[jc] = [
@@ -450,15 +359,6 @@ def compute_junction_coverage_approx(
     junction_counts: Dict[str, int],
     all_jxns: Optional[List[str]] = None,
 ) -> Dict[str, int]:
-    """
-    Compute approximate junction coverage (ss1_usage + ss2_usage - junction_usage)
-    for every junction.
-
-    all_jxns: cohort-wide junction list.  When provided, coverage is computed
-    for every junction in all_jxns even if it has 0 reads in this sample —
-    using the ss1/ss2 usage tallied from whatever junctions ARE present.
-    Without all_jxns, only junctions in junction_counts are returned (old behaviour).
-    """
     ss1_usage: Dict[str, int] = defaultdict(int)
     ss2_usage: Dict[str, int] = defaultdict(int)
     parsed: Dict[str, Tuple[str, str, str]] = {}
@@ -470,7 +370,6 @@ def compute_junction_coverage_approx(
         ss1_usage[f"{chrom}_{ss1}"] += count
         ss2_usage[f"{chrom}_{ss2}"] += count
 
-    # Build result for cohort-wide junction list if provided
     target_jxns = all_jxns if all_jxns is not None else list(junction_counts.keys())
     result: Dict[str, int] = {}
     for jxn in target_jxns:
@@ -487,9 +386,6 @@ def compute_junction_coverage_approx(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Per-sample worker
-# ---------------------------------------------------------------------------
 
 def process_sample(
     sample_name: str,
@@ -554,7 +450,6 @@ def process_sample(
                 if jxn in jxn_index: c[jxn_index[jxn]] = cnt
             chunks.append((label, u, c))
 
-        # Per-metric phasing filter for PSI_approx — denominator = junction_coverage_approx
         label_cov = {label: c for label, _, c in chunks}
         lp_psi_approx = np.zeros(n_jxns, dtype=bool)
         if phasing_threshold > 0 and ("hap1" in label_cov or "hap2" in label_cov):
@@ -592,7 +487,6 @@ def process_sample(
         df["sample"] = sample_name; df["region"] = region; df["gene"] = gene
         return df, time.time() - t0
 
-    # ---- Full metrics path ----
     jxn_index = {j: i for i, j in enumerate(all_jxns)}
     n_jxns = len(all_jxns)
 
@@ -609,19 +503,15 @@ def process_sample(
 
     do_ipa   = genome_seq is not None
 
-    # Build jxn_coords_for_cov from all_jxns
     jxn_coords_for_cov: List[Tuple[int, int]] = []
     for jxn in all_jxns:
         parts = jxn.split("_")
         jxn_coords_for_cov.append((int(parts[-2]), int(parts[-1])))
 
-    # Step 1: collect jxn_raw and read data for all BAMs
-    # For bulk, use pre-collected jxn_raw_bulk if available (from discovery step)
     raw_step1: List = []
     for label, bam in (("bulk", bulk_bam), ("hap1", hap1_bam), ("hap2", hap2_bam)):
         if not bam or not isinstance(bam, str): continue
         if label == "bulk" and jxn_raw_bulk is not None:
-            # Re-use jxn_raw from Step 1; still need to walk for read data
             jxn_raw_lbl = jxn_raw_bulk
             _, gene_cov, reads = collect_read_data(
                 bam, region, include_monoexonic,
@@ -642,10 +532,8 @@ def process_sample(
         raw_step1.append((label, gene_cov, jxn_raw_lbl, reads))
     if not raw_step1: return empty, time.time() - t0
 
-    # Step 2: compute coverage metrics vectorized over read data
     chunks_wide: List = []
     for label, gene_cov, jxn_raw_lbl, reads in raw_step1:
-        # Fingerprints (read diversity)
         jxn_fingerprints: Dict[Tuple[int, int], Dict] = defaultdict(lambda: defaultdict(int))
         for blocks, splice_jxns, sc_tuple in reads:
             if splice_jxns:
@@ -653,7 +541,6 @@ def process_sample(
                 for jc in splice_jxns:
                     jxn_fingerprints[jc][fp] += 1
 
-        # Shannon N_eff diversity
         import math
         jxn_diversity: Dict[Tuple[int, int], float] = {}
         for jc, fp_counts in jxn_fingerprints.items():
@@ -669,7 +556,6 @@ def process_sample(
             genome_seq, gene_start, alu, chrom,
         )
 
-        # Build cov_result dict keyed by junction string
         ss1_usage_agg: Dict[int, int] = defaultdict(int)
         ss2_usage_agg: Dict[int, int] = defaultdict(int)
         for (j_start, j_end), cnt in jxn_raw_lbl.items():
@@ -701,11 +587,6 @@ def process_sample(
         approx_cov  = compute_junction_coverage_approx(jxn_raw_str, all_jxns)
         chunks_wide.append((label, cov_result, jxn_raw_str, approx_cov))
 
-    # ----- Per-metric phasing filter -----
-    # For each metric we need its denominator arrays per label.
-    # We build arrays for: junction_coverage, junction_coverage_approx,
-    # 5ss_coverage, 3ss_coverage.
-    # Then for each metric, combine hap1 and hap2 denominators against bulk.
 
     def _arr(label, cov_key):
         for lbl, cov, jrs, ac in chunks_wide:
@@ -719,7 +600,6 @@ def process_sample(
                 return np.array([ac.get(j, 0) for j in all_jxns], dtype=np.int32)
         return np.zeros(n_jxns, dtype=np.int32)
 
-    # Collect coverage arrays per denominator column
     denom_arrays: Dict[str, Dict[str, np.ndarray]] = {}
     for denom_col in ("junction_coverage", "5ss_coverage", "3ss_coverage"):
         denom_arrays[denom_col] = {
@@ -734,7 +614,6 @@ def process_sample(
     }
 
     def _compute_lp(denom_col: str) -> np.ndarray:
-        """Return boolean array: True where junction fails phasing for this denominator."""
         arrs = denom_arrays.get(denom_col, {})
         if not arrs or phasing_threshold <= 0:
             return np.zeros(n_jxns, dtype=bool)
@@ -747,7 +626,6 @@ def process_sample(
             (h2 < coverage_threshold)
         )
 
-    # One low_phased array per metric
     lp_per_metric: Dict[str, np.ndarray] = {}
     for mc, denom_col in _METRIC_DENOMINATOR.items():
         lp_per_metric[mc] = _compute_lp(denom_col)
@@ -821,15 +699,14 @@ def process_sample(
             "3ss_coverage":      s2c,
             "3ss_IR_ratio":                    _fill_lc(irr2),
             "rescaled_3ss_IR_ratio":           _fill_lc(_rescale(irr2)),
-            "junction_full_IR_count":          fir,   # singular
+            "junction_full_IR_count":          fir,
             "junction_full_IR_ratio":          _fill_lc(full_irr),
             "rescaled_junction_full_IR_ratio": _fill_lc(_rescale(full_irr)),
-            "junction_IPA_count":              ipa,   # singular
+            "junction_IPA_count":              ipa,
             "junction_IPA_ratio":              _fill_lc(ipar),
             "rescaled_junction_IPA_ratio":     _fill_lc(_rescale(ipar)),
             "phasing":                         label,
         }
-        # Attach per-metric low_phased columns
         for mc in _METRIC_DENOMINATOR:
             col_name = f"low_phased_{mc}"
             lp_arr = lp_per_metric[mc] if is_hap else np.zeros(n_jxns, dtype=bool)
@@ -842,9 +719,6 @@ def process_sample(
     return df, time.time() - t0
 
 
-# ---------------------------------------------------------------------------
-# Junction discovery worker
-# ---------------------------------------------------------------------------
 
 def _discover_junctions_worker(
     sample_name: str, bulk_bam: str, region: str,
@@ -857,9 +731,6 @@ def _discover_junctions_worker(
     return sample_name, jxn_raw, gene_cov
 
 
-# ---------------------------------------------------------------------------
-# Per-gene junction discovery + coverage/usage metric computation
-# ---------------------------------------------------------------------------
 
 def _row_bam_size(row: pd.Series) -> int:
     total = 0
@@ -888,15 +759,6 @@ def compute_gene_junction_metrics(
     genome_path: Optional[str] = None,
     alu: Optional[dict] = None,
 ) -> Optional[pd.DataFrame]:
-    """
-    Discovers this gene's splice junctions from every cohort sample's bulk
-    BAM, then computes per-junction, per-sample, per-phasing coverage/usage
-    metrics (junction usage/PSI, 5'/3' intron-retention ratios, intronic-
-    polyadenylation ratio). No statistical testing is performed here --
-    see scripts/identify_cohort_junction_outliers.py for that.
-
-    Returns None if no data could be collected for this gene.
-    """
     print(f"\n{'='*70}")
     print(f"  Gene: {gene}   Region: {region}")
     print(f"{'='*70}")
@@ -959,7 +821,6 @@ def compute_gene_junction_metrics(
             print(f"  [1/2] Junction discovery (bulk BAMs, {len(bulk_rows)} samples) ...")
             t0 = time.time()
             jxn_count_union: Dict[Tuple[int,int], int] = defaultdict(int)
-            # Also save per-sample jxn_raw to reuse in Step 2 (avoids re-walking bulk BAMs)
             sample_jxn_raw: Dict[str, Dict[Tuple[int,int], int]] = {}
             disc_futures = {
                 pool.submit(_discover_junctions_worker,
@@ -999,7 +860,6 @@ def compute_gene_junction_metrics(
                 bulk  = row["bulk"] if pd.notna(row.get("bulk","")) else None
                 hap1  = row["hap1"] if pd.notna(row.get("hap1","")) else None
                 hap2  = row["hap2"] if pd.notna(row.get("hap2","")) else None
-                # Pass bulk jxn_raw from Step 1 to avoid re-walking the bulk BAM
                 bulk_jxn_raw = sample_jxn_raw.get(sname)
                 psi_futures[pool.submit(
                     process_sample, sname, bulk, hap1, hap2,
@@ -1033,15 +893,10 @@ def compute_gene_junction_metrics(
     return combined
 
 
-# ---------------------------------------------------------------------------
-# main()
-# ---------------------------------------------------------------------------
 
 def _write_manifest(gene_info: Dict[str, Tuple[str, str, str]],
                      result_paths: Dict[str, Optional[str]],
                      manifest_path: str) -> None:
-    """Writes one row per gene in gene_info (BED order): gene, result_path
-    (or the literal string 'None')."""
     manifest_rows = [
         {"gene": gene, "result_path": result_paths.get(gene) or "None"}
         for gene in gene_info
@@ -1068,10 +923,6 @@ def main() -> None:
     gene_info  = load_bed(args.bed)
     mapping_df = load_and_validate_mapping(args.mapping_file)
 
-    # ---- Minimum cohort size gate ----
-    # Fitting a per-junction distribution across the cohort's bulk samples
-    # isn't meaningful with only a handful of samples, so small groups are
-    # skipped entirely rather than producing unreliable results.
     n_samples = mapping_df["sample"].nunique()
     if n_samples < args.min_samples:
         msg = (f"SKIPPED: only {n_samples} sample(s) in this group "
@@ -1098,7 +949,6 @@ def main() -> None:
         gene_groups = gene_groups[:args.test_n_genes]
         print(f"[INFO] --test-n-genes {args.test_n_genes}: processing first {len(gene_groups)} gene(s) only.")
 
-    # IPA setup
     alu = None
     if args.alu_bed:
         print(f"Loading Alu intervals from {args.alu_bed} ...")
@@ -1115,7 +965,6 @@ def main() -> None:
     print(f"\nWill process {n_genes} gene(s)")
     print(f"Threads per gene: {args.threads}\n")
 
-    # ---- Process each gene, writing its raw metrics TSV as we go ----
     result_paths: Dict[str, Optional[str]] = {}
 
     for gene, region, strand, region_df in gene_groups:
@@ -1146,7 +995,6 @@ def main() -> None:
             print(f"  {gene}: no output")
         print(f"  {gene} complete ({time.time() - t_gene:.0f}s)")
 
-    # ---- Write manifest: one row per gene in the BED file, in BED order ----
     _write_manifest(gene_info, result_paths, args.manifest)
     n_with_data = sum(1 for p in result_paths.values() if p)
     with open(args.note, "w") as fh:

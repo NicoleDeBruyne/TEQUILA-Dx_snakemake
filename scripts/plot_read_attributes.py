@@ -1,31 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/plot_read_attributes.py
-Cohort-level merge step: combines every sample's own
-{sample}_read_attributes.tsv (five-number read-length summary per target
-type, written per-sample by scripts/get_read_attributes.py via
-rules/6_sample_qc.smk's _6B) into one grouped boxplot across the cohort. No
-BAM access here -- adding/removing a sample from a cohort only reruns this
-cheap merge, not the per-sample BAM scan. Invoked by
-rules/9_merge_results.smk's _9H.
-
-No violin plot: a violin needs the full read-length distribution shape (via
-KDE), which the per-sample step deliberately doesn't keep -- only the
-five-number summary needed for a boxplot. (See conversation notes / git
-history if that trade-off ever needs revisiting.) For the same reason,
-there's no cross-target-type "ALL" summary or per-group mean here either --
-those aren't reconstructable from five numbers without the underlying
-per-read data.
-
-Boxes are drawn via matplotlib's low-level Axes.bxp() from each (sample,
-targetType)'s precomputed five-number summary, with manual per-targetType
-dodge/coloring to reproduce seaborn's old grouped-boxplot layout. Whiskers
-are drawn to each group's true min/max rather than the traditional
-1.5x-IQR-clipped whisker + outlier-point convention -- the per-sample step
-only keeps five numbers, not the full distribution needed to tell an inlier
-from a Tukey outlier. This shows *more* of the real range, not less, just
-without separate outlier markers.
-"""
 
 import argparse
 
@@ -78,8 +50,6 @@ def plot_boxplot(df, sample_order, target_order, palette_dict, outfile, title):
         for patch, color in zip(bxp_artists['boxes'], colors):
             patch.set_facecolor(color)
 
-    # Manual legend, since bxp() doesn't group by hue the way seaborn's
-    # boxplot(hue=...) did.
     handles = [plt.Rectangle((0, 0), 1, 1, facecolor=palette_dict[tt]) for tt in target_order]
     ax.legend(handles, target_order, title="TargetType")
 
@@ -120,9 +90,6 @@ def main():
     print("\nPlotting read length boxplot...")
     plot_boxplot(df, sample_order, target_order, palette_dict, f"{args.outprefix}_read_lengths.pdf", args.title)
 
-    # Alias-labeled copy: always produced (mirrors the real-ID plot verbatim
-    # when --alias-map is empty), so the rule's declared output exists
-    # regardless of whether this bed panel actually has any aliases.
     alias_map = parse_alias_map(args.alias_map)
     alias_df = df.copy()
     alias_df['sample'] = alias_df['sample'].apply(lambda s: resolve(s, alias_map))

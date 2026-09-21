@@ -1,9 +1,5 @@
-#!/usr/bin/env python3
 
-# Author: Nicole DeBruyne (Lin Lab)
-# Optimized: 2025
 
-# Extracts splice junctions from a BAM file mapping to specified regions of interest.
 
 import os, argparse, warnings, pysam, traceback
 import pandas as pd
@@ -13,12 +9,10 @@ import concurrent.futures
 warnings.filterwarnings('ignore', category=PerformanceWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
 
-# Pre-compiled CIGAR pattern used by every worker — compiled once at import time
 import re
 _CIGAR_RE = re.compile(r'(\d+)([MIDNSHP=X])')
 
 def parse_args():
-    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description='Identifies splice junctions (format: chrom_intronStart_intronEnd) mapping to a user-defined gene region')
     parser.add_argument('--mapping-file', required=True,
@@ -30,11 +24,6 @@ def parse_args():
     return parser.parse_args()
 
 def get_splice_junctions_from_CIGAR(cigar, start, region_chrom, region_start, region_end):
-    """Extract splice junctions from a single alignment.
-
-    Accepts pre-parsed region fields to avoid redundant string splitting per alignment.
-    Returns a list of junction strings: chrom_intronStart_intronEnd.
-    """
     pos = start
     sj_list = []
 
@@ -44,7 +33,7 @@ def get_splice_junctions_from_CIGAR(cigar, start, region_chrom, region_start, re
         if operation == 'P':
             warnings.warn(f"Padding operation 'P' encountered in CIGAR string: {cigar}")
         elif operation in 'SHI':
-            pass  # no position change
+            pass
         elif operation in 'MXD=':
             pos += length
         elif operation == 'N':
@@ -57,11 +46,6 @@ def get_splice_junctions_from_CIGAR(cigar, start, region_chrom, region_start, re
     return sj_list
 
 def extract_splice_junctions_from_BAM(bamfile, region):
-    """Extract coordinates of all splice junctions from a BAM file for a region.
-
-    Returns (sj_dict, alignment_count).
-    """
-    # Parse region once
     region_chrom, region_boundaries = region.split(':')
     region_start, region_end = map(int, region_boundaries.split('-'))
 
@@ -86,7 +70,6 @@ def extract_splice_junctions_from_BAM(bamfile, region):
     return sj_dict, alignment_count
 
 def _build_df(sj_dict, sample_id, phasing, region, gene, gene_alignment_count):
-    """Helper: build a junction DataFrame from a dict."""
     if not sj_dict:
         return pd.DataFrame(columns=['sample', 'phasing', 'region', 'gene',
                                      'gene_alignment_count', 'junction', 'jxn_alignment_count'])
@@ -101,7 +84,6 @@ def _build_df(sj_dict, sample_id, phasing, region, gene, gene_alignment_count):
     return df[['sample', 'phasing', 'region', 'gene', 'gene_alignment_count', 'junction', 'jxn_alignment_count']]
 
 def process_region(sample_id, gene, region, bamfile, report_outdir, hap1file=None, hap2file=None):
-    """Process one region of interest and return a combined junction DataFrame."""
 
     report = os.path.join(report_outdir,
         f"{sample_id}_{gene}_{region.replace(':', '_').replace('-', '_')}_report.tsv")
@@ -109,7 +91,6 @@ def process_region(sample_id, gene, region, bamfile, report_outdir, hap1file=Non
     with open(report, 'w') as report_file:
         report_file.write(f"Obtaining splice junction information for {sample_id} over {gene} ({region})\n")
 
-        # Bulk BAM
         report_file.write("Extracting splice junctions from the sample of interest...\n")
         sj_dict, gene_alignment_count = extract_splice_junctions_from_BAM(bamfile, region)
         if not sj_dict:
@@ -127,7 +108,6 @@ def process_region(sample_id, gene, region, bamfile, report_outdir, hap1file=Non
         if hap1file is None or hap2file is None:
             return sj_df
 
-        # Haplotype-specific BAMs
         report_file.write("Processing haplotype-specific data...\n")
 
         hap1_dict, hap1_count = extract_splice_junctions_from_BAM(hap1file, region)
@@ -135,7 +115,6 @@ def process_region(sample_id, gene, region, bamfile, report_outdir, hap1file=Non
             f"    Haplotype 1: Processed {hap1_count} primary/supplementary alignments "
             f"and found {len(hap1_dict)} junctions.\n")
         hap1_df = _build_df(hap1_dict, sample_id, 'hap1', region, gene, hap1_count)
-        # Fill in zero-count junctions seen in bulk but not in hap1
         missing_hap1 = bulk_junctions - hap1_dict.keys()
         if missing_hap1:
             hap1_df = pd.concat([hap1_df, pd.DataFrame({
@@ -162,7 +141,6 @@ def process_region(sample_id, gene, region, bamfile, report_outdir, hap1file=Non
     return pd.concat([sj_df, hap1_df, hap2_df], ignore_index=True)
 
 def main():
-    """Main script."""
 
     print("\n\n\n******************************************************************************************")
     print("Getting splice junction counts...")
@@ -182,10 +160,10 @@ def main():
         futures = [
             executor.submit(
                 process_region,
-                row.iloc[0],           # sample_id
-                row.iloc[2],           # gene
-                row.iloc[1],           # region
-                row.iloc[3],           # bamfile
+                row.iloc[0],
+                row.iloc[2],
+                row.iloc[1],
+                row.iloc[3],
                 report_outdir,
                 row.iloc[4] if pd.notna(row.iloc[4]) else None,
                 row.iloc[5] if pd.notna(row.iloc[5]) else None,

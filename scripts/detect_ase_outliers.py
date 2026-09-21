@@ -1,9 +1,4 @@
-#!/usr/bin/env python3
 
-# Author: Nicole DeBruyne (Lin Lab)
-# Date: 2024.01.17
-# Adapted from Robert Wang (Xing Lab)
-# Optimized: 2025
 
 import argparse
 import pandas as pd
@@ -28,14 +23,12 @@ def parse_args():
     return parser.parse_args()
 
 def binomial_test(hap1_count, hap2_count):
-    """Binomial test to check if hap1 and hap2 counts differ from the expected 50/50 ratio."""
     n = int(hap1_count) + int(hap2_count)
     minor_count = int(min(hap1_count, hap2_count))
     return stats.binomtest(k=minor_count, n=n, p=0.5, alternative='less').pvalue
 
 def process_gene(hap1_count, hap2_count, max_coverage, max_phased_coverage,
                  phasing_threshold, sample_coverage_threshold):
-    """Perform allele-specific expression (ASE) analysis for a given gene."""
 
     if np.isnan(max_phased_coverage) or (max_phased_coverage < sample_coverage_threshold) or (max_phased_coverage / max_coverage < phasing_threshold):
         return "n/a", "n/a", "n/a"
@@ -46,7 +39,6 @@ def process_gene(hap1_count, hap2_count, max_coverage, max_phased_coverage,
     return ratio, float(ratio - 0.5), p_value
 
 def plot_volcano(df, outprefix, padj_threshold, haplotype_ratio_threshold, n=0):
-    """Plot a volcano plot of difference in haplotype ratio vs. -log10(p-value) for all junctions."""
 
     df = df.copy()
     df['padj'] = df['padj'].replace(0, np.nextafter(0, 1)).astype('float64')
@@ -72,7 +64,6 @@ def plot_volcano(df, outprefix, padj_threshold, haplotype_ratio_threshold, n=0):
     plt.savefig(f'{outprefix}_volcano_plot.pdf')
 
 def main():
-    """Main function."""
 
     print(f"\n\n\n******************************************************************************************")
     print(f"Detecting ASE outliers...")
@@ -84,14 +75,10 @@ def main():
     outlier_outfile = args.outprefix + "_ase_outliers.tsv"
     os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
 
-    # Read input
     infile = pd.read_table(args.infile, sep="\t")
 
     print('Performing ASE analysis...')
 
-    # Vectorise numeric coercions once, before the loop.
-    # Read by column name (not position) so this stays correct regardless of
-    # column order, and fails loudly if an expected column is missing.
     required_cols = ['sample', 'gene', 'hap1_read_count',
                       'hap2_read_count', 'unassigned_read_count',
                       'max_coverage', 'max_phased_coverage']
@@ -129,7 +116,6 @@ def main():
         'max_coverage', 'max_phased_coverage', 'ratio', 'diff', 'p_value'
     ])
 
-    # Multiple-testing correction
     print('Correcting for multiple testing...')
     df['padj'] = 'n/a'
     df['padj'] = df['padj'].astype(object)

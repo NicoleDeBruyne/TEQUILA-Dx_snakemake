@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/plot_on_target_rates.py
-Cohort-level merge step: combines every sample's own {sample}_on_target.tsv
-(written per-sample by scripts/get_on_target_rate.py via rules/6_sample_qc.smk's
-_6A) into one cohort table, derives mapping_rate/on_target_rate from the raw
-total/mapped/target counts, and plots them across the cohort. No BAM access
-here -- adding/removing a sample from a cohort only reruns this cheap merge,
-not the per-sample BAM scan. Invoked by rules/9_merge_results.smk's _9G.
-
-Writes {outprefix}_on_target_rates.tsv, {outprefix}_mapping_rates.pdf, and
-{outprefix}_on_target_rates.pdf (+ an alias-labeled copy of the latter).
-"""
 
 import argparse
 
@@ -48,8 +35,8 @@ def rate_label(r):
 def plot_mapping_figure(df, outprefix, width, title):
     fig, ax = plt.subplots(2, figsize=(width, 10))
 
-    ax[0].bar(range(len(df)), df['mapping_rate'], color="#FFD676")  # yellow
-    ax[0].bar(range(len(df)), 100 - df['mapping_rate'], bottom=df['mapping_rate'], color='#C4C4C4')  # grey
+    ax[0].bar(range(len(df)), df['mapping_rate'], color="#FFD676")
+    ax[0].bar(range(len(df)), 100 - df['mapping_rate'], bottom=df['mapping_rate'], color='#C4C4C4')
     for i, r in df.iterrows():
         ax[0].text(i, r['mapping_rate'] + 1, rate_label(r['mapping_rate']), ha='center', fontsize=8)
     ax[0].set_ylim(0, 105)
@@ -58,8 +45,8 @@ def plot_mapping_figure(df, outprefix, width, title):
     ax[0].set_xticks(range(len(df)))
     ax[0].set_xticklabels([])
 
-    ax[1].bar(range(len(df)), df['mapped'] / 1e6, color="#FFD676")  # yellow
-    ax[1].bar(range(len(df)), df['unmapped'] / 1e6, bottom=df['mapped'] / 1e6, color='#C4C4C4')  # grey
+    ax[1].bar(range(len(df)), df['mapped'] / 1e6, color="#FFD676")
+    ax[1].bar(range(len(df)), df['unmapped'] / 1e6, bottom=df['mapped'] / 1e6, color='#C4C4C4')
     offset = df['total'].max() * 0.02
     for i, r in df.iterrows():
         ax[1].text(i, (r['total'] + offset) / 1e6, f"{fmt(r['total'])}", ha='center', fontsize=8)
@@ -80,7 +67,7 @@ def plot_ontarget_figure(df, bar_colors, outprefix, suffix, width, title):
     fig, ax = plt.subplots(2, figsize=(width, 10))
 
     ax[0].bar(range(len(df)), df['on_target_rate'], color=bar_colors)
-    ax[0].bar(range(len(df)), 100 - df['on_target_rate'], bottom=df['on_target_rate'], color='#C4C4C4')  # grey
+    ax[0].bar(range(len(df)), 100 - df['on_target_rate'], bottom=df['on_target_rate'], color='#C4C4C4')
     for i, r in df.iterrows():
         ax[0].text(i, r['on_target_rate'] + 1, rate_label(r['on_target_rate']), ha='center', fontsize=8)
     ax[0].set_ylim(0, 105)
@@ -91,7 +78,7 @@ def plot_ontarget_figure(df, bar_colors, outprefix, suffix, width, title):
 
     off = df['mapped'] - df['target']
     ax[1].bar(range(len(df)), df['target'] / 1e6, color=bar_colors)
-    ax[1].bar(range(len(df)), off / 1e6, bottom=df['target'] / 1e6, color='#C4C4C4')  # grey
+    ax[1].bar(range(len(df)), off / 1e6, bottom=df['target'] / 1e6, color='#C4C4C4')
     offset = df['mapped'].max() * 0.02
     for i, r in df.iterrows():
         ax[1].text(i, (r['mapped'] + offset) / 1e6, f"{fmt(r['mapped'])}", ha='center', fontsize=8)
@@ -130,26 +117,20 @@ def main():
 
     unique_groups = list(df['group'].dropna().unique())
     colors = [
-        '#6997B9',  # blue
-        '#BB6A68',  # red
-        '#70A677',  # green
-        '#D48653',  # orange
-        '#A783A3',  # purple
+        '#6997B9',
+        '#BB6A68',
+        '#70A677',
+        '#D48653',
+        '#A783A3',
     ]
     color_dict = {g: colors[i % len(colors)] for i, g in enumerate(unique_groups)} if unique_groups else {}
-    bar_colors = df['group'].map(color_dict).fillna('#6997B9')  # blue
+    bar_colors = df['group'].map(color_dict).fillna('#6997B9')
 
-    # Linear scaling: reserve a fixed amount of horizontal space per sample so
-    # labels don't overlap, with a floor for small cohorts. No upper cap --
-    # large cohorts (e.g. AGS390 has ~200 samples) need a genuinely wide PDF.
     width = max(10, 0.22 * len(df))
 
     plot_mapping_figure(df, args.outprefix, width, args.title)
     plot_ontarget_figure(df, bar_colors, args.outprefix, "", width, args.title)
 
-    # Alias-labeled copy: always produced (mirrors the real-ID figure
-    # verbatim when --alias-map is empty), so the rule's declared output
-    # exists regardless of whether this bed panel actually has any aliases.
     alias_map = parse_alias_map(args.alias_map)
     alias_df = df.copy()
     alias_df['sample'] = alias_df['sample'].apply(lambda s: resolve(s, alias_map))

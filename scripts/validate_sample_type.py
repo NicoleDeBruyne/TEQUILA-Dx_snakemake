@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 
 import argparse
 import gc
@@ -23,9 +22,6 @@ from sample_alias import add_alias_map_arg, parse_alias_map, resolve
 warnings.filterwarnings("ignore")
 
 
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -100,21 +96,8 @@ def parse_args():
     return args
 
 
-# ---------------------------------------------------------------------------
-# I/O helpers
-# ---------------------------------------------------------------------------
 
 def _normalize_junction_index(index: pd.Index) -> pd.Index:
-    """Normalize junction IDs to chr_start_end.
-
-    GTEx-derived matrices (--matrix-refs) use "chr:start-end:strand" (e.g.
-    "chr1:11212-12009:+"), while this pipeline's own sample-derived matrices
-    (--matrix-query) already use "chr_start_end" (e.g. "chr1_11212_12009") --
-    see get_splice_junction_counts_by_region.py / make_junction_count_matrix.py.
-    Only entries in the colon/dash format are rewritten; entries already in
-    chr_start_end format (no ':') pass through unchanged, so this is safe to
-    apply uniformly to both matrix types regardless of source.
-    """
     idx = index.to_series(index=range(len(index))).astype(str)
     is_colon_fmt = idx.str.contains(':', regex=False)
     if not is_colon_fmt.any():
@@ -134,7 +117,6 @@ def read_matrix(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, sep="\t", index_col=0)
     df.index = _normalize_junction_index(df.index)
     df = df.apply(pd.to_numeric, errors="coerce", downcast="float")
-    # Ensure float32 (downcast may still leave float64 for columns with NaN-only etc.)
     df = df.astype(np.float32)
     return df
 
@@ -150,11 +132,6 @@ def read_bed(path: str) -> pd.DataFrame:
 
 
 def build_bed_dict(bed: pd.DataFrame) -> dict:
-    """
-    Pre-build the chrom → (starts_array, ends_array) lookup used by
-    filter_to_bed. Intervals are sorted by start for vectorized searching.
-    Construct once and reuse across all matrices.
-    """
     bed_dict = {}
     for chrom, sub in bed.groupby("chrom", sort=False):
         starts = np.sort(sub["start"].to_numpy())
@@ -164,7 +141,6 @@ def build_bed_dict(bed: pd.DataFrame) -> dict:
 
 
 def deduplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Append .1, .2, … to any duplicated column names."""
     seen = {}
     new_cols = []
     duplicates = set()
@@ -182,16 +158,11 @@ def deduplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
-# Junction parsing & BED overlap
-# ---------------------------------------------------------------------------
 
 def parse_junctions(index: pd.Index) -> pd.DataFrame:
-    """Split chr_ss1_ss2 index into component columns (vectorized)."""
     split = index.to_series(index=range(len(index))).str.rsplit("_", n=2, expand=True)
 
     if split.shape[1] < 3:
-        # Every entry failed to split into 3 parts
         print(f"  WARNING: {len(index)} junction IDs could not be parsed and will be skipped.")
         return pd.DataFrame(
             columns=["chr", "ss1", "ss2", "ss1_key", "ss2_key"],
@@ -220,15 +191,6 @@ def parse_junctions(index: pd.Index) -> pd.DataFrame:
 
 
 def filter_to_bed(psi_df: pd.DataFrame, bed_dict: dict) -> pd.DataFrame:
-    """
-    Drop rows whose junction does not have BOTH splice sites within a BED
-    interval on the same chromosome.  Operates on an already-computed PSI
-    DataFrame so no count data needs to be kept around.
-
-    Vectorized: for each chromosome, splice-site positions are checked
-    against sorted (start, end) interval arrays using searchsorted, avoiding
-    a per-row Python loop over hundreds of thousands of junctions.
-    """
     jxn_info = parse_junctions(psi_df.index)
 
     def in_bed_vectorized(chrom_arr: np.ndarray, pos_arr: np.ndarray) -> np.ndarray:
@@ -238,7 +200,6 @@ def filter_to_bed(psi_df: pd.DataFrame, bed_dict: dict) -> pd.DataFrame:
             if not mask.any():
                 continue
             p = pos_arr[mask]
-            # For each position, find the rightmost interval with start <= p
             idx = np.searchsorted(starts, p, side="right") - 1
             valid = idx >= 0
             hit = np.zeros(len(p), dtype=bool)
@@ -258,28 +219,16 @@ def filter_to_bed(psi_df: pd.DataFrame, bed_dict: dict) -> pd.DataFrame:
     return psi_df.loc[jxn_info.index[keep]]
 
 
-# ---------------------------------------------------------------------------
-# PSI calculation
-# ---------------------------------------------------------------------------
 
 def compute_psi(counts: pd.DataFrame,
                 min_coverage: int = 20,
                 min_samples: int = 50) -> pd.DataFrame:
-    """
-    Compute PSI = jxn_count / (ss1_count + ss2_count - jxn_count).
-
-    Cells where denominator < min_coverage are set to NaN.
-    Junctions with fewer than min_samples valid (non-NaN) PSI values are
-    dropped.  Pass min_samples=1 for query matrices (keep a junction if at
-    least one sample has sufficient coverage).
-    """
     jxn_info   = parse_junctions(counts.index)
-    counts      = counts.loc[jxn_info.index]          # drop unparseable rows
+    counts      = counts.loc[jxn_info.index]
     counts_arr  = counts.values.astype(np.float32)
     ss1_keys    = jxn_info["ss1_key"].values
     ss2_keys    = jxn_info["ss2_key"].values
 
-    # Accumulate per-splice-site read totals across all junctions sharing that site
     ss_to_rows = defaultdict(list)
     for row_i, (k1, k2) in enumerate(zip(ss1_keys, ss2_keys)):
         ss_to_rows[k1].append(row_i)
@@ -291,8 +240,6 @@ def compute_psi(counts: pd.DataFrame,
     }
     del ss_to_rows
 
-    # Build denominator directly without materializing separate
-    # ss1_counts / ss2_counts full-size arrays (saves 2x matrix memory).
     denominator = np.empty_like(counts_arr)
     for row_i, (k1, k2) in enumerate(zip(ss1_keys, ss2_keys)):
         denominator[row_i, :] = ss_sum_cache[k1] + ss_sum_cache[k2]
@@ -317,26 +264,18 @@ def compute_psi(counts: pd.DataFrame,
     return psi_df
 
 
-# ---------------------------------------------------------------------------
-# Per-matrix load-and-filter pipeline
-# ---------------------------------------------------------------------------
 
 def load_ref_matrix(path: str, name: str,
                     bed_dict: dict,
                     min_coverage: int,
                     min_ref_samples: int) -> pd.DataFrame:
-    """
-    Read one reference count matrix, compute PSI, apply coverage filter,
-    then restrict to BED junctions.  The raw count matrix is released from
-    memory before returning.
-    """
     print(f"Reading in reference matrix: {path} ({name})...")
     counts = read_matrix(path)
     print(f"  {counts.shape[0]:,} junctions x {counts.shape[1]:,} samples")
 
     psi = compute_psi(counts, min_coverage=min_coverage,
                       min_samples=min_ref_samples)
-    del counts   # release raw counts immediately
+    del counts
     gc.collect()
 
     print(f"  {len(psi):,} junctions with coverage ≥{min_coverage} in ≥{min_ref_samples} samples")
@@ -353,19 +292,9 @@ def load_query_matrix(path: str, name: str,
                       seen_columns: set,
                       common_jxns: pd.Index,
                       variable_jxns: pd.Index) -> tuple[pd.DataFrame, dict]:
-    """
-    Read one query count matrix, compute PSI, apply coverage filter
-    (keep junction if ≥1 sample has valid PSI), restrict to BED junctions,
-    then report overlap with the reference common junction set and the
-    tissue-discriminating variable junction set.
-    Deduplicates column names against previously seen names.
-
-    Returns (psi_df, sample_to_query mapping for this matrix).
-    """
     print(f"Reading in query matrix: {path}...")
     counts = read_matrix(path)
 
-    # Deduplicate column names against all previously loaded query samples
     new_cols = []
     col_seen_local = {}
     for col in counts.columns:
@@ -398,10 +327,6 @@ def load_query_matrix(path: str, name: str,
     n_discriminating = psi.index.isin(variable_jxns).sum()
     print(f"  {n_discriminating:,} discriminating junctions")
 
-    # Downstream code (PCA, distance scoring) only ever uses variable_jxns,
-    # so retain just those rows. This is the dominant memory saving: full
-    # BED-filtered query matrices can have 10,000-150,000+ junctions, while
-    # variable_jxns is typically ~100.
     psi = psi.reindex(variable_jxns)
     gc.collect()
 
@@ -409,15 +334,8 @@ def load_query_matrix(path: str, name: str,
     return psi, sample_to_query
 
 
-# ---------------------------------------------------------------------------
-# Tissue-discriminating junction selection
-# ---------------------------------------------------------------------------
 
 def _detect_elbow(values: np.ndarray) -> int:
-    """
-    Kneedle algorithm: index of maximum perpendicular distance from the line
-    joining the first and last points of the (normalised) curve.
-    """
     n = len(values)
     if n < 3:
         return n - 1
@@ -435,12 +353,6 @@ def _detect_elbow(values: np.ndarray) -> int:
 def select_variable_junctions(avg_psi_per_tissue: pd.DataFrame,
                                n_override: int = 0,
                                outprefix: str = "") -> pd.Index:
-    """
-    Select tissue-discriminating junctions by elbow detection on the full
-    ranked-variance curve of all junctions present in all reference matrices.
-
-    n_override > 0 : skip elbow detection and use exactly that many junctions.
-    """
     variance = avg_psi_per_tissue.dropna().var(axis=1).sort_values(ascending=False)
     vals     = variance.values
 
@@ -456,7 +368,6 @@ def select_variable_junctions(avg_psi_per_tissue: pd.DataFrame,
         print("  [WARNING] Fewer than 10 junctions selected. "
               "Consider --n-variable-junctions to override.")
 
-    # Diagnostic scree plot
     if outprefix:
         fig, ax = plt.subplots(figsize=(6, 4))
         ax.plot(np.arange(1, len(vals) + 1), vals, color="#4c8fca", lw=1.2)
@@ -477,17 +388,8 @@ def select_variable_junctions(avg_psi_per_tissue: pd.DataFrame,
     return selected
 
 
-# ---------------------------------------------------------------------------
-# Color helpers
-# ---------------------------------------------------------------------------
 
 def _tissue_palette(tissues: list, colors: list | None = None) -> dict:
-    """Distinct color per reference tissue.
-
-    If *colors* is provided it must be the same length as *tissues*; each
-    entry may be any Matplotlib-compatible color string (hex, named, etc.).
-    Missing or None entries fall back to the built-in defaults.
-    """
     defaults=[
         "#912321","#002b58","#1e662a","#c23637","#0068a9","#3d892e",
         "#d95d5b","#4c8fca","#57aa3e","#ea9a9c","#91c4e9","#95c36e",
@@ -502,12 +404,6 @@ def _tissue_palette(tissues: list, colors: list | None = None) -> dict:
 
 
 def _query_palette(query_names: list, colors: list | None = None) -> dict:
-    """Distinct color per query matrix (separate palette from tissue colors).
-
-    If *colors* is provided it must be the same length as *query_names*; each
-    entry may be any Matplotlib-compatible color string (hex, named, etc.).
-    Missing or None entries fall back to the built-in defaults.
-    """
     defaults = [
         "#ae450b","#6e2769","#005d6e","#926d17",
         "#ea6302","#9d4588","#009099","#c69528",
@@ -523,9 +419,6 @@ def _query_palette(query_names: list, colors: list | None = None) -> dict:
     return palette
 
 
-# ---------------------------------------------------------------------------
-# PCA
-# ---------------------------------------------------------------------------
 
 def run_pca(ref_psi: dict,
             query_psi: dict,
@@ -535,18 +428,11 @@ def run_pca(ref_psi: dict,
             outprefix: str,
             ref_colors: list | None = None,
             query_colors: list | None = None):
-    """
-    Joint PCA of all reference + query samples on variable junctions.
-    Missing PSI values are imputed with the per-junction mean.
-
-    Reference tissues → small semi-transparent circles.
-    Query matrices    → larger diamonds, each in a distinct color.
-    """
     frames       = []
-    ref_idx      = {}   # tissue name → row indices into coords
-    query_idx    = {}   # query name  → row indices into coords
-    ref_counts   = {}   # tissue name → sample count (for legend)
-    query_counts = {}   # query name  → sample count (for legend)
+    ref_idx      = {}
+    query_idx    = {}
+    ref_counts   = {}
+    query_counts = {}
     cursor       = 0
 
     for name in ref_names:
@@ -565,10 +451,10 @@ def run_pca(ref_psi: dict,
         query_counts[qname] = n
         cursor += n
 
-    combined  = pd.concat(frames, axis=1)          # junctions × samples
+    combined  = pd.concat(frames, axis=1)
     row_means = combined.mean(axis=1)
-    combined  = combined.apply(lambda c: c.fillna(row_means), axis=0)  # fill before transpose
-    combined  = combined.T                          # samples × junctions
+    combined  = combined.apply(lambda c: c.fillna(row_means), axis=0)
+    combined  = combined.T
     combined  = combined.dropna(axis=1)
 
     X       = StandardScaler().fit_transform(combined.values)
@@ -634,18 +520,10 @@ def run_pca(ref_psi: dict,
     ), var_exp
 
 
-# ---------------------------------------------------------------------------
-# Mean |ΔPSI| distance scoring
-# ---------------------------------------------------------------------------
 
 def compute_distance_scores(ref_avg_psi: pd.DataFrame,
                              query_psi_all: pd.DataFrame,
                              variable_jxns: pd.Index) -> pd.DataFrame:
-    """
-    For each query sample, compute mean |PSI_sample − avg_PSI_tissue| across
-    all variable junctions with non-NaN PSI in that sample.
-    Lower score = closer match.
-    """
     jxns = variable_jxns.intersection(ref_avg_psi.index)
     ref  = ref_avg_psi.loc[jxns]
     q    = query_psi_all.reindex(jxns)
@@ -661,12 +539,9 @@ def compute_distance_scores(ref_avg_psi: pd.DataFrame,
             row[tissue] = (s_psi[both] - t_psi[both]).abs().mean() if both.sum() > 0 else np.nan
         scores[sample] = row
 
-    return pd.DataFrame(scores).T   # samples × tissues
+    return pd.DataFrame(scores).T
 
 
-# ---------------------------------------------------------------------------
-# Plots
-# ---------------------------------------------------------------------------
 
 def plot_distance_heatmap(score_df: pd.DataFrame,
                           sample_to_query: dict,
@@ -675,14 +550,9 @@ def plot_distance_heatmap(score_df: pd.DataFrame,
                           query_colors: list | None = None,
                           n_variable_jxns: int = 0,
                           out_suffix: str = ""):
-    """
-    Heatmap: rows = query samples (grouped + clustered by source matrix),
-    cols = reference tissues.  A color sidebar identifies each group.
-    """
     n_samples, n_tissues = score_df.shape
     query_pal = _query_palette(query_names, query_colors)
 
-    # Cluster rows within each query group
     ordered_rows     = []
     group_boundaries = []
     for qname in query_names:
@@ -710,7 +580,6 @@ def plot_distance_heatmap(score_df: pd.DataFrame,
         gridspec_kw={"width_ratios": [0.03, 1], "wspace": 0.01}
     )
 
-    # Sidebar color strip
     side_arr   = np.zeros((n_samples, 1, 3))
     row_cursor = 0
     for qname in query_names:
@@ -736,7 +605,6 @@ def plot_distance_heatmap(score_df: pd.DataFrame,
         yticklabels=False,
     )
 
-    # White separator lines between groups
     for boundary in group_boundaries[:-1]:
         ax_heat.axhline(boundary, color="white", linewidth=2.5, zorder=5)
         ax_side.axhline(boundary - 0.5, color="white", linewidth=2.5, zorder=5)
@@ -749,9 +617,6 @@ def plot_distance_heatmap(score_df: pd.DataFrame,
     ax_heat.set_ylabel("")
     ax_heat.tick_params(axis="x", labelsize=9, rotation=30)
 
-    # Legend placed on the right-hand side of the figure, below the colorbar.
-    # We use the heatmap axes' inset colorbar axes as an anchor by positioning
-    # relative to ax_heat in figure-fraction coordinates.
     legend_handles = [
         mpatches.Patch(color=query_pal[q], label=q)
         for q in query_names
@@ -761,7 +626,7 @@ def plot_distance_heatmap(score_df: pd.DataFrame,
         handles=legend_handles,
         title="Query matrix",
         loc="upper left",
-        bbox_to_anchor=(1.18, 0.44),   # right of ax_heat, below colorbar
+        bbox_to_anchor=(1.18, 0.44),
         bbox_transform=ax_heat.transAxes,
         fontsize=8,
         title_fontsize=8,
@@ -777,25 +642,16 @@ def plot_distance_heatmap(score_df: pd.DataFrame,
     print(f"  Saved: {path}")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     args = parse_args()
     os.makedirs(os.path.dirname(args.outprefix) or ".", exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # 0. Build BED lookup once — used as a filter after every matrix load
-    # ------------------------------------------------------------------
     bed = read_bed(args.bed)
     print(f"Loaded {len(bed):,} regions from BED file\n")
     bed_dict = build_bed_dict(bed)
     del bed
 
-    # ------------------------------------------------------------------
-    # 1. Reference matrices: read → PSI → coverage filter → BED filter
-    # ------------------------------------------------------------------
     ref_psi = {}
     for path, name in zip(args.matrix_refs, args.ref_names):
         ref_psi[name] = load_ref_matrix(
@@ -804,26 +660,17 @@ def main():
             min_ref_samples=args.min_ref_samples,
         )
 
-    # ------------------------------------------------------------------
-    # 2. Common junctions across all reference matrices
-    # ------------------------------------------------------------------
     common_jxns = None
     for name in args.ref_names:
         idx = ref_psi[name].index
         common_jxns = idx if common_jxns is None else common_jxns.intersection(idx)
     print(f"\n{len(common_jxns):,} junctions present in all reference matrices")
 
-    # ------------------------------------------------------------------
-    # 3. Average PSI per reference tissue (over common junctions)
-    # ------------------------------------------------------------------
     ref_avg = pd.DataFrame(
         {name: ref_psi[name].reindex(common_jxns).mean(axis=1)
          for name in args.ref_names}
-    )   # junctions × tissues
+    )
 
-    # ------------------------------------------------------------------
-    # 4. Select tissue-discriminating junctions
-    # ------------------------------------------------------------------
     print("\nSelecting tissue-discriminating junctions...")
     variable_jxns = select_variable_junctions(
         ref_avg,
@@ -831,18 +678,12 @@ def main():
         outprefix=args.outprefix,
     )
 
-    # Reference PSI matrices are only needed (downstream) on variable_jxns
-    # for the PCA scatter plot. Shrink them now to drop the bulk of the
-    # BED-filtered junctions (e.g. thousands -> ~100 rows per tissue).
     for name in args.ref_names:
         ref_psi[name] = ref_psi[name].reindex(variable_jxns)
     gc.collect()
 
-    # ------------------------------------------------------------------
-    # 5. Query matrices: read → PSI → coverage filter → BED filter
-    # ------------------------------------------------------------------
-    query_psi       = {}   # qname → PSI DataFrame
-    sample_to_query = {}   # sample column name → query matrix name
+    query_psi       = {}
+    sample_to_query = {}
     seen_columns    = set()
 
     for path, qname in zip(args.matrix_query, args.query_names):
@@ -856,9 +697,6 @@ def main():
         query_psi[qname] = psi
         sample_to_query.update(s2q)
 
-    # ------------------------------------------------------------------
-    # 6. PCA
-    # ------------------------------------------------------------------
     print("\nRunning PCA...")
     pca_coords, var_exp = run_pca(
         ref_psi, query_psi, variable_jxns,
@@ -867,17 +705,11 @@ def main():
         query_colors=args.query_colors,
     )
 
-    # ------------------------------------------------------------------
-    # 7. Mean |ΔPSI| distance scores
-    # ------------------------------------------------------------------
     print("\nComputing mean |deltaPSI| distance scores...")
     query_psi_all = pd.concat(list(query_psi.values()), axis=1)
     ref_avg_var   = ref_avg.reindex(variable_jxns)
     score_df      = compute_distance_scores(ref_avg_var, query_psi_all, variable_jxns)
 
-    # ------------------------------------------------------------------
-    # 8. Plots
-    # ------------------------------------------------------------------
     print("\nGenerating heatmap...")
     plot_distance_heatmap(
         score_df, sample_to_query, args.query_names, args.outprefix,
@@ -885,9 +717,6 @@ def main():
         n_variable_jxns=len(variable_jxns),
     )
 
-    # Alias-labeled copy: always produced (mirrors the real-ID heatmap
-    # verbatim when --alias-map is empty), so the rule's declared output
-    # exists regardless of whether this bed panel actually has any aliases.
     alias_map = parse_alias_map(args.alias_map)
     alias_score_df = score_df.rename(index=lambda s: resolve(s, alias_map))
     alias_sample_to_query = {resolve(s, alias_map): q for s, q in sample_to_query.items()}

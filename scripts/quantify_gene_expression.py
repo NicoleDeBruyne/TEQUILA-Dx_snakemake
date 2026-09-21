@@ -1,35 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/quantify_gene_expression.py
-Cohort-level merge step: combines every sample's own
-{sample}_gene_count.tsv or {sample}_gene_coverage.tsv (per-gene raw value +
-CPTM, written per-sample by scripts/quantify_gene_expression_sample.py via
-rules/7_sample_gene_quantification.smk's _7A/_7B) into the cohort's CPTM +
-raw-value matrices and per-gene boxplots. No BAM access here -- adding/
-removing a sample from a cohort only reruns this cheap merge, not the
-per-sample BAM scan. Invoked by rules/9_merge_results.smk (_9K for count,
-_9L for coverage).
-
-CPTM is read straight from the per-sample TSVs, not recomputed here: its
-normalization (raw_value / that sample's own gene-sum * 1e6) is entirely a
-per-sample computation, so pooling the cohort doesn't change any sample's
-value -- see quantify_gene_expression_sample.py's module docstring.
-
-Also computes a second normalization of the same raw counts: MOTR
-("median of target ratios") -- DESeq2's "poscounts" median-of-ratios
-size-factor normalization -- see scripts/motr.py's module docstring for
-the algorithm and its per-sample exclusion rule. Written to
-<outprefix>_matrix_motr.tsv (+ alias copy); the existing CPTM matrix is
-<outprefix>_matrix_cptm.tsv.
-
-Two per-gene boxplots are written per gene (<gene>_cptm.pdf,
-<gene>_motr.pdf) -- see scripts/gene_boxplots.py.
-
-Also writes a low-expression outlier score for every (gene, sample): a
-leave-one-out, shrinkage-based robust z-score in log2 space -- see
-scripts/expression_outliers.py's module docstring for the full algorithm
-and why it's used instead of a parametric (e.g. negative-binomial) fit.
-"""
 
 import argparse
 import os
@@ -44,9 +12,6 @@ from gene_boxplots import make_gene_boxplots
 
 
 def add_outlier_args(parser):
-    """Shared CLI options for the low-expression outlier score -- same
-    defaults/semantics across all four quantification methods. See
-    expression_outliers.py's module docstring for the algorithm."""
     parser.add_argument("--outlier-pseudocount", type=float, default=1.0,
         help="Added to CPTM before log2-transforming. Default: 1.0")
     parser.add_argument("--outlier-shrinkage-k", type=float, default=10.0,
@@ -103,33 +68,20 @@ def main():
 
     alias_map = parse_alias_map(args.alias_map)
 
-    # Primary matrix: clean genes x samples layout of the relative-expression
-    # (CPTM) value.
     out_matrix = args.outprefix + "_matrix_cptm.tsv"
     cptm_df.to_csv(out_matrix, sep="\t")
     print("Saved CPTM matrix: " + out_matrix)
 
-    # Alias-labeled copy: always produced (mirrors the real-ID matrix
-    # verbatim when --alias-map is empty), so the rule's declared output
-    # exists regardless of whether this cohort actually has any aliases.
     alias_cptm_df = cptm_df.copy()
     alias_cptm_df.columns = resolve_all(alias_cptm_df.columns, alias_map)
     out_matrix_alias = args.outprefix + "_matrix_cptm_alias.tsv"
     alias_cptm_df.to_csv(out_matrix_alias, sep="\t")
     print("Saved alias-labeled CPTM matrix: " + out_matrix_alias)
 
-    # Secondary matrix: the same layout with raw (un-normalized) values, for
-    # reference/debugging -- e.g. distinguishing a true zero-expression gene
-    # from a panel-design dropout, which CPTM alone can't tell apart. Every
-    # gene here is already BED-panel-restricted (done per-sample, upstream,
-    # by scripts/quantify_gene_expression_sample.py) -- there's no separate
-    # genome-wide matrix for this method.
     out_raw = args.outprefix + "_matrix_raw.tsv"
     raw_df.to_csv(out_raw, sep="\t")
     print("Saved raw-value matrix: " + out_raw)
 
-    # MOTR ("median of target ratios"): DESeq2-style median-of-ratios
-    # normalization -- see scripts/motr.py's module docstring.
     size_factors = compute_size_factors(raw_df, max_zero_fraction=args.motr_max_zero_fraction)
     motr_df = raw_df.div(size_factors, axis=1)
     motr_df.index.name = "gene"
@@ -149,12 +101,6 @@ def main():
     make_gene_boxplots(motr_df, plot_outdir, "MOTR (" + metric_label + ")", "_motr")
     print("Saved per-gene CPTM/MOTR boxplots to: " + plot_outdir)
 
-    # Low-expression outlier score (see expression_outliers.py's module
-    # docstring for the algorithm), computed once per normalization -- a
-    # gene/sample flagged as low-expression on CPTM may not be on MOTR
-    # (or vice versa), since MOTR's per-sample size factor can shift a
-    # gene's relative rank within its own sample, so both are kept rather
-    # than picking one.
     z_cptm_df, _ = compute_outlier_scores(
         cptm_df,
         pseudocount=args.outlier_pseudocount,

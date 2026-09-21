@@ -5,25 +5,21 @@ channels:
   - nodefaults
 dependencies:
   - python=3.11.*
-  # >=8.25.2, capped <9: needed for CADD.sh's own `--sdm conda` call.
-  # See docs/setup.md for why this env is separate from the main
-  # environment.yaml's Snakemake 7.x, and why the upper bound is pinned.
+  # >=8.25.2, <9: needed for CADD.sh's own `--sdm conda` call.
   - snakemake>=8.25.2,<9
   - htslib>=1.18
   - samtools>=1.18
   - bcftools>=1.18
   - tabix
   - pysam>=0.24.0
-  # Capped below 2.3.0 for spliceai==1.3.1 compatibility -- see docs/setup.md.
+  # <2.3.0 for spliceai==1.3.1 compatibility.
   - numpy>=1.21.0,<2.3
   - pandas>=2.3.0
   - perl>=5.32.0
   - pip
-  # Needed for spliceai==1.3.1's own pkg_resources import -- see docs/setup.md.
+  # Needed for spliceai==1.3.1's own pkg_resources import.
   - setuptools<81
-  # Installed via pip (not conda) to avoid a slow/conflict-prone solve
-  # against TensorFlow's dependency tree. PyPI's spliceai package does NOT
-  # install TensorFlow itself, so it's listed explicitly here.
+  # Installed via pip (not conda) to avoid a slow/conflict-prone solve against TensorFlow's dependency tree. 
   - pip:
       - tensorflow
       - spliceai>=1.3.1

@@ -1,50 +1,5 @@
-#!/usr/bin/env python3
 
-# Author: Nicole DeBruyne (Lin Lab)
-# Date: 2026.09.17
 
-"""
-scripts/fit_gtex_beta_distributions.py
-
-Fits a beta distribution to every junction present in one tissue's raw GTEx
-splice-junction count matrix (gtex_{tissue}_jxn_counts.txt), genome-wide --
-NOT scoped to any sample's gene panel or region.
-
-This is rule _5B1_fit_gtex_beta_distributions' script. It exists because the
-beta fit only ever depends on the GTEx reference data plus three threshold
-config values (gtex_coverage_threshold, gtex_n_threshold, PSI_rescale_factor)
--- never on any individual sample's own read counts -- so refitting it once
-per SAMPLE (as the pipeline used to, inside
-perform_splice_junction_beta_binomial_tests.py) recomputed the exact same
-answer, from scratch, for every sample that queried a given tissue. This
-script computes it once per (tissue, threshold combination) and writes a
-lookup table that every sample's rule _5C job reads instead of re-fitting.
-
-Junctions present in a SAMPLE but absent from the raw GTEx matrix entirely
-("novel" junctions) are NOT covered by this table -- see
-fit_novel_junction_beta_distributions.py (rule _5B2), which handles exactly
-that per-sample, per-tissue gap, since the set of novel junctions can't be
-known ahead of any sample's own data.
-
-Fitting (scipy.stats.beta.fit()'s iterative MLE, called once per junction)
-is the actual bottleneck here, not the coverage/PSI computation -- a
-genome-wide GTEx matrix can have far more junctions than any single BED
-gene panel will ever query. So this script only FITS junctions overlapping
-at least one BED panel used anywhere in the run (the union across all
-samples -- see --bed-files); coverage/PSI are still computed genome-wide
-first, exactly as before, so a kept junction's numbers are identical to
-what a full genome-wide fit would have produced. Every sample's own
-splice-junction counts (rule _5A) are already restricted to that sample's
-own BED panel, so the union of all samples' panels is guaranteed to cover
-every junction any _5C job in this run could look up.
-
-Output columns (index = junction, "chrom_start_end"):
-    num_gtex_samples_with_good_coverage, alpha, beta, expected_PSI, p1_PSI, p99_PSI, in_gtex_matrix
-"in_gtex_matrix" is always True here (every row in this table came from the
-raw GTEx matrix) -- it exists so the downstream script (_5C) can tell this
-table's rows apart from fit_novel_junction_beta_distributions.py's rows
-after concatenating both, without re-deriving membership itself.
-"""
 
 import argparse
 import concurrent.futures
@@ -76,28 +31,6 @@ def parse_args():
 
 
 def compute_rescaled_psi_column(jxn_counts, ss1, ss2, PSI_rescale_factor, gtex_coverage_threshold):
-    """Compute one GTEx sample's rescaled PSI value for every junction, as a
-    plain float64 numpy array -- nothing is written back onto a shared
-    dataframe.
-
-    This replaces calling calculate_coverage()+calculate_PSI() (which used to
-    add 5 new columns -- ss1_coverage, ss2_coverage, jxn_coverage, sample_PSI,
-    rescaled_sample_PSI -- to the shared genome-wide dataframe, for EVERY
-    GTEx sample) with a function that returns only the one column actually
-    needed for fitting (rescaled_sample_PSI), as a compact float64 array
-    instead of pandas Series (and never as the object-dtype array the
-    original produced by mixing floats with the "n/a" string sentinel).
-    Genome-wide, with hundreds of GTEx samples, that column accumulation was
-    the direct cause of _5B1 OOMing in production -- see the conversation
-    that led to this rewrite. The arithmetic itself (coverage via ss1/ss2
-    groupby-sums, PSI = jxn/coverage, rescale, then NaN below the coverage
-    threshold) is unchanged from calculate_coverage/calculate_PSI.
-
-    Returns a float64 numpy array (NaN where PSI is undefined or coverage
-    is below threshold) -- never the string "n/a"; that sentinel now only
-    ever appears in the final CSV, written by pandas' NaN handling on
-    output, not carried through the computation.
-    """
     jxn_counts = pd.to_numeric(pd.Series(jxn_counts), errors='coerce').fillna(0).astype(int)
 
     ss1_sums = jxn_counts.groupby(ss1).sum()
@@ -119,16 +52,6 @@ def compute_rescaled_psi_column(jxn_counts, ss1, ss2, PSI_rescale_factor, gtex_c
 
 
 def load_merged_bed_regions(bed_paths):
-    """Load one or more BED files and merge their intervals per chromosome into a sorted,
-    non-overlapping union -- standard "sort, then merge touching/overlapping intervals" sweep.
-    Only the first 3 columns (chrom, start, end) are used; BED coordinates are treated as plain
-    integers, since the overlap test below (see junctions_overlap_regions) uses a closed-interval
-    comparison that's deliberately a little permissive about the BED half-open-vs-junction
-    1-based conventions, rather than risk excluding a junction at a panel's edge over an
-    off-by-one.
-
-    Returns {chrom: [(start, end), ...]} with each chromosome's list sorted by start and merged.
-    """
     by_chrom = {}
     for path in bed_paths:
         with open(path) as fh:
@@ -157,19 +80,6 @@ def load_merged_bed_regions(bed_paths):
 
 
 def junctions_overlap_regions(chrom, start, end, merged_regions):
-    """Vectorized test of whether each junction (chrom[i], start[i], end[i]) overlaps ANY
-    interval in merged_regions (see load_merged_bed_regions), on the matching chromosome.
-
-    Per chromosome, uses np.searchsorted against the merged intervals' start coordinates:
-    since the intervals are sorted and non-overlapping, the only interval that could possibly
-    overlap a query is the one immediately at-or-before the query's end -- if that one doesn't
-    overlap, no earlier interval (which starts and ends even earlier) can either. This keeps the
-    cost at roughly O(junctions * log(panel intervals)) rather than O(junctions * panel
-    intervals), which matters since a genome-wide junction count can be in the hundreds of
-    thousands while a gene panel is usually much smaller.
-
-    Returns a boolean numpy array, one entry per junction.
-    """
     chrom = np.asarray(chrom)
     start = np.asarray(start, dtype=np.int64)
     end = np.asarray(end, dtype=np.int64)
@@ -195,8 +105,6 @@ def junctions_overlap_regions(chrom, start, end, merged_regions):
 
 
 def fit_beta_dist(x, tol, n_threshold):
-    """Identical to perform_splice_junction_beta_binomial_tests.py's function of the same name.
-    See that module's docstring for the p1/p99 convention."""
     from scipy.stats import beta
 
     x = pd.to_numeric(x, errors='coerce')
@@ -226,9 +134,6 @@ def fit_beta_dist(x, tol, n_threshold):
 
 
 def _fit_chunk(rows, tol, n_threshold):
-    """Fit a chunk of (junction, psi_row_values) pairs. Runs in a worker
-    process -- avoids pandas .apply(axis=1) overhead by iterating over plain
-    numpy rows instead of constructing a pd.Series per call."""
     out = []
     for junction, row in rows:
         out.append((junction,) + fit_beta_dist(row, tol, n_threshold))
@@ -254,9 +159,6 @@ def main():
     gtex_samples = list(gtex_df.columns)
     gtex_df.columns = [c + '_jxn_alignment_count' for c in gtex_samples]
 
-    # Normalize the GTEx index ("chr:start-end:strand") to this pipeline's
-    # "chr_start_end" convention -- same normalization
-    # perform_splice_junction_beta_binomial_tests.py used to do per-region.
     idx_chrom_coord = gtex_df.index.str.split(':')
     gtex_chrom = idx_chrom_coord.map(lambda p: p[0])
     idx_coords = idx_chrom_coord.map(lambda p: p[1]).str.split('-')
@@ -274,10 +176,6 @@ def main():
     print(f"Computing coverage and PSI for {len(gtex_df)} GTEx junctions across "
           f"{len(gtex_samples)} samples...")
 
-    # Build the rescaled-PSI matrix one GTEx sample (column) at a time,
-    # directly into a pre-allocated float64 array -- never accumulating
-    # per-sample coverage/PSI columns on gtex_df itself (see
-    # compute_rescaled_psi_column()'s docstring for why that mattered).
     psi_matrix = np.empty((len(gtex_df), len(gtex_samples)), dtype=np.float64)
 
     for i, sample in enumerate(gtex_samples):

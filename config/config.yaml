@@ -1,10 +1,6 @@
-# RNA-Dx Pipeline Configuration
 
 run: ""
 
-# ---------------------------------------------------------------------------
-# Pipeline stage booleans
-# ---------------------------------------------------------------------------
 longcallr:                 true
 nanots:                    true
 clair3_rna:                true
@@ -25,9 +21,6 @@ conda_env_compile_variants: "envs/conda_env_compile_variants"
 genome:     "resources/gencode_data/GRCh38.primary_assembly.genome.fa"
 annotation: "resources/gencode_data/gencode.v44.primary_assembly.annotation.gtf"
 
-# ---------------------------------------------------------------------------
-# Variant callers (rules/1_call_variants.smk)
-# ---------------------------------------------------------------------------
 longcallr_bin:    "envs/conda_env/bin/longcallR"
 nanots_image:     "library://zelinliu/nanots/nanots:1.0.0"
 nanots_model_unphased: "resources/NanoTS/model/unphased_cDNA_nanopore_R104_HG002.pth"
@@ -35,19 +28,12 @@ nanots_model_phased:   "resources/NanoTS/model/phased_cDNA_nanopore_R104_HG002.p
 clair3_rna_image: "docker://hkubal/clair3-rna:v0.2.2"
 deepvariant_image: "docker://google/deepvariant:1.6.1"
 
-# ---------------------------------------------------------------------------
-# Variant compilation / annotation (rules/2_compile_variants.smk)
-# Merges the four callers' VCFs, annotates with gnomAD/ClinVar/ANNOVAR/CADD/SpliceAI.
-# gnomad_base/clinvar_vcf default to local copies (downloaded by setup.sh);
-# set to "remote" to use the public URLs instead.
-# ---------------------------------------------------------------------------
 gnomad_base:         "resources/gnomad_data"
 clinvar_vcf:         "resources/clinvar_data/clinvar.vcf.gz"
 annovar_dir:         "resources/annovar"
 amalgam_dir:         "resources/amalgam"
 cadd_script:       "resources/CADD-scripts-1.7.1/CADD_wrapper.sh"
 cadd_data_dir:       "resources/CADD-scripts-1.7.1/data"
-# Local pre-scored fallback files -- can be left empty to skip annotating that variant type
 cadd_local_prescored_snv:   "resources/CADD-scripts-1.7.1/data/prescored/GRCh38_v1.7/no_anno/whole_genome_SNVs.tsv.gz"
 cadd_local_prescored_indel: "resources/CADD-scripts-1.7.1/data/prescored/GRCh38_v1.7/no_anno/gnomad.genomes.r4.0.indel.tsv.gz"
 cadd_prescored_url:  "https://krishna.gs.washington.edu/download/CADD/v1.7/GRCh38/whole_genome_SNVs.tsv.gz"
@@ -81,9 +67,8 @@ gnomad_chroms:
   - chr22
   - chrX
   - chrY
-gnomad_mito_vcf: "resources/gnomad_data/gnomad.genomes.v3.1.sites.chrM.vcf.bgz"   # chrM uses gnomAD v3.1
+gnomad_mito_vcf: "resources/gnomad_data/gnomad.genomes.v3.1.sites.chrM.vcf.bgz"
 
-# CADD/SpliceAI pre-filters (which variants get run through each tool) -- defaulted to match the final filter below.
 cadd_gnomad_af_threshold: 0.01
 cadd_clnsig_filter:
   - "Benign"
@@ -95,7 +80,6 @@ spliceai_clnsig_filter:
   - "Likely_benign"
   - "Benign/Likely_benign"
 
-# filter_variants.py's final overall variant filters
 gnomad_af_threshold:    0.01
 clnsig_filter:
   - "Benign"
@@ -106,83 +90,55 @@ spliceai_threshold:     0.2
 final_dp_threshold: ""
 final_af_threshold: ""
 
-# ---------------------------------------------------------------------------
-# Read phasing (rules/3_phase_reads.smk)
-# ---------------------------------------------------------------------------
-phasing_threshold:      0.5   # min proportion of a read's max coverage that must phase to haplotypes to be used
-terminal_variant_proportion: 0.5  # do not phase on variants that appear at the end of a read more frequently than this
-min_dist_from_read_end_variant_phasing: 20   # min distance (bp) from a read's end for a variant to be used in phasing
+phasing_threshold:      0.5
+terminal_variant_proportion: 0.5
+min_dist_from_read_end_variant_phasing: 20
 
-phasing_min_dp: 20    # min DP for a NanoTS variant OR a candidate indel (from Clair3-RNA & DeepVariant) to be selected at all
-phasing_min_af: 0.1   # min AF for a candidate indel to be selected -- NOT applied to NanoTS variants
+phasing_min_dp: 20
+phasing_min_af: 0.1
 
-# ---------------------------------------------------------------------------
-# Allele-specific expression (rules/4_ase_analysis.smk)
-# ---------------------------------------------------------------------------
 sample_coverage_threshold: 20
 padj_threshold:         0.01
 haplotype_ratio_threshold: 0.2
-ase_phasing_threshold:  0.5   # min fraction of max coverage phased to haplotypes for an ASE call to be trusted (at least 50% of max read coverage must be phased)
+ase_phasing_threshold:  0.5
 
-# ---------------------------------------------------------------------------
-# Splice junction outlier analysis vs. GTEx (rules/5_junction_analysis.smk)
-# ---------------------------------------------------------------------------
 gtex_data_dir: "resources/gtex_data"
 gtex_coverage_threshold:   20
 gtex_n_threshold:          100
-# Rescale factor (tol) applied to GTEx PSI values before beta-fitting, and used
-# as the fit's variance-tolerance cutoff -- previously hardcoded to the script's
-# argparse default (1e-3) and never actually wired through config; now a real
-# knob because it's also part of the beta-fit cache key (see
-# rules/5_junction_analysis.smk's _GTEX_BETA_FITS_TEMPLATE) -- changing this
-# value changes the fit results, so it must be part of that filename, same as
-# gtex_coverage_threshold/gtex_n_threshold above.
 PSI_rescale_factor:      0.001
 delta_psi_threshold:    0.1
-jxn_phasing_threshold:  0.8   # min fraction of bulk coverage a junction's hap1+hap2 must reach to be trusted (combined coverage in hap1 and hap2 must be 80% the bulk coverage)
+jxn_phasing_threshold:  0.8
 
-# ---------------------------------------------------------------------------
-# Merging hits across samples (rules/9_merge_results.smk)
-# ---------------------------------------------------------------------------
 output_dir: ""
-omim_file: "resources/omim_data/OMIM.tsv"   # included
+omim_file: "resources/omim_data/OMIM.tsv"
 
 merge_num_callers_threshold_snv:       2
 merge_num_callers_threshold_indel:     2
 merge_min_dp_snv:                     20
 merge_min_dp_indel:                   20
-merge_variant_sample_fraction:         0.05   # a variant present in > this fraction of a group's samples is dropped
+merge_variant_sample_fraction:         0.05
 
-merge_min_haplotype_ratio:             0.1    # a haplotype ratio < 0.1 likely cannot be trusted
+merge_min_haplotype_ratio:             0.1
 merge_ase_padj_threshold:              0.01
 merge_delta_haplotype_ratio_threshold: 0.2
-merge_ase_sample_fraction:             0.05   # a gene with ASE in > this fraction of a group's samples is dropped
+merge_ase_sample_fraction:             0.05
 
 merge_jxn_coverage_threshold:         50
 merge_jxn_padj_threshold:              0.01
 merge_delta_psi_threshold:             0.1
-merge_jxn_sample_fraction:              0.05  # a junction that's an outlier in > this fraction of a group's samples is dropped
+merge_jxn_sample_fraction:              0.05
 
-# ---------------------------------------------------------------------------
-# Cohort-level junction outlier analysis (rules/8_cohort_junction_analysis.smk)
-# Compares each sample against its own (bed, sample_type) cohort rather than GTEx.
-# Two methods -- "beta_binomial" (Beta fit + beta-binomial test, FDR-corrected)
-# or "modified_zscore" (median/MAD).
-# ---------------------------------------------------------------------------
 cohort_jxn_min_samples:        10
-cohort_jxn_method:       "auto"     # "auto", "beta_binomial", or "modified_zscore"
+cohort_jxn_method:       "auto"
 cohort_jxn_beta_min_samples:   30
 cohort_jxn_beta_padj_threshold: 0.05
-cohort_jxn_z_threshold:       3.5      # |modZ| >= this flags an outlier
+cohort_jxn_z_threshold:       3.5
 cohort_jxn_z_delta_threshold: 0.1
 cohort_jxn_phasing_threshold: 0.8 
 cohort_jxn_beta_n_threshold:     30
 cohort_jxn_zscore_n_threshold:   10
-cohort_jxn_min_reads:          20   # a junction needs >= this many reads in >=1 bulk sample to be tested at all
+cohort_jxn_min_reads:          20
 
-# ---------------------------------------------------------------------------
-# Cohort-wide QC and sample-type validation (rules/6_sample_qc.smk + rules/9_merge_results.smk)
-# ---------------------------------------------------------------------------
 validate_ref_tissues: ["fibroblasts", "lymphocytes", "wholeblood"]
 validate_ref_colors:  ["#D95D5B", "#57AA3E", "#B271AB"]
 
@@ -194,25 +150,12 @@ sample_type_colors:
 
 cohort_qc_title: "Cohort QC"
 
-# ---------------------------------------------------------------------------
-# Relative gene expression quantification (rules/7_sample_gene_quantification.smk + rules/9_merge_results.smk)
-# ---------------------------------------------------------------------------
 gene_quant_title: null
 
-# Low-expression outlier score, computed identically for all four
-# quantification methods (by count, by coverage, by splice-site assignment,
-# and AMALGAM) -- see scripts/expression_outliers.py's module docstring for
-# the full algorithm (leave-one-out modified z-score in log2 space, with
-# each gene's MAD shrunk toward a cohort-wide MAD-vs-expression trend).
-# Annotation only for now -- does NOT currently factor into a gene's tier
-# in merged_all_hits.tsv (see design discussion).
-gene_outlier_pseudocount:      1.0   # added to CPTM before log2-transforming
-gene_outlier_shrinkage_k:     10.0   # shrinkage constant: weight on a gene's own MAD is n/(n+k) vs. the cohort trend
-gene_outlier_min_mad:          0.1   # floor on the shrunk MAD (log2 units), guards against near-zero-MAD genes
-gene_outlier_zscore_threshold: 3.0   # a sample/gene is flagged an outlier when z <= -this value (one-sided, low expression only)
+gene_outlier_pseudocount:      1.0
+gene_outlier_shrinkage_k:     10.0
+gene_outlier_min_mad:          0.1
+gene_outlier_zscore_threshold: 3.0
 
-# ---------------------------------------------------------------------------
-# Resource defaults (override per rule if needed)
-# ---------------------------------------------------------------------------
 threads: 8
-time:    1440   # default runtime in minutes
+time:    1440

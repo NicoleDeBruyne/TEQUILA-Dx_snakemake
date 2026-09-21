@@ -1,74 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/quantify_gene_by_assignment_sample.py
-A fourth relative-gene-expression proxy (alongside quantify_gene_expression_sample.py's
---metric count/coverage): assigns each of this sample's alignments to the
-single gene, among every gene annotated in the GTF (not just genes on the
-run's BED panel), that it shares the most annotated splice sites with.
-
-For every gene in the GTF, this parses:
-  - its genomic span (for a genome-wide overlap index, so a read is only ever
-    compared against genes it could plausibly belong to, not all ~60,000+
-    genes in the GTF)
-  - the union of exon intervals across all its transcripts (used only for
-    unspliced reads, see below)
-  - the *set* of individual splice-site positions (not junction pairs) across
-    every intron of every transcript of that gene: ss1 = the first base of
-    the intron, ss2 = the last base of the intron, both 1-based -- the same
-    convention used for junction strings elsewhere in this pipeline (see
-    scripts/identify_cohort_junction_outliers.py's parse_gtf_junctions).
-    Splice sites are pooled from every transcript of a gene and compared as
-    individual positions (not donor/acceptor pairs), since two transcripts of
-    the same gene can share a donor while differing at the acceptor, and a
-    read should be able to "vote" for a gene based on either site
-    independently.
-
-Each primary or supplementary alignment (secondary and unmapped alignments
-are skipped) in this sample's BAM is then assigned as follows:
-  - Spliced alignment (>=1 'N' CIGAR op): its own splice-site positions
-    (derived from its CIGAR, same ss1/ss2 convention) are intersected against
-    every GTF gene whose span it overlaps. It's assigned to the gene with the
-    largest number of shared sites, PROVIDED that gene is unique (i.e. not
-    tied with another gene) and shares at least one site. Ties, and reads
-    whose sites match no overlapping gene at all, are left unassigned.
-  - Unspliced alignment (no 'N' CIGAR op): assigned to a gene only if its
-    aligned span overlaps that gene's (merged) exons and no *other* gene's
-    exons, AND is entirely CONTAINED within that one gene's merged exon
-    set -- e.g. a transcript with an exon 100-200 and another with an exon
-    190-250 merge into one 100-250 block, so a read spanning 120-230
-    counts as contained even though no single annotated exon covers that
-    whole range. If the gene is monoexonic (its merged exon set is a
-    single interval), containment is relaxed to plain overlap, since a
-    single-exon gene has no internal intron for a partial overlap to fall
-    into. Overlapping the exons of more than one gene, overlapping none,
-    or overlapping exactly one gene's exons but not being contained within
-    them, all leave the read unassigned.
-
-Unlike --metric count/coverage in quantify_gene_expression_sample.py (which
-only ever see genes on the run's BED panel, since they're computed directly
-from BED regions), assignment happens against the full GTF gene set. The
-output TSV includes a raw_count row for every gene that got >=1 assigned
-read in this sample, UNION every BED-panel gene (with an explicit 0 row for
-a panel gene that got none) -- writing every one of the ~60,000+ GTF genes
-regardless would bloat this file for no benefit. CPTM ("counts per target
-million") is populated only for BED-panel genes, normalized against the
-panel's own total assigned-read signal for this sample -- the same
-convention --metric count/coverage use -- since a genome-wide CPTM
-denominator (~every GTF gene) would not be meaningful for a targeted panel.
-The cohort-level merge step (scripts/quantify_gene_by_assignment.py) infers
-which genes are BED-panel genes from which rows have a non-null cptm,
-rather than needing its own BED file.
-
-Invoked per-sample by rules/7_sample_gene_quantification.smk (_7C).
-
-Note: unlike --metric count/coverage, this script re-parses the GTF into
-its genome-wide splice-site/gene-bin index on every invocation -- one per
-sample now, rather than once per cohort submission as before the
-per-sample/merge split. GTF parsing is normally far cheaper than the BAM
-scan itself, but for a very large annotation this is a real (if usually
-small) added cost per sample, traded for the ability to cache each
-sample's own assignment result independently of cohort membership.
-"""
 
 import argparse
 import gzip
@@ -79,9 +8,6 @@ import pandas as pd
 import pysam
 
 
-# ---------------------------------------------------------------------------
-# Args
-# ---------------------------------------------------------------------------
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -105,16 +31,8 @@ def parse_args():
     return parser.parse_args()
 
 
-# ---------------------------------------------------------------------------
-# BED (targeted panel -- only used to select the CPTM subset)
-# ---------------------------------------------------------------------------
 
 def load_targeted_genes(bed):
-    """Ordered list of gene symbols from BED column 4 -- matches the BED
-    convention used throughout this pipeline (e.g.
-    quantify_gene_expression_sample.py's load_gene_regions): if a gene
-    appears more than once, the last row wins, but its position in the
-    returned order is its *first* occurrence."""
     genes = []
     seen = set()
     with open(bed) as b:
@@ -128,9 +46,6 @@ def load_targeted_genes(bed):
     return genes
 
 
-# ---------------------------------------------------------------------------
-# GTF parsing -- every gene's span, merged exons, and splice-site positions
-# ---------------------------------------------------------------------------
 
 _ATTR_RE_CACHE = {}
 
@@ -149,7 +64,6 @@ def _strip_ver(s):
 
 
 def _merge_intervals(intervals):
-    """Sorted, merged list of (start, end) half-open intervals."""
     if not intervals:
         return []
     ivs = sorted(intervals)
@@ -163,17 +77,9 @@ def _merge_intervals(intervals):
 
 
 def parse_gtf(gtf_path):
-    """Returns {gene: {"chrom": str, "start": int, "end": int,
-                        "exons": [(start, end), ...] (merged, sorted),
-                        "splice_sites": set(int)}}
-    over every gene with >=1 exon in the GTF. start/end are 0-based
-    half-open (matching the merged exon intervals); splice site positions
-    are 1-based (ss1 = first intron base, ss2 = last intron base), matching
-    the junction-string convention used elsewhere in this pipeline."""
 
     open_fn = gzip.open if gtf_path.endswith(".gz") else open
 
-    # gene -> chrom, and gene -> transcript_id -> [(start0, end), ...]
     gene_chrom = {}
     gene_tx_exons = defaultdict(lambda: defaultdict(list))
 
@@ -186,8 +92,8 @@ def parse_gtf(gtf_path):
                 continue
 
             chrom = parts[0]
-            start0 = int(parts[3]) - 1   # 0-based
-            end = int(parts[4])          # half-open
+            start0 = int(parts[3]) - 1
+            end = int(parts[4])
             attrs = parts[8]
 
             gname = _attr(attrs, "gene_name") or _attr(attrs, "gene_symbol")
@@ -218,8 +124,8 @@ def parse_gtf(gtf_path):
             for i in range(len(exons_sorted) - 1):
                 _, end_e = exons_sorted[i]
                 start_n, _ = exons_sorted[i + 1]
-                ss1 = end_e + 1     # first intron base, 1-based
-                ss2 = start_n       # last intron base, 1-based
+                ss1 = end_e + 1
+                ss2 = start_n
                 splice_sites.add(ss1)
                 splice_sites.add(ss2)
 
@@ -234,10 +140,6 @@ def parse_gtf(gtf_path):
     return genes
 
 
-# ---------------------------------------------------------------------------
-# Genome-wide gene index -- so a read is only ever compared against the
-# handful of genes it overlaps, not all ~60,000+ genes in the GTF.
-# ---------------------------------------------------------------------------
 
 _BIN_SIZE = 100_000
 
@@ -253,8 +155,6 @@ def build_gene_bins(genes, bin_size=_BIN_SIZE):
 
 
 def candidate_genes(chrom, start, end, genes, gene_bins, bin_size=_BIN_SIZE):
-    """Gene keys whose span actually overlaps [start, end) on chrom,
-    restricted up front to the bins that span overlaps."""
     b_start = start // bin_size
     b_end = max(end - 1, start) // bin_size
     seen = set()
@@ -271,8 +171,6 @@ def candidate_genes(chrom, start, end, genes, gene_bins, bin_size=_BIN_SIZE):
 
 
 def _overlaps_exons(exons, start, end):
-    """True if [start, end) overlaps any interval in the sorted, merged
-    exons list."""
     for e_start, e_end in exons:
         if e_start >= end:
             break
@@ -282,15 +180,6 @@ def _overlaps_exons(exons, start, end):
 
 
 def _contained_in_exons(exons, start, end):
-    """True if [start, end) is entirely contained within a SINGLE interval
-    in the sorted, merged exons list -- e.g. a transcript with an exon
-    100-200 and another with an exon 190-250 merge into one 100-250
-    interval, so a read spanning 120-230 counts as contained even though
-    no single annotated exon covers that whole range. A read that starts
-    inside one merged interval and extends past its end (into a genuine
-    gap between merged exon blocks) is NOT contained, even if it's fully
-    covered by exon sequence from some other transcript not merged into
-    this same block."""
     for e_start, e_end in exons:
         if e_start <= start < e_end:
             return end <= e_end
@@ -299,59 +188,40 @@ def _contained_in_exons(exons, start, end):
     return False
 
 
-# ---------------------------------------------------------------------------
-# Per-read splice-site extraction
-# ---------------------------------------------------------------------------
 
-_CIGAR_CONSUMES_REF = {0, 2, 3, 7, 8}  # M, D, N, =, X
+_CIGAR_CONSUMES_REF = {0, 2, 3, 7, 8}
 
 
 def read_splice_sites(read):
-    """Set of this alignment's own splice-site positions (1-based ss1/ss2
-    per intron, pooled), derived from its CIGAR. Empty set for an unspliced
-    (no 'N' op) alignment."""
     sites = set()
-    ref_pos = read.reference_start  # 0-based
+    ref_pos = read.reference_start
     for op, length in read.cigartuples:
-        if op == 3:  # N -- intron
-            sites.add(ref_pos + 1)        # ss1: first intron base, 1-based
-            sites.add(ref_pos + length)   # ss2: last intron base, 1-based
+        if op == 3:
+            sites.add(ref_pos + 1)
+            sites.add(ref_pos + length)
             ref_pos += length
-        elif op in _CIGAR_CONSUMES_REF:  # M, D, =, X
+        elif op in _CIGAR_CONSUMES_REF:
             ref_pos += length
-        # I, S, H, P: consume query only, not reference -- skip
     return sites
 
 
 def _keep_read(r):
-    """Primary and supplementary alignments, excluding unmapped and
-    secondary -- per this method's read-filtering convention (each
-    alignment record, primary or supplementary, is evaluated and assigned
-    independently)."""
     return not r.is_unmapped and not r.is_secondary
 
 
-# ---------------------------------------------------------------------------
-# Per-sample assignment
-# ---------------------------------------------------------------------------
 
 def assign_sample(bam, genes, gene_bins):
-    """Returns ({gene: assigned_read_count}, stats_dict). stats_dict breaks
-    unassigned reads down by the specific reason they were left unassigned
-    (see module docstring for the assignment rules each of these
-    corresponds to), not just a spliced/unspliced assigned/unassigned
-    total."""
 
     counts = defaultdict(int)
     stats = {
         "n_total": 0,
         "spliced_assigned": 0,
-        "spliced_unassigned_zero_shared": 0,      # >=1 candidate gene, but none shares a splice site
-        "spliced_unassigned_tied": 0,              # >=2 genes tied for the most shared splice sites
+        "spliced_unassigned_zero_shared": 0,
+        "spliced_unassigned_tied": 0,
         "unspliced_assigned": 0,
-        "unspliced_unassigned_zero_overlap": 0,    # no candidate gene's exons overlapped
-        "unspliced_unassigned_multi_overlap": 0,   # >=2 candidate genes' exons overlapped
-        "unspliced_unassigned_not_contained": 0,   # exactly 1 gene overlapped, but read not contained in it
+        "unspliced_unassigned_zero_overlap": 0,
+        "unspliced_unassigned_multi_overlap": 0,
+        "unspliced_unassigned_not_contained": 0,
     }
 
     with pysam.AlignmentFile(bam, "rb") as f:
@@ -367,8 +237,6 @@ def assign_sample(bam, genes, gene_bins):
                                      read.reference_end, genes, gene_bins)
 
             if sites:
-                # Spliced: assign to the unique gene with the most shared
-                # splice-site positions, provided it shares >=1 and isn't tied.
                 best_gene, best_count, n_at_best = None, 0, 0
                 for gene_key in cands:
                     shared = len(sites & genes[gene_key]["splice_sites"])
@@ -384,14 +252,6 @@ def assign_sample(bam, genes, gene_bins):
                 else:
                     stats["spliced_unassigned_tied"] += 1
             else:
-                # Unspliced: assign only if the read's span overlaps
-                # exactly one candidate gene's (merged) exons -- the
-                # uniqueness gate -- AND is entirely CONTAINED within that
-                # one gene's merged exon set. A monoexonic gene (its merged
-                # exon set collapses to a single interval) relaxes the
-                # second requirement to plain overlap, since a single-exon
-                # gene has no internal intron to fall outside of the way a
-                # partial-exon overlap on a multiexonic gene would.
                 overlapping = [
                     gene_key for gene_key in cands
                     if _overlaps_exons(genes[gene_key]["exons"], read.reference_start, read.reference_end)
@@ -413,9 +273,6 @@ def assign_sample(bam, genes, gene_bins):
     return dict(counts), stats
 
 
-# Column order for the per-sample stats TSV -- same categories the
-# cohort-level plot (scripts/quantify_gene_by_assignment.py) stacks, in the
-# same order.
 _STATS_COLUMNS = [
     "n_total",
     "spliced_assigned", "spliced_unassigned_zero_shared", "spliced_unassigned_tied",
@@ -443,9 +300,6 @@ def main():
     print(args.sample + ": " + str(stats["spliced_assigned"] + stats["unspliced_assigned"]) +
           "/" + str(stats["n_total"]) + " alignments assigned")
 
-    # Row set: every gene that got >=1 assigned read UNION every BED-panel
-    # gene (so a panel gene with 0 assigned reads still gets an explicit
-    # zero row, matching --metric count/coverage's convention).
     panel_total = sum(counts.get(g, 0) for g in targeted_genes)
     all_genes = sorted(set(counts) | set(targeted_genes))
     rows = []

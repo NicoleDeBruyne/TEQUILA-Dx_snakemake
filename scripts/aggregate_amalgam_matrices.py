@@ -1,28 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/aggregate_amalgam_matrices.py
-
-Combines every sample's AMALGAM Quantify_Transcripts.py output
-(<sample>_transcript_quantification.tsv, columns: transcript_id, gene_id,
-count, ...) in a (bed_id, sample_type) group into two cohort-wide
-matrices: one per-transcript, one per-gene (gene-level = sum of that
-gene's transcripts' counts), both genome-wide and gene_id-keyed (AMALGAM's
-own namespace -- Ensembl gene_id for reference-matched genes, GffCompare's
-XLOC_... for novel loci). Extracted from the aggregation step of the
-group's original manual sbatch pipeline into its own script, matching
-this repo's convention of a dedicated scripts/*.py file per pipeline
-step rather than inline Python in a rules/*.smk shell block. Written to
-by_amalgam/quantification/ (this method's per-sample working directory) --
-kept genome-wide and gene_id-keyed here rather than restricted/translated,
-since that's the one point this script has every sample's raw AMALGAM
-output in hand and there's no reason to lose the untranslated data.
-
-Targeted-panel restriction (translating gene_id -> gene symbol via the
-reference GTF and intersecting with the run's BED panel), CPTM/MOTR
-normalization, z-scores, and per-gene boxplots are a separate step --
-see scripts/normalize_amalgam_matrix.py, which reads this script's
-gene_matrix.tsv and writes its outputs to the base by_amalgam/ directory.
-"""
 
 import argparse
 
@@ -52,31 +27,6 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Two-pass design. Pass 1 collects the union of every (transcript_id,
-    # gene_id) pair across all samples, reading only those two (cheap,
-    # low-cardinality-per-file) columns, folding each file's ids into a
-    # single running index one at a time and discarding the file's own
-    # frame immediately. Pass 2 then reads each sample's counts and
-    # aligns them to that ONE shared index.
-    #
-    # This matters because earlier versions of this fix (see git history)
-    # held every sample's own id/count data in memory simultaneously via
-    # a growing Python list before doing anything with it -- first with
-    # full (transcript_id, gene_id, count) tables in a single-pass design,
-    # then, even after splitting into two passes, by collecting pass 1's
-    # per-file (transcript_id, gene_id) frames into a list before
-    # deduplicating them (same bug, just 2 columns instead of 3 -- caught
-    # because the job died with zero "Processed <sample>" lines printed,
-    # meaning it never even reached pass 2). transcript_id/gene_id are
-    # strings duplicated identically across nearly every sample (same
-    # shared reference transcriptome from _9D3's filtered.gtf), so
-    # holding N samples' worth of them at once is what actually exceeded
-    # the job's memory limit -- not the final matrix-assembly step.
-    #
-    # Building one shared tx_index up front, incrementally, means every
-    # sample's data resident in memory afterward is just a numeric count
-    # array aligned to that single shared index, rather than its own full
-    # copy of every transcript/gene name string.
     tx_index = None
     for f in args.infiles:
         ids = pd.read_csv(f, sep='\t', usecols=['transcript_id', 'gene_id'])
@@ -104,10 +54,6 @@ def main():
     gene_matrix.to_csv(out_gene, sep='\t')
     print(f"Done: {out_transcript} and {out_gene} written.", flush=True)
 
-    # Alias-labeled copy of the gene matrix: always produced (mirrors the
-    # real-ID matrix verbatim when --alias-map is empty), so the rule's
-    # declared output exists regardless of whether this group actually has
-    # any aliases.
     alias_map = parse_alias_map(args.alias_map)
     alias_gene_matrix = gene_matrix.copy()
     alias_gene_matrix.columns = resolve_all(alias_gene_matrix.columns, alias_map)

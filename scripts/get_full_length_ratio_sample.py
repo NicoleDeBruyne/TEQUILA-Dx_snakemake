@@ -1,40 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/get_full_length_ratio_sample.py
-For each gene on the panel, computes one sample's "full-length ratio" (FLR):
-the fraction of that gene's canonical transcript's exonic reference
-positions that each overlapping read's alignment actually spans via a
-non-N (non-intron-skip) CIGAR operation (M/D/=/X), averaged across every
-primary, mapped read overlapping the transcript's span. A read that fully
-spans every annotated exon of the canonical transcript (no dropped exons,
-no truncation) scores close to 1; a read covering only part of the
-transcript body (a truncated cDNA/library artifact, a partially-covered
-amplicon, an alternate/partial isoform, etc.) scores lower.
-
-Reads directly from this sample's own BAM (the same file _6A/_6B/
-quantify_gene_count_sample.py use) with one open file handle, fetching each
-gene's canonical-transcript span with pysam's region-indexed fetch() --
-NOT phase_reads.py's per-gene bulk BAM files. Those per-gene files are
-themselves nothing more than `samtools view <region> <this same original
-BAM>` (see phase_reads.py's filter_bam_by_region()), so reading them here
-would mean opening one small file per gene -- tens of thousands of file
-opens for a large panel -- for data that's one indexed fetch() away in a
-file that's opened once anyway. This also means this rule doesn't need to
-wait on phase_reads.py at all.
-
-The "canonical transcript" per gene is picked from --gtf: the transcript
-tagged "Ensembl_canonical" (GENCODE/Ensembl convention) if one exists for
-that gene, otherwise the transcript with the largest total exonic length.
-Its genomic span (min exon start to max exon end) is the fetch() region.
-
-Every gene from --bed is written, even ones with no canonical transcript
-found in --gtf (NaN avgFLR / 0 read_count) -- the cohort-level merge step
-(scripts/get_full_length_ratio.py) assumes every sample's TSV covers the
-same gene set for the shared bed panel, so this keeps that true even when
-a gene is missing from the GTF for one reason or another.
-
-Invoked per-sample by rules/6_sample_qc.smk (_6C).
-"""
 
 import argparse
 import gzip
@@ -45,8 +8,6 @@ import numpy as np
 import pysam
 
 
-# Reference-consuming, non-N CIGAR ops: M=0, D=2, ==7, X=8. I=1/S=4/H=5/P=6
-# don't consume reference; N=3 (intron skip) is explicitly excluded.
 _REF_CONSUMING_NON_N = {0, 2, 7, 8}
 
 
@@ -69,7 +30,6 @@ def _open_maybe_gz(path):
 
 
 def _gtf_attr(attr_str, key):
-    # GTF attribute fields look like: gene_name "FOO"; transcript_id "ENST...";
     for field in attr_str.strip().split(";"):
         field = field.strip()
         if not field:
@@ -84,9 +44,6 @@ def _gtf_attr(attr_str, key):
 
 
 def load_gene_list(bed):
-    """Gene symbols from BED column 4, in file order, de-duplicated -- same
-    convention as scripts/quantify_gene_count_sample.py's load_gene_regions()
-    and scripts/phase_reads.py's extract_gene_regions()."""
     genes = []
     seen = set()
     with open(bed) as b:
@@ -101,15 +58,8 @@ def load_gene_list(bed):
 
 
 def load_canonical_transcripts(gtf_path, genes):
-    """Returns {gene: (chrom, span_start, span_end, [(exon_start, exon_end), ...], exonic_length)}
-    for the canonical transcript of every gene in `genes` found in the GTF.
-    All coordinates are 0-based half-open, matching pysam's reference
-    coordinate convention. (chrom, span_start, span_end) is the transcript's
-    overall genomic footprint (min exon start to max exon end) -- the region
-    passed to AlignmentFile.fetch()."""
     genes = set(genes)
 
-    # transcript_id -> dict(gene, chrom, strand, canonical, exons=[(start,end),...])
     transcripts = {}
 
     with _open_maybe_gz(gtf_path) as fh:
@@ -136,16 +86,13 @@ def load_canonical_transcripts(gtf_path, genes):
                     "canonical": False, "exons": [],
                 })
                 t["canonical"] = t["canonical"] or is_canonical
-            else:  # exon
+            else:
                 t = transcripts.setdefault(transcript_id, {
                     "gene": gene_name, "chrom": chrom, "strand": strand,
                     "canonical": False, "exons": [],
                 })
-                # GTF is 1-based inclusive -> convert to 0-based half-open.
                 t["exons"].append((int(start) - 1, int(end)))
 
-    # Pick, per gene: the Ensembl_canonical-tagged transcript if any, else
-    # the transcript with the largest total exonic length.
     by_gene = {}
     for tid, t in transcripts.items():
         if not t["exons"]:
@@ -158,8 +105,6 @@ def load_canonical_transcripts(gtf_path, genes):
         pool = canonical_cands if canonical_cands else cands
         best = max(pool, key=lambda c: sum(e - s for s, e in c["exons"]))
         exons = sorted(best["exons"])
-        # Merge any overlapping/adjacent exon records (defensive -- GENCODE
-        # exons are normally already disjoint per transcript).
         merged = []
         for s, e in exons:
             if merged and s <= merged[-1][1]:
@@ -175,8 +120,6 @@ def load_canonical_transcripts(gtf_path, genes):
 
 
 def _read_ref_blocks(read):
-    """Reference-coordinate (0-based half-open) blocks covered by this
-    read's non-N, reference-consuming CIGAR ops (M/D/=/X)."""
     blocks = []
     pos = read.reference_start
     block_start = None
@@ -189,7 +132,7 @@ def _read_ref_blocks(read):
             if block_start is not None:
                 blocks.append((block_start, pos))
                 block_start = None
-            if op == 3:  # N: intron skip, still consumes reference
+            if op == 3:
                 pos += length
     if block_start is not None:
         blocks.append((block_start, pos))
@@ -197,8 +140,6 @@ def _read_ref_blocks(read):
 
 
 def _overlap_length(blocks_a, blocks_b):
-    """Total overlap length between two lists of disjoint, sorted (start,end)
-    interval tuples."""
     i = j = 0
     total = 0
     while i < len(blocks_a) and j < len(blocks_b):
@@ -215,10 +156,6 @@ def _overlap_length(blocks_a, blocks_b):
 
 
 def compute_avg_flr(bam_handle, chrom, span_start, span_end, exons, exonic_length):
-    """Returns (avg_flr, n_reads), fetching from an already-open
-    AlignmentFile via an indexed region query. avg_flr is NaN when there's
-    no usable data; n_reads is always a real count (0 when there's
-    nothing)."""
     if exonic_length <= 0:
         return np.nan, 0
     ratios = []

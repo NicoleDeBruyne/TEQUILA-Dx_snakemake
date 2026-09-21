@@ -1,7 +1,4 @@
-#!/usr/bin/env python3
  
-# Author: Nicole DeBruyne (Lin Lab)
-# Date: 2025.10.01
 
 import argparse
 import os, glob, pandas as pd, ast, matplotlib.pyplot as plt, numpy as np
@@ -11,7 +8,6 @@ from matplotlib.ticker import MaxNLocator
 rcParams['pdf.fonttype'] = 42
 
 def parse_args():
-    """ Parse command line arguments """
 
     parser = argparse.ArgumentParser(description="Plot clustermaps for feature counts")
     parser.add_argument("--infile", required=True, help="Input file containing candidate genes. Expected columns: \
@@ -26,7 +22,6 @@ def plot(df, samples, catcol, categories, colors, outfile, title, legend_title):
     counts = df.groupby(["sample", catcol])["gene"].nunique().unstack(fill_value=0)
     counts = counts.reindex(samples, columns=categories, fill_value=0)
 
-    # ---------- Barplot ----------
     fig, ax = plt.subplots(figsize=(12,6))
     counts.plot(kind="bar", stacked=True, ax=ax, color=colors)
     ax.set_xticklabels(samples, rotation=90)
@@ -41,7 +36,6 @@ def plot(df, samples, catcol, categories, colors, outfile, title, legend_title):
     plt.close(fig)
     print(f"Bar plot saved to {barplot_file}")
 
-    # ---------- Boxplot ----------
     total_counts = counts.sum(axis=1)
     fig, (ax_box, ax_bar) = plt.subplots(1, 2, figsize=(10,6), sharey=True, gridspec_kw={'width_ratios':[1,1.5]})
     ax_box.boxplot(total_counts, positions=[1], widths=0.4,
@@ -68,17 +62,13 @@ def plot(df, samples, catcol, categories, colors, outfile, title, legend_title):
     print(f"Box plot saved to {outfile2}")
 
 def main():
-    """ Main function """
 
-    # Parse command line arguments
     args = parse_args()
 
-    # Read in input file
     df = pd.read_csv(args.infile, sep='\t', keep_default_na=False)
     df = df.astype(object)
     df.fillna('.', inplace=True)
 
-    # Add some columns
     df['RNA_dysregulation'] = (df['ASE'] | (df['outlier_junction'] != 'None'))
     df['final_grouping'] = df.apply(lambda row: 
         "RNA dysregulation with candidate variant" if row['RNA_dysregulation'] and row['variant'] else
@@ -86,7 +76,6 @@ def main():
         ("Candidate variant" if row['variant'] else "No findings")), axis=1
     )
 
-    # Plot
     samples = sorted(df['sample'].unique())
 
     plot(df[df['pathogenic_variant']].copy(), samples, "pathogenic_variant", [True, False], ["#d95d5b", "#ea9a9c"], f'{args.outdir}/genes_with_pathogenic_variant.pdf', "Candidate Genes with Pathogenic Variant", "Pathogenic Variant")

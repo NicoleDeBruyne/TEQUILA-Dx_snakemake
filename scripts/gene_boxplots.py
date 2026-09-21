@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/gene_boxplots.py
-Shared per-gene boxplot renderer, used by every quantification method
-(scripts/quantify_gene_expression.py, scripts/quantify_gene_by_assignment.py,
-scripts/normalize_amalgam_matrix.py) to write one <gene>_cptm.pdf and one
-<gene>_motr.pdf per targeted-panel gene -- same plot convention (boxplot +
-jittered per-sample points, highest/lowest sample labeled) regardless of
-which normalization's matrix is being plotted, so call this once per
-normalization with that normalization's own value_df and filename_suffix.
-"""
 
 import os
 
@@ -19,12 +8,6 @@ import matplotlib.pyplot as plt
 
 
 def make_gene_boxplots(value_df, outdir, y_label, filename_suffix):
-    """One page per gene: a boxplot of every sample's value (CPTM, MOTR, or
-    whichever normalization value_df holds) for that gene, with individual
-    sample points overlaid and the highest- and lowest-value sample
-    labeled by name. filename_suffix ("_cptm" or "_motr") picks which of
-    the two per-gene PDFs (<gene>_cptm.pdf / <gene>_motr.pdf) this call
-    writes -- call once per normalization."""
     os.makedirs(outdir, exist_ok=True)
     for gene in value_df.index:
         vals = value_df.loc[gene].dropna()

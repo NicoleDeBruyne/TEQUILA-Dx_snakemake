@@ -1,18 +1,4 @@
-#!/usr/bin/env python3
 
-# scripts/merge_group_hits.py
-# Group-level candidate-hits builder -- one job per (bed_id, sample_type)
-# group. Replaces what used to be three separate pipeline stages:
-#   1. splitting the group's already-merged variant/ASE/junction tables out
-#      per sample (formerly scripts/split_group_hits_by_sample.py),
-#   2. building each sample's ranked hit table (one job per sample, formerly
-#      calling scripts/merge_hits.py's CLI once per sample),
-#   3. concatenating every sample's table back into one group-level
-#      all_hits.tsv (formerly rule _6E's awk concat).
-# All three now happen in a single job/script, using merge_hits.py as a
-# library for the per-sample build_hit_table logic -- see
-# rules/6_merge_hits.smk's _6D1/_6D2 for why this replaced N per-sample
-# split+merge jobs plus a separate group-level concat job.
 
 import argparse
 import os
@@ -89,36 +75,6 @@ def parse_args():
 
 
 def normalize_cohort_junction_df(df):
-    """rules/7_cohort_junction_analysis.smk's *_outliers_filtered.tsv has a
-    much richer, differently-named column set than the GTEx-comparison
-    junction files: six independent metrics per junction (junction_PSI,
-    junction_PSI_approx, 5ss_IR_ratio, 3ss_IR_ratio, junction_full_IR_ratio,
-    junction_IPA_ratio -- see identify_cohort_junction_outliers.py's
-    _METRIC_EVENTS), and each metric's effect-size column's name/units
-    depend on whether that group used the beta_binomial method
-    (delta_{metric}, a ratio-scale value in [-1, 1]) or modified_zscore
-    (modz_{metric}, an unbounded z-score). Normalize down to one delta
-    column per metric -- whichever of delta_{metric}/modz_{metric} is
-    present -- matching merge_hits.load_cohort_junction_df's expected schema.
-
-    A row exists in outliers_filtered.tsv if ANY of the six metrics was a
-    significant outlier for that junction, but the row still carries a raw
-    delta_{metric}/modz_{metric} value for every metric regardless of
-    whether that particular metric was the one that triggered -- e.g. a
-    junction flagged only via junction_full_IR_ratio (event_type="full_IR")
-    still has a real-looking delta_junction_PSI value sitting right next to
-    it, even though junction_PSI was never actually significant here.
-    event_type (identify_cohort_junction_outliers.py's sig_df construction)
-    is comma-joined across every metric that DID trigger for that junction,
-    so a metric's delta value is only kept if event_type contains one of
-    that metric's own event strings; otherwise it's blanked to '' (empty
-    string, not NaN/pd.NA -- build_phased_junction_df below joins these
-    into a single semicolon/comma-separated string per gene, and pd.NA
-    stringifies to the literal text '<NA>' rather than disappearing, which
-    would leak into the final merged_all_hits.tsv instead of being caught
-    by merge_hits.build_hit_table's trailing fillna('.'). An empty string
-    join segment is already handled correctly by max_deltas' parse_vals,
-    same as a genuinely blank/missing entry)."""
     out = pd.DataFrame()
     out['sample'] = df['sample']
     out['phasing'] = df['phasing']
@@ -126,8 +82,6 @@ def normalize_cohort_junction_df(df):
     out['junction'] = df['junction']
     out['jxn_coverage'] = df['junction_coverage'] if 'junction_coverage' in df.columns else ''
 
-    # Mirrors identify_cohort_junction_outliers.py's _METRIC_EVENTS exactly
-    # -- which event-type strings each metric can produce.
     _METRIC_EVENTS = {
         'junction_PSI_approx':    {'alt_5ss_approx', 'alt_3ss_approx', 'exon_skipping_approx', 'exon_inclusion_approx'},
         'junction_PSI':           {'alt_5ss', 'alt_3ss', 'exon_skipping', 'exon_inclusion'},
@@ -181,13 +135,6 @@ def main():
     for tissue, jxn_file in zip(args.tissues, args.junction_files):
         if os.path.isfile(jxn_file):
             tissue_df = merge_hits.load_junction_df(jxn_file)
-            # Tag every row with which GTEx tissue it was compared against,
-            # BEFORE concatenating across tissues -- the same physical
-            # junction can legitimately be an outlier against more than one
-            # GTEx reference tissue, and merge_hits.build_phased_junction_df
-            # needs this tag to collapse those into one entry per junction
-            # (rather than one per tissue) while still showing which
-            # tissue(s) each delta_PSI/event/sample_count value came from.
             tissue_df['gtex_tissue'] = tissue
             per_tissue_dfs.append(tissue_df)
         else:
@@ -202,33 +149,20 @@ def main():
         raw_cohort_df = pd.read_csv(args.cohort_junction_tsv, sep='\t', dtype=str)
         if _required_cols.issubset(raw_cohort_df.columns) and not raw_cohort_df.empty:
             cohort_junction_df = normalize_cohort_junction_df(raw_cohort_df)
-        # else: missing required columns, or a skipped group (rule 7 writes
-        # a near-empty outliers_filtered.tsv for groups below its
-        # min-samples threshold) -- fall through to None (merge_hits.
-        # build_hit_table's existing "no cohort data" fallback) rather than
-        # treating this as an error.
 
     omim_df = merge_hits.load_omim_df(args.omim) if args.omim else None
 
     gene_expression_df = None
     if args.gene_expression_matrix and os.path.isfile(args.gene_expression_matrix):
         gene_expression_df = merge_hits.load_gene_expression_df(args.gene_expression_matrix)
-    # else: falls through to merge_hits.build_hit_table's existing "no
-    # gene expression data" fallback (same pattern as omim_df/
-    # cohort_junction_tsv being optional above).
 
     gene_expression_motr_df = None
     if args.gene_expression_matrix_motr and os.path.isfile(args.gene_expression_matrix_motr):
-        # Same shape/loader as the CPTM matrix -- load_gene_expression_df()
-        # just reads a genes x samples TSV, agnostic to which normalization
-        # produced it.
         gene_expression_motr_df = merge_hits.load_gene_expression_df(args.gene_expression_matrix_motr)
-    # else: same fallback convention as gene_expression_df above.
 
     gene_expression_zscore_df = None
     if args.gene_expression_zscores and os.path.isfile(args.gene_expression_zscores):
         gene_expression_zscore_df = merge_hits.load_gene_expression_zscore_df(args.gene_expression_zscores)
-    # else: same fallback convention as gene_expression_df above.
 
     hit_dfs = []
     for sample in args.samples:

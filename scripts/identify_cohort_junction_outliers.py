@@ -1,19 +1,3 @@
-#!/usr/bin/env python3
-"""
-scripts/identify_cohort_junction_outliers.py
-
-Statistical outlier-detection stage for cohort-level splice-junction
-analysis. Companion script scripts/cohort_junction_analysis.py computes the
-upstream per-gene, per-sample junction coverage/usage metrics this script
-reads.
-
-Reads the gene -> result-file manifest produced by cohort_junction_analysis.py,
-loads each gene's raw per-junction/sample/phasing metrics, fits a Beta
-distribution per junction across the cohort's bulk samples, runs a
-beta-binomial test per sample/junction against that distribution, applies
-FDR (Benjamini-Hochberg) correction across the whole cohort, and identifies
-+ classifies outlier junctions for one or more padj:delta threshold pairs.
-"""
 
 from __future__ import annotations
 
@@ -42,11 +26,7 @@ warnings.filterwarnings("ignore", message=".*Glyph.*missing from font.*", catego
 warnings.filterwarnings("ignore", message=".*Adding colorbar to a different Figure.*", category=UserWarning)
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
-# Maps each metric to the event types it can produce
 _METRIC_EVENTS: Dict[str, List[str]] = {
     "junction_PSI_approx":    ["alt_5ss_approx", "alt_3ss_approx", "exon_skipping_approx", "exon_inclusion_approx"],
     "junction_PSI":           ["alt_5ss", "alt_3ss", "exon_skipping", "exon_inclusion"],
@@ -56,14 +36,9 @@ _METRIC_EVENTS: Dict[str, List[str]] = {
     "junction_IPA_ratio":     ["IPA"],
 }
 
-# Columns in a raw per-gene TSV (from cohort_junction_analysis.py) that are
-# booleans on write but come back as text after a TSV round-trip.
 _BOOL_COLUMN_PREFIXES = ("low_phased_",)
 
 
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -116,9 +91,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-# ---------------------------------------------------------------------------
-# BED / manifest I/O
-# ---------------------------------------------------------------------------
 
 def load_bed(path: str) -> Dict[str, Tuple[str, str, str]]:
     gene_info: Dict[str, Tuple[str, str, str]] = {}
@@ -143,11 +115,6 @@ def load_bed(path: str) -> Dict[str, Tuple[str, str, str]]:
 
 
 def load_manifest(path: str) -> List[Tuple[str, Optional[str]]]:
-    """
-    Reads the gene -> result-file manifest from cohort_junction_analysis.py.
-    Returns a list of (gene, path_or_None) in the manifest's own row order
-    (which is the input BED file's order).
-    """
     df = pd.read_csv(path, sep="\t", dtype=str)
     rows: List[Tuple[str, Optional[str]]] = []
     for _, row in df.iterrows():
@@ -160,21 +127,12 @@ def load_manifest(path: str) -> List[Tuple[str, Optional[str]]]:
 
 
 def load_gene_raw_metrics(path: str) -> pd.DataFrame:
-    """Loads one gene's raw metrics TSV (written by cohort_junction_analysis.py),
-    restoring boolean dtype for low_phased_* columns lost in the TSV round-trip."""
     df = pd.read_csv(path, sep="\t", dtype=str)
     for col in df.columns:
         if any(col.startswith(p) for p in _BOOL_COLUMN_PREFIXES):
             df[col] = (df[col].astype(str).str.strip().str.lower()
                        .map({"true": True, "false": False}).fillna(False))
         else:
-            # Try numeric conversion; columns that are genuinely text
-            # (junction, 5ss, 3ss, phasing, sample, region, gene, and the
-            # object-typed metric/rescaled columns with "low_coverage"
-            # sentinels) simply fail conversion and stay as strings, which
-            # downstream code already handles via pd.to_numeric(errors="coerce").
-            # (errors="ignore" was removed in newer pandas -- try/except is
-            # the version-portable equivalent.)
             try:
                 df[col] = pd.to_numeric(df[col])
             except (ValueError, TypeError):
@@ -182,9 +140,6 @@ def load_gene_raw_metrics(path: str) -> pd.DataFrame:
     return df
 
 
-# ---------------------------------------------------------------------------
-# Beta distribution fitting
-# ---------------------------------------------------------------------------
 
 def _fit_one_beta(x: np.ndarray, tol: float, n_threshold: int):
     x = x[np.isfinite(x)]
@@ -204,20 +159,12 @@ def _fit_one_beta(x: np.ndarray, tol: float, n_threshold: int):
 
 
 def _fit_beta_rows(args):
-    """Worker: fit a sub-block of rows. Returns list of result tuples."""
     mat_block, tol, n_threshold = args
     return [_fit_one_beta(mat_block[i], tol, n_threshold)
             for i in range(len(mat_block))]
 
 
 def fit_beta_dist_chunk(mat, feat_names, tol, n_threshold, threads: int = 1):
-    """
-    Fit beta distributions for every row in mat.
-
-    Parallelised across rows using a process pool when threads > 1.
-    Results are collected via executor.map, which preserves submission order,
-    so output is deterministic regardless of the number of workers.
-    """
     n = len(mat)
     if n == 0:
         return pd.DataFrame(columns=["n", "alpha", "beta_param", "expected"])
@@ -232,7 +179,6 @@ def fit_beta_dist_chunk(mat, feat_names, tol, n_threshold, threads: int = 1):
             for i in range(0, n, chunk_size)
         ]
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
-            # map() preserves submission order — results are deterministic
             results = []
             for block in ex.map(_fit_beta_rows, chunks):
                 results.extend(block)
@@ -241,16 +187,8 @@ def fit_beta_dist_chunk(mat, feat_names, tol, n_threshold, threads: int = 1):
                         columns=["n", "alpha", "beta_param", "expected"])
 
 
-# ---------------------------------------------------------------------------
-# Beta-binomial test
-# ---------------------------------------------------------------------------
 
 def _betabinom_test_rows(args):
-    """
-    Worker: run betabinom test on a sub-DataFrame.
-    Receives a dict of arrays (picklable) rather than a DataFrame.
-    Returns a 1-D array of p-values (NaN where not testable).
-    """
     usage, coverage, alpha_v, beta_v, val, cov_thresh = args
     valid = (np.isfinite(usage) & np.isfinite(coverage) &
              np.isfinite(alpha_v) & np.isfinite(beta_v) & np.isfinite(val) &
@@ -274,13 +212,6 @@ def beta_binomial_test_chunk(
     p_col: str,
     threads: int = 1,
 ) -> pd.DataFrame:
-    """
-    Run betabinom tests for every row in df.
-
-    Parallelised across rows using a process pool when threads > 1.
-    Results are collected via executor.map (order-preserving) so p-values
-    are identical regardless of worker count.
-    """
     df = df.copy()
     usage    = df[usage_col].to_numpy(dtype=float)
     coverage = df[coverage_col].to_numpy(dtype=float)
@@ -309,54 +240,18 @@ def beta_binomial_test_chunk(
             for i in range(0, n, chunk_size)
         ]
         with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
-            # map() preserves submission order — p-values are deterministic
             p = np.concatenate(list(ex.map(_betabinom_test_rows, chunks)))
 
     df[p_col] = p
     return df
 
 
-# ---------------------------------------------------------------------------
-# Modified z-score fitting (median/MAD)
-# ---------------------------------------------------------------------------
-#
-# Alternative to the Beta-binomial approach above: for each junction, take
-# the bulk cohort's median and median absolute deviation (MAD) of its
-# rescaled metric value, then score every row (bulk and hap1/hap2) as a
-# modified z-score: 0.6745 * (value - median) / MAD (the 0.6745 constant
-# makes MAD-based spread comparable to a standard deviation for normally
-# distributed data -- the standard Iglewicz & Hoaglin formulation).
-#
-# No p-value or FDR correction is computed for this method -- outliers are
-# identified by |modZ| >= a cutoff AND |delta| >= a separate cutoff (see
-# --z-thresholds), the same two-pronged significance-and-effect-size shape
-# --bb-thresholds uses (padj + delta). delta itself is computed identically
-# to the beta_binomial path: the empirical 1st/99th percentile of the bulk
-# cohort's own values for a junction, and how far outside that range a
-# row's value falls (see p1_{metric}/p99_{metric}/delta_{metric} in
-# _run_one_metric) -- modZ and delta are complementary here, not
-# redundant: modZ is a distributional significance measure (how unusual is
-# this value given the fitted spread), while delta is a plain empirical
-# effect size in the metric's own units, letting a genuinely tiny but
-# "significant" wobble be screened out the same way it already is for
-# beta_binomial groups.
 
-_MODZ_CONST = 0.6745        # MAD -> z-score scaling constant
-_MEANAD_CONST = 0.7979      # mean-absolute-deviation -> z-score scaling constant
+_MODZ_CONST = 0.6745
+_MEANAD_CONST = 0.7979
 
 
 def _fit_one_modz(x: np.ndarray, tol: float, n_threshold: int):
-    """Returns (n, median, effective_mad) for one junction's bulk values.
-
-    effective_mad is always on the same scale as MAD (i.e. modZ = 0.6745 *
-    (x - median) / effective_mad), even when the true MAD is degenerate:
-      - if MAD is essentially zero but the mean absolute deviation isn't,
-        falls back to a MAD-equivalent derived from the mean absolute
-        deviation (rescaled so the same 0.6745 constant applies).
-      - if there's no spread at all (every bulk value is ~identical), the
-        junction isn't testable -- returns the "no_variance" sentinel,
-        same treatment as "low_n"/"error" downstream.
-    """
     x = x[np.isfinite(x)]
     n = len(x)
     if n < n_threshold:
@@ -372,16 +267,12 @@ def _fit_one_modz(x: np.ndarray, tol: float, n_threshold: int):
 
 
 def _fit_modz_rows(args):
-    """Worker: fit a sub-block of rows. Returns list of result tuples."""
     mat_block, tol, n_threshold = args
     return [_fit_one_modz(mat_block[i], tol, n_threshold)
             for i in range(len(mat_block))]
 
 
 def fit_modz_dist_chunk(mat, feat_names, tol, n_threshold, threads: int = 1):
-    """Fit median/effective-MAD for every row in mat. Parallelised across
-    rows using a process pool when threads > 1, same pattern as
-    fit_beta_dist_chunk."""
     n = len(mat)
     if n == 0:
         return pd.DataFrame(columns=["n", "median", "mad"])
@@ -403,9 +294,6 @@ def fit_modz_dist_chunk(mat, feat_names, tol, n_threshold, threads: int = 1):
     return pd.DataFrame(results, index=feat_names, columns=["n", "median", "mad"])
 
 
-# ---------------------------------------------------------------------------
-# Per-metric beta pipeline
-# ---------------------------------------------------------------------------
 
 def _run_one_metric(
     combined_df:        pd.DataFrame,
@@ -420,13 +308,6 @@ def _run_one_metric(
     threads:            int,
     method:             str,
 ) -> pd.DataFrame:
-    """Fits a per-junction reference distribution across bulk samples and
-    scores every row (bulk + hap1/hap2) against it, using either:
-      method="beta_binomial"    -- n/alpha/beta/expected/p1/p99/delta/p_value
-      method="modified_zscore"  -- n/median/mad/modz/p1/p99/delta
-    columns per metric. See the module docstring / --bb-thresholds vs.
-    --z-thresholds for how these feed into outlier identification.
-    """
     is_ss_metric = metric_col in ("5ss_IR_ratio", "3ss_IR_ratio")
 
     if is_ss_metric:
@@ -480,7 +361,6 @@ def _run_one_metric(
     mat        = bulk_wide.to_numpy(dtype=np.float32)
     feat_names = bulk_wide.index.tolist()
 
-    # Count non-NaN values per junction (row) — only fit rows with enough data
     n_valid  = np.sum(~np.isnan(mat), axis=1)
 
     fit_mask    = n_valid >= n_threshold
@@ -536,29 +416,20 @@ def _run_one_metric(
 
     fit_vals     = combined_df[fit_indicator_col]
     is_low_n     = fit_vals == "low_n"
-    is_error     = fit_vals == "error"          # beta_binomial only
-    is_no_var    = fit_vals == "no_variance"    # modified_zscore only
+    is_error     = fit_vals == "error"
+    is_no_var    = fit_vals == "no_variance"
     has_fit      = ~is_low_n & ~is_error & ~is_no_var
     coverage_arr = combined_df[coverage_col].to_numpy(dtype=float)
     has_cov      = coverage_arr >= coverage_threshold
 
-    # Identify low-phased hap rows upfront (before any testing)
     lp_col_name = f"low_phased_{metric_col}"
     is_hap = combined_df["phasing"].isin(["hap1", "hap2"])
     if lp_col_name in combined_df.columns:
         is_low_phased = combined_df[lp_col_name].astype(bool)
     else:
         is_low_phased = pd.Series(False, index=combined_df.index)
-    # low_phased only applies when the row also has coverage (otherwise low_coverage wins)
     is_low_phased_hap = is_hap & is_low_phased & has_cov
 
-    # p1/p99/delta are computed the same way regardless of method -- they're
-    # purely empirical (the 1st/99th percentile of the bulk cohort's own
-    # values for this junction, and how far outside that range a row's own
-    # value falls), independent of whichever distribution was fit above.
-    # Use ceil(n * percentile) as index for conservative bounds:
-    # e.g. n=107: ceil(107*0.01)=2 → take 3rd value (0-based index 2),
-    # excluding the bottom 2; p99 takes the (n - ceil(n*0.01) - 1)th value.
     p1_vals  = np.full(len(feat_names), np.nan)
     p99_vals = np.full(len(feat_names), np.nan)
     for row_i in range(len(mat)):
@@ -601,18 +472,12 @@ def _run_one_metric(
     combined_df[delta_col] = delta_v
 
     if method == "beta_binomial":
-        # Assign p_value sentinel strings in priority order:
-        #   1. low_coverage  — row coverage < threshold (takes priority over everything)
-        #   2. low_phased_coverage — hap row that fails phasing check for this metric
-        #   3. low_n / error — distribution could not be fit
-        #   4. actual test   — all other rows with a fit and sufficient coverage
-        combined_df[p_col] = pd.Series(np.nan, index=combined_df.index, dtype=object)  # default; filled below
+        combined_df[p_col] = pd.Series(np.nan, index=combined_df.index, dtype=object)
         combined_df.loc[is_low_n,                    p_col] = "low_n"
         combined_df.loc[is_error,                    p_col] = "error"
         combined_df.loc[has_fit & ~has_cov,          p_col] = "low_coverage"
         combined_df.loc[has_fit & is_low_phased_hap, p_col] = "low_phased_coverage"
 
-        # Testable: has a fitted distribution, sufficient coverage, and is NOT low-phased
         testable = combined_df[has_fit & has_cov & ~is_low_phased_hap].copy()
         if len(testable) > 0:
             orig_index = testable.index
@@ -623,7 +488,6 @@ def _run_one_metric(
             )
             combined_df.loc[orig_index, p_col] = tested[p_col].values
     else:
-        # modZ sentinel priority mirrors p_value's above, applied to modz_col.
         combined_df[modz_col] = pd.Series(np.nan, index=combined_df.index, dtype=object)
         combined_df.loc[is_low_n,                    modz_col] = "low_n"
         combined_df.loc[is_no_var,                    modz_col] = "no_variance"
@@ -689,12 +553,6 @@ def run_gene_stats_pipeline(
     no_ss_ir:            bool,
     method:              str,
 ) -> pd.DataFrame:
-    """Fits a per-junction reference distribution across this gene's bulk
-    samples (Beta or median/MAD, depending on `method`) and scores every
-    sample/junction against it, for every applicable metric. This is the
-    per-gene statistical-testing step; it only needs this one gene's own
-    data (no cross-gene information), unlike the FDR correction (beta_binomial
-    only) that follows once every gene has been tested."""
     print(f"  Gene: {gene}  Fitting + scoring ({method}) ...")
     t0 = time.time()
 
@@ -709,8 +567,6 @@ def run_gene_stats_pipeline(
         combined = run_all_metrics(combined, coverage_threshold, PSI_rescale_factor,
                                    n_threshold, threads, has_ipa, method, no_ss_ir)
 
-    # Diagnostic fit/test counts. "Fit" columns are alpha_ (beta_binomial) or
-    # median_ (modified_zscore); "test" columns are p_value_ or modz_.
     fit_prefix  = "alpha_" if method == "beta_binomial" else "median_"
     test_prefix = "p_value_" if method == "beta_binomial" else "modz_"
     not_fittable = ("low_n", "error") if method == "beta_binomial" else ("low_n", "no_variance")
@@ -743,30 +599,20 @@ def run_gene_stats_pipeline(
     return combined
 
 
-# ---------------------------------------------------------------------------
-# Output column definitions
-# ---------------------------------------------------------------------------
 
-# NOTE: junction_type inserted after 3ss — silently skipped if absent (no --gtf)
 def _per_metric_output_cols(metric_col: str) -> List[str]:
-    """Every column _run_one_metric can produce for one metric, across both
-    methods. Only whichever set was actually computed for a given run will
-    be present in the DataFrame -- select_output_columns() silently skips
-    the rest."""
     return [
         f"n_{metric_col}",
-        # beta_binomial columns
         f"alpha_{metric_col}", f"beta_{metric_col}", f"expected_{metric_col}",
         f"p1_{metric_col}", f"p99_{metric_col}",
         f"delta_{metric_col}", f"p_value_{metric_col}", f"padj_{metric_col}",
-        # modified_zscore columns
         f"median_{metric_col}", f"mad_{metric_col}", f"modz_{metric_col}",
     ]
 
 
 _OUTPUT_COLS = [
     "sample", "gene", "gene_rank", "region", "phasing", "junction", "5ss", "3ss",
-    "junction_type",   # only present when --gtf provided
+    "junction_type",
     "junction_usage",
     "junction_read_diversity",
     "junction_coverage_approx",
@@ -781,33 +627,25 @@ _OUTPUT_COLS = [
     "3ss_usage", "3ss_coverage",
     "3ss_IR_ratio", "rescaled_3ss_IR_ratio",
     *_per_metric_output_cols("3ss_IR_ratio"),
-    "junction_full_IR_count",   # singular
+    "junction_full_IR_count",
     "junction_full_IR_ratio", "rescaled_junction_full_IR_ratio",
     *_per_metric_output_cols("junction_full_IR_ratio"),
-    "junction_IPA_count",       # singular
+    "junction_IPA_count",
     "junction_IPA_ratio", "rescaled_junction_IPA_ratio",
     *_per_metric_output_cols("junction_IPA_ratio"),
 ]
 
 
 def select_output_columns(df: pd.DataFrame, *_) -> pd.DataFrame:
-    """Select and reorder to canonical output schema. Missing columns silently skipped."""
     present = [c for c in _OUTPUT_COLS if c in df.columns]
     return df[present]
 
 
-# ---------------------------------------------------------------------------
-# GTF parsing — junctions for QC figures and junction_type classification
-# ---------------------------------------------------------------------------
 
 def parse_gtf_junctions(
     gtf_path: str,
     gene_names: List[str],
 ) -> Dict[str, Dict]:
-    """
-    Returns {gene: {"canonical_junctions": set, "all_junctions": set}}
-    Junction strings are "chrom_ss1_ss2".
-    """
     import gzip as _gz
     import re as _re
 
@@ -834,8 +672,8 @@ def parse_gtf_junctions(
             if feat not in ("transcript", "exon"): continue
 
             chrom = parts[0]
-            start = int(parts[3]) - 1   # 0-based
-            end   = int(parts[4])        # half-open
+            start = int(parts[3]) - 1
+            end   = int(parts[4])
             attrs = parts[8]
 
             gname = _attr(attrs, "gene_name") or _attr(attrs, "gene_symbol")
@@ -883,26 +721,16 @@ def assign_junction_types(
     df: pd.DataFrame,
     gtf_junctions: Dict[str, Dict],
 ) -> pd.DataFrame:
-    """
-    Add a 'junction_type' column with values 'canonical', 'annotated', or 'novel'.
-    - canonical : junction is in the Ensembl canonical transcript for that gene
-    - annotated : junction is in any transcript for that gene (but not canonical)
-    - novel     : junction is not in any annotated transcript
-
-    Operates per-gene. Returns df with junction_type column added.
-    """
     df = df.copy()
     jtype = pd.Series("novel", index=df.index, dtype=object)
 
     for gene, gdf in df.groupby("gene"):
         if gene not in gtf_junctions:
-            continue  # leave as "novel"
+            continue
         canonical_set = gtf_junctions[gene]["canonical_junctions"]
         annotated_set = gtf_junctions[gene]["all_junctions"]
         jxns = df.loc[gdf.index, "junction"]
-        # annotated (not canonical)
         is_annotated = jxns.isin(annotated_set) & ~jxns.isin(canonical_set)
-        # canonical
         is_canonical = jxns.isin(canonical_set)
         jtype.loc[gdf.index[is_annotated]] = "annotated"
         jtype.loc[gdf.index[is_canonical]] = "canonical"
@@ -911,9 +739,6 @@ def assign_junction_types(
     return df
 
 
-# ---------------------------------------------------------------------------
-# Event classification
-# ---------------------------------------------------------------------------
 
 def _classify_events_for_metric(
     metric_col:         str,
@@ -925,32 +750,6 @@ def _classify_events_for_metric(
     positive_delta_set: set,
     delta_map:          Dict[Tuple, float],
 ) -> Dict[Tuple, List[str]]:
-    """
-    Classify splicing events for one metric.
-
-    delta_map: {(sample, gene, phasing, jxn): delta_value} for all rows with
-    a numeric delta.  Used to determine direction for alt_5ss/alt_3ss/exon
-    classification.
-
-    positive_delta_set: subset of outlier_set where delta >= +delta_threshold.
-    For IR/IPA events (5ss_IR, 3ss_IR, full_IR, IPA) the row must be in
-    positive_delta_set to receive the event label.
-
-    Event rules:
-      alt_3ss: query junction J is an outlier; there exists another junction J'
-               in the same (sample, gene, phasing) group sharing J's 5ss but
-               with a different 3ss, and delta(J') has the opposite sign to
-               delta(J).  J' need not be an outlier itself.
-      alt_5ss: symmetric — same 3ss, different 5ss, opposite-sign delta.
-      exon_skipping / exon_inclusion:
-               Three outlier junctions form a cassette triple:
-                 long:  ss1a → ss2b
-                 left:  ss1a → ss2a  (ss2a < ss2b)
-                 right: ss1b → ss2b  (ss1b > ss1a)
-               with ss2a == ss1b (the skipped exon boundaries meet).
-               If long goes up (delta > 0) and both short go down → exon_skipping
-               If long goes down (delta < 0) and both short go up  → exon_inclusion
-    """
     allowed_events = _METRIC_EVENTS.get(metric_col, [])
     if not allowed_events:
         return {}
@@ -971,7 +770,6 @@ def _classify_events_for_metric(
         return delta_map.get((sample, gene, phasing, jxn), float("nan"))
 
     def _sign(d):
-        """Return 1, -1, or 0."""
         if d > 0: return 1
         if d < 0: return -1
         return 0
@@ -979,7 +777,7 @@ def _classify_events_for_metric(
     for grp_key, outlier_jxns in outlier_by_grp.items():
         sample, gene, phasing = grp_key
         strand = strand_map.get(gene, "+")
-        coords = grp_coords[grp_key]  # ALL junctions for this group
+        coords = grp_coords[grp_key]
 
         for jxn in outlier_jxns:
             if jxn not in coords:
@@ -991,7 +789,6 @@ def _classify_events_for_metric(
             row_key  = (sample, gene, phasing, jxn)
             is_pos_delta = row_key in positive_delta_set
 
-            # IR/IPA events: only assign when delta is positive
             if "5ss_IR"  in allowed_events and is_pos_delta: _add(sample, gene, phasing, jxn, "5ss_IR")
             if "3ss_IR"  in allowed_events and is_pos_delta: _add(sample, gene, phasing, jxn, "3ss_IR")
             if "full_IR" in allowed_events and is_pos_delta: _add(sample, gene, phasing, jxn, "full_IR")
@@ -1003,7 +800,6 @@ def _classify_events_for_metric(
                 s_jxn = _sign(d_jxn)
                 alt_5ss_label = next((e for e in allowed_events if e.startswith("alt_5ss")), None)
                 alt_3ss_label = next((e for e in allowed_events if e.startswith("alt_3ss")), None)
-                # Partner must also be an outlier
                 for partner_jxn in outlier_jxns:
                     if partner_jxn == jxn or partner_jxn not in coords:
                         continue
@@ -1031,10 +827,6 @@ def _classify_events_for_metric(
                 s_long = _sign(d_long)
                 if s_long == 0:
                     continue
-                # jxn is the long junction (ss1a → ss2b).
-                # Find outlier short junctions sharing ss1 (left) and ss2 (right).
-                # No requirement that left's ss2 == right's ss1 — the skipped exon
-                # can have any size; all that matters is the outer coordinates match.
                 left_candidates = [
                     (j, s1, s2) for j, (s1, s2) in coords.items()
                     if j in outlier_jxns and j != jxn
@@ -1051,7 +843,6 @@ def _classify_events_for_metric(
                         d_right = _delta(sample, gene, phasing, jr)
                         s_left  = _sign(d_left)
                         s_right = _sign(d_right)
-                        # Both short junctions must go opposite to the long
                         if s_left == 0 or s_right == 0:
                             continue
                         if s_left == s_long or s_right == s_long:
@@ -1077,14 +868,6 @@ def classify_all_events(
     effect_col_fn,
     unreliable_hap_outliers: Dict[str, set],
 ) -> pd.DataFrame:
-    """
-    effect_col_fn(mc) -> the column name holding this metric's signed
-    "effect" value per row -- delta_{mc} for beta_binomial, modz_{mc} for
-    modified_zscore. Positive values in that column are what count as
-    "more of the event" for IR/IPA metrics and for alt-5ss/3ss/exon
-    direction comparisons; effect_threshold is the corresponding magnitude
-    cutoff (delta_threshold or a z-threshold).
-    """
     if sig_df.empty:
         sig_df = sig_df.copy()
         sig_df["event_type"] = ""
@@ -1094,14 +877,12 @@ def classify_all_events(
     if not active_metrics:
         sig_df = sig_df.copy(); sig_df["event_type"] = "other"; return sig_df
 
-    # Split grp_coords by gene to keep per-task payloads small
     all_genes  = sorted(final_df["gene"].unique())
     n_genes    = len(all_genes)
     batch_size = max(1, n_genes // (threads * 4)) if threads > 1 else n_genes
     gene_batches = [all_genes[i:i + batch_size]
                     for i in range(0, n_genes, batch_size)]
 
-    # grp_coords_by_gene: {gene: {(sample, gene, phasing): {jxn: (ss1, ss2)}}}
     grp_coords_by_gene: Dict[str, Dict] = {}
     for g in all_genes:
         grp_coords_by_gene[g] = {}
@@ -1113,7 +894,6 @@ def classify_all_events(
         grp_coords_by_gene[g][key] = grp_coords_by_gene[g].get(key, {})
         grp_coords_by_gene[g][key][jxn] = (int(parts[-2]), int(parts[-1]))
 
-    # Per-metric sets / maps (full, then sliced per batch at dispatch time)
     metric_outlier_sets:   Dict[str, set] = {}
     metric_pos_delta_sets: Dict[str, set] = {}
     metric_delta_maps:     Dict[str, Dict[Tuple, float]] = {}
@@ -1132,8 +912,6 @@ def classify_all_events(
         else:
             mask = sig_df[ocol].astype(bool)
 
-            # For IR/IPA metrics: additionally require positive delta and,
-            # if --gtf was provided, canonical or annotated junction_type.
             if mc in _ir_ipa_metrics:
                 if delta_c in sig_df.columns:
                     dv   = pd.to_numeric(sig_df[delta_c], errors="coerce")
@@ -1212,20 +990,13 @@ def classify_all_events(
     return sig_df
 
 
-# ---------------------------------------------------------------------------
-# QC figures
-# ---------------------------------------------------------------------------
 
-# QC figure definitions: each entry is
-#   (coverage_col, file_suffix, [bar_metrics])
-# The file will be: {prefix}_qc_{file_suffix}_{subset}.pdf
 _QC_FIGURES = [
     ("junction_coverage_approx", "junction_coverage_approx", ["junction_PSI_approx"]),
     ("junction_coverage",        "junction_coverage",        ["junction_PSI", "junction_full_IR_ratio"]),
     ("5ss_coverage",             "5ss_coverage",             ["5ss_IR_ratio", "junction_IPA_ratio"]),
     ("3ss_coverage",             "3ss_coverage",             ["3ss_IR_ratio"]),
 ]
-# Coverage columns that belong to splice-site (rather than junction) metrics
 _SS_COVERAGE_COLS = frozenset(("5ss_coverage", "3ss_coverage"))
 
 
@@ -1258,7 +1029,7 @@ def make_qc_figure(
     companions = [m for m in companions
                   if has_ipa or m != "junction_IPA_ratio"]
 
-    df = final_df  # already bulk-only, pre-sliced by caller
+    df = final_df
     genes = [g for g in gtf_junctions if g in df["gene"].unique()]
     if not genes:
         print(f"[WARNING] No overlapping genes for {file_suffix} ({jxn_subset}). Skipping.")
@@ -1349,9 +1120,6 @@ def make_qc_figure(
     print(f"  QC figure → {out_pdf} ({time.time()-t_qc_fig:.2f}s)")
 
 
-# ---------------------------------------------------------------------------
-# Outlier heatmap + box plots
-# ---------------------------------------------------------------------------
 
 def make_outlier_heatmap(
     sig_df: pd.DataFrame,
@@ -1361,12 +1129,6 @@ def make_outlier_heatmap(
     threshold_desc: str,
     out_pdf: str,
 ) -> None:
-    """sig_df must already be filtered to outlier rows for this metric
-    (the caller applies the padj/delta or |modZ| threshold before calling).
-    effect_col holds the signed effect value (delta_{metric} for
-    beta_binomial, modz_{metric} for modified_zscore); stat_label/
-    threshold_desc are just display text ("delta"/"modZ" and the threshold
-    description shown in the title)."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -1431,12 +1193,6 @@ def make_hit_boxplots(
     is_ir_ipa: bool = False,
     has_jxn_type_filter: bool = False,
 ) -> None:
-    # outlier_map[metric_col][gene][junction] is {sample: {hit phasings}}.
-    # Highlighting rule: a sample that's a hit only at bulk gets just its
-    # bulk point highlighted; a sample that's a hit at either hap gets bulk
-    # AND both haps highlighted (even if bulk itself wasn't individually
-    # flagged), since a phased effect is only interpretable next to its own
-    # bulk value and its other haplotype.
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -1456,7 +1212,6 @@ def make_hit_boxplots(
 
     t_box = time.time()
     with PdfPages(out_pdf) as pdf:
-        # --- Title page ---
         fig_t, ax_t = plt.subplots(figsize=(4.5, 4.0))
         ax_t.axis("off")
         if is_ir_ipa:
@@ -1487,18 +1242,9 @@ def make_hit_boxplots(
                     if sub.empty: continue
 
                     hit_samples = set(hit_sample_phasings.keys())
-                    # Only samples whose hit was (at least partly) at hap1 or
-                    # hap2 get their hap rows overlaid -- a sample that's a
-                    # bulk-only hit shows just its bulk point, per the
-                    # highlighting rule described in this function's header.
                     samples_needing_haps = {s for s, phases in hit_sample_phasings.items()
                                              if phases & {"hap1", "hap2"}}
 
-                    # The box itself reflects only bulk values (this is the
-                    # same data the reference distribution was fit from) --
-                    # hap1/hap2 values are overlay-only, and only shown for
-                    # the sample(s) actually flagged as a hap hit for this
-                    # junction, not the whole cohort's phased data.
                     bulk_sub = sub[sub["phasing"] == "bulk"]
                     if bulk_sub.empty: continue
                     phased_hits = sub[sub["phasing"].isin(("hap1", "hap2")) &
@@ -1512,20 +1258,12 @@ def make_hit_boxplots(
                                     medianprops=_black)
                     ax.set_xticks([])
 
-                    # Color encodes both phasing and hit status: bulk points
-                    # from non-hit samples (the box itself is built from all
-                    # of these) are blue; a hit sample's own bulk value is
-                    # red (whether the hit was at bulk itself or only at a
-                    # hap -- see this function's header); a hap-hit sample's
-                    # hap1/hap2 values (only ever shown for hap-hit samples
-                    # -- see overlay above) are a lighter red. A black
-                    # outline on hit points reinforces this further.
                     is_hit = overlay["sample"].isin(hit_samples)
 
                     def _point_color(phasing, hit):
                         if phasing == "bulk":
-                            return "#c0392b" if hit else "#2c7fb8"   # red / blue
-                        return "#f1948a"                              # light red (hap1/hap2, hap-hit samples only)
+                            return "#c0392b" if hit else "#2c7fb8"
+                        return "#f1948a"
 
                     x_jitter    = np.random.normal(1, 0.04, size=len(overlay))
                     fill_colors = [_point_color(p, h) for p, h in zip(overlay["phasing"], is_hit)]
@@ -1534,9 +1272,6 @@ def make_hit_boxplots(
                     ax.scatter(x_jitter, overlay["_val"], c=fill_colors, s=16, alpha=0.85,
                               zorder=3, edgecolors=edge_colors, linewidths=edge_widths)
 
-                    # Label hit-sample points with their sample name (one
-                    # label per point -- a hit sample can have up to three:
-                    # bulk, hap1, hap2) instead of a legend.
                     for x, y, samp, hit in zip(x_jitter, overlay["_val"], overlay["sample"], is_hit):
                         if hit:
                             ax.annotate(samp, (x, y), fontsize=6, xytext=(4, 0),
@@ -1550,9 +1285,6 @@ def make_hit_boxplots(
                     plt.close(fig)
                     n_written += 1
                 except Exception as e:
-                    # One bad hit shouldn't truncate the whole PDF -- log which
-                    # (gene, junction) failed and why, close any half-built
-                    # figure so it doesn't leak, and move on to the next hit.
                     print(f"[WARNING] Box plot failed for {gene}: {jxn} ({metric_col}): {e}")
                     traceback.print_exc()
                     try:
@@ -1562,9 +1294,6 @@ def make_hit_boxplots(
     print(f"  Box plots ({metric_col}, {n_written}/{n_hits}) → {out_pdf} ({time.time()-t_box:.2f}s)")
 
 
-# ---------------------------------------------------------------------------
-# main()
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     print("\n" + "*"*80)
@@ -1574,10 +1303,6 @@ def main() -> None:
     args        = parse_args()
     approx_only = args.approx
 
-    # ---- Method + threshold specs ----
-    # method determines both which statistic gets computed (beta-binomial
-    # fit+test, or median/MAD + modified z-score) and how outliers are
-    # identified from it.
     if args.bb_thresholds is not None:
         method = "beta_binomial"
         threshold_specs: List = []
@@ -1607,16 +1332,7 @@ def main() -> None:
     prefix        = args.outprefix.rstrip("/")
     outdir        = os.path.dirname(os.path.abspath(prefix))
     prefix_name   = os.path.basename(prefix)
-    # Per-gene results columns differ by method (alpha/beta/expected/... for
-    # beta_binomial vs. median/mad/modz for modified_zscore), so the method
-    # is baked into this directory's name -- otherwise, re-running against
-    # the same _raw/ input with the other method would silently overwrite
-    # results computed under the first method, even though _raw/ itself
-    # (written once by cohort_junction_analysis.py) supports being re-scored
-    # under either method as many times as you like.
     base_results  = os.path.join(outdir, f"{prefix_name}_results_{method}")
-    # Same reasoning as base_results above -- which columns a QC figure's
-    # "proportion fit" bar reads (alpha_ vs. median_) depends on method.
     qc_dir        = os.path.join(outdir, f"{prefix_name}_qc_{method}")
     tmp_dir       = os.path.join(outdir, f"{prefix_name}_tmp")
 
@@ -1650,7 +1366,6 @@ def main() -> None:
 
     strand_map = {g: info[2] for g, info in gene_info.items()}
 
-    # Parse GTF upfront if provided
     gtf_junctions: Optional[Dict[str, Dict]] = None
     if args.gtf:
         print(f"\nParsing GTF for annotated junctions (upfront) ...")
@@ -1681,9 +1396,6 @@ def main() -> None:
     def _write_tsv(df, path): df.to_csv(path, sep="\t", index=False)
 
     def _empty_outlier_outputs(reason: str) -> None:
-        """Writes an empty (header-only) outliers.tsv / outliers_filtered.tsv /
-        outliers_alias.tsv for every requested threshold, so Snakemake's
-        declared output file exists even when there was nothing to analyze."""
         print(f"\n[WARNING] {reason}")
         empty_cols = _OUTPUT_COLS + ["event_type"]
         for thr in threshold_specs:
@@ -1703,11 +1415,6 @@ def main() -> None:
         all_results: List[pd.DataFrame],
         computed_metrics: List[str],
     ) -> Optional[pd.DataFrame]:
-        """Concatenates every gene's per-metric results, assigns junction_type
-        (if a GTF was provided), and -- for beta_binomial only -- applies FDR
-        (Benjamini-Hochberg) correction across the whole cohort's p-values.
-        modified_zscore has no p-values, so there's nothing to correct there;
-        |modZ| is used directly as the outlier statistic."""
         if not all_results: return None
 
         total_rows = sum(len(r) for r in all_results)
@@ -1724,7 +1431,6 @@ def main() -> None:
             ["gene", "junction", "sample", "phasing"], ignore_index=True
         )
 
-        # Assign junction_type if GTF was provided
         if gtf_junctions is not None:
             final_df = assign_junction_types(final_df, gtf_junctions)
 
@@ -1769,7 +1475,6 @@ def main() -> None:
                         _, pv, _, _ = multipletests(p_vals[valid].to_numpy(), method="fdr_bh")
                         padj_arr = pv
                     padj_vals[valid] = padj_arr
-                    # Rows with sentinel strings (low_n, low_coverage, etc.) should mirror p_value
                     is_sentinel = ~valid & p_str.notna()
                     padj_vals[is_sentinel] = p_str[is_sentinel]
                     fmt_df[padj_col] = padj_vals
@@ -1808,14 +1513,12 @@ def main() -> None:
     computed_metrics = [c.replace(test_prefix, "") for c in sample_df.columns
                         if c.startswith(test_prefix)]
 
-    # FDR correction (beta_binomial only; done once, shared across all thresholds)
     final_df = _finalize_results(all_results, computed_metrics)
     if final_df is None:
         _empty_outlier_outputs("Result assembly produced no rows.")
         print("\nDone (nothing to do).")
         return
 
-    # ---- Write per-gene TSVs once (threshold-independent) ----
     fmt_base = select_output_columns(final_df)
     n_genes_write = fmt_base["gene"].nunique()
     print(f"  Writing {n_genes_write} per-gene results files ...")
@@ -1834,7 +1537,6 @@ def main() -> None:
         "5ss_IR_ratio", "3ss_IR_ratio", "junction_full_IR_ratio", "junction_IPA_ratio"
     ))
 
-    # ---- Per-threshold outlier identification, classification, and output ----
     for thr in threshold_specs:
         t_thr = time.time()
 
@@ -1884,7 +1586,6 @@ def main() -> None:
         print(f"  Output: {thr_dir}")
         print(f"{'='*70}")
 
-        # ---- Outlier mask (any metric) ----
         outlier_mask = pd.Series(False, index=final_df.index)
         for mc in computed_metrics:
             outlier_mask |= _outlier_mask(final_df, mc)
@@ -1906,12 +1607,6 @@ def main() -> None:
             else:
                 print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions)")
 
-        # ---- Unreliable haplotype outlier filter per metric ----
-        # A haplotype (sample, junction) pair is unreliable when EITHER:
-        #   1. bulk is NOT sandwiched: NOT (hap1 <= bulk <= hap2 OR hap1 >= bulk >= hap2)
-        #   2. one haplotype dominates asymmetrically:
-        #      max(|hap1-bulk|, |hap2-bulk|) / min(|hap1-bulk|, |hap2-bulk|) > 10
-        # If either condition holds, the pair is unreliable and outlier_{mc} is set to False.
         unreliable_hap_outliers: Dict[str, set] = {}
 
         if not sig_df.empty:
@@ -1944,10 +1639,8 @@ def main() -> None:
                 h1 = pivot["hap1"]
                 h2 = pivot["hap2"]
 
-                # Condition 1: bulk is sandwiched between hap1 and hap2
                 sandwiched = ((h1 <= b) & (b <= h2)) | ((h2 <= b) & (b <= h1))
 
-                # Condition 2: ratio of larger to smaller deviation <= 10
                 d1   = (b - h1).abs()
                 d2   = (b - h2).abs()
                 dmax = np.maximum(d1, d2)
@@ -1977,7 +1670,6 @@ def main() -> None:
         else:
             unreliable_hap_outliers = {mc: set() for mc in computed_metrics}
 
-        # ---- outlier_{metric} boolean columns ----
         sig_df = sig_df.copy()
         for mc in computed_metrics:
             ocol = f"outlier_{mc}"
@@ -1993,7 +1685,6 @@ def main() -> None:
             else:
                 sig_df[ocol] = passes
 
-        # Per-metric breakdown of final outlier counts
         _has_jxn_type = "junction_type" in sig_df.columns
         for mc in computed_metrics:
             ocol = f"outlier_{mc}"
@@ -2023,7 +1714,6 @@ def main() -> None:
             else:
                 print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions)")
 
-        # ---- Compute n_sample_outlier for outlier TSV (threshold-specific) ----
         fmt_updated = final_df.copy()
         for mc in computed_metrics:
             n_col = f"n_sample_outlier_{mc}"
@@ -2039,7 +1729,6 @@ def main() -> None:
             fmt_updated = fmt_updated.merge(counts, on=["gene", "junction"], how="left")
             fmt_updated[n_col] = fmt_updated[n_col].fillna(0).astype(int)
 
-        # ---- Event classification ----
         n_sig = len(sig_df)
         print(f"  Outliers identified ({time.time() - t_thr:.2f}s)")
         print(f"  Classifying events ...")
@@ -2055,7 +1744,6 @@ def main() -> None:
         print(f"       done ({time.time()-t_cls:.2f}s)  "
               f"{sig_df['event_type'].value_counts().to_dict() if n_sig else {}}")
 
-        # ---- Sort outliers ----
         if n_sig > 0:
             effect_cols = [c for c in sig_df.columns
                           if c.startswith("delta_") or c.startswith("modz_")]
@@ -2063,8 +1751,6 @@ def main() -> None:
                 effect_num = sig_df[effect_cols].apply(lambda col: pd.to_numeric(col, errors="coerce"))
                 sig_df["_max_abs_delta"] = effect_num.abs().max(axis=1)
 
-                # Per-row: does it have a named (non-'other') event, and what's the
-                # max abs effect value of the metric(s) that produced it?
                 all_metric_event_sets = {
                     mc: frozenset(evs) for mc, evs in _METRIC_EVENTS.items()
                 }
@@ -2119,10 +1805,6 @@ def main() -> None:
                 ).drop(columns=["_max_abs_delta", "_has_named_event", "_named_event_delta"])
                 sig_df = sig_df.rename(columns={"_gene_rank": "gene_rank"})
 
-        # ---- Build outlier TSV column order ----
-        # _OUTPUT_COLS + n_sample_outlier_{metric} + outlier_{metric} after each padj_{metric}
-        # (beta_binomial) or modz_{metric} (modified_zscore) + event_type at end.
-        # Merge n_sample_outlier columns from fmt_updated into sig_df
         n_sample_cols = [f"n_sample_outlier_{mc}" for mc in computed_metrics]
         n_sample_cols_present = [c for c in n_sample_cols if c in fmt_updated.columns]
         if n_sample_cols_present:
@@ -2145,11 +1827,9 @@ def main() -> None:
         outlier_tsv_cols.append("event_type")
         outlier_tsv_cols = [c for c in outlier_tsv_cols if c in sig_df.columns]
 
-        # ---- Parallel output: TSVs + heatmaps + box plots ----
         t_out = time.time()
         out_jobs = []
 
-        # TSV jobs — need the full prepared slice
         _outliers_data = sig_df[outlier_tsv_cols].copy()
         if "event_type" in sig_df.columns:
             filt = sig_df[sig_df["event_type"] != "none"]
@@ -2180,13 +1860,6 @@ def main() -> None:
             print(f"  Outliers (alias) → {out_alias} ({time.time()-t0:.2f}s)")
 
 
-        # ---- Build outlier_map for box plots ----
-        # Built from filt (outliers_filtered rows: event_type != "none", outlier_{mc} True),
-        # so boxplots exactly match outliers_filtered.tsv.
-        # Leaf value is {sample: {phasings that were flagged a hit for that
-        # sample}} rather than just a set of hit sample names -- a sample can
-        # be a hit at bulk, hap1, hap2, or some combination, and which ones
-        # determines what make_hit_boxplots highlights (see its docstring).
         outlier_map: Dict[str, Dict[str, Dict[str, set]]] = {}
         for mc in computed_metrics:
             ocol = f"outlier_{mc}"
@@ -2201,14 +1874,12 @@ def main() -> None:
         out_jobs.append(_write_outliers_filtered)
         out_jobs.append(_write_outliers_alias)
 
-        # Heatmap + box plot jobs per metric — pre-slice to only needed columns/rows
         if n_sig > 0:
             for mc in computed_metrics:
                 dc = _effect_col(mc)
                 if dc not in sig_df.columns:
                     continue
 
-                # Heatmap: only gene, sample, effect col — rows passing threshold
                 heat_mask = _outlier_mask(sig_df, mc)
                 heat_df   = sig_df.loc[heat_mask, ["gene", "sample", dc]].copy()
 
@@ -2221,8 +1892,6 @@ def main() -> None:
 
                 rc = f"rescaled_{mc}"
                 if rc in fmt_updated.columns:
-                    # Box plots: only gene, junction, phasing, sample, rescaled col
-                    # filtered to genes/junctions in outlier_map[mc]
                     gj_map = outlier_map.get(mc, {})
                     if gj_map:
                         bp_genes = set(gj_map.keys())
@@ -2258,7 +1927,6 @@ def main() -> None:
             import shutil
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        # ---- Outlier summary for this threshold ----
         try:
             _METRIC_DISPLAY = {
                 "junction_PSI":            "PSI",
@@ -2310,9 +1978,7 @@ def main() -> None:
 
         print(f"\n  Finished threshold: {thr_desc} ({time.time()-t_thr:.2f}s)")
 
-    # end threshold loop
 
-    # ---- QC figures (uses already-parsed gtf_junctions) ----
     if args.gtf and gtf_junctions is not None:
         gene_names = [g for g, _ in manifest_valid]
         print(f"\n{'='*56}")
@@ -2331,7 +1997,6 @@ def main() -> None:
 
         results_subdir = _results_dir()
 
-        # Use final_df directly — bulk rows only, pre-sliced per figure
         os.makedirs(qc_dir, exist_ok=True)
         bulk_df = final_df[final_df["phasing"] == "bulk"]
 

@@ -1,17 +1,3 @@
-"""
-rules/3_phase_reads.smk
-Runs whatshap-based read phasing per gene, directly from the raw caller
-VCFs -- no more build_vcf_for_phasing.py / separate merged-VCF-building
-rule. For each gene, phase_reads.py selects its own trusted, heterozygous
-NanoTS variant set (PASS/DP-filtered, no AF filter -- genotype AND phase
-trusted directly, whatshap only ever haplotags reads against it, never
-re-derives phase) and its own candidate-indels set (Clair3/DeepVariant-
-shared, PASS/DP/AF-filtered) straight from the sample-wide caller VCFs --
-see phase_reads.py's module docstring for the full selection and phased-
-block-vs-fallback logic (including the phase-set/PS extension used to pull
-in NanoTS variants outside the gene's own region). See
-docs/rules/3_phase_reads.md for details.
-"""
 
 rule _3A_phase_reads:
     input:
@@ -37,24 +23,4 @@ rule _3A_phase_reads:
         mem_mb = lambda wc, threads, attempt: max(4096, int(attempt * threads * 1.5 * 1024)),
         runtime    = config["time"],
     log:
-        "{outdir}/../logs/{sample}_phase_reads.log"
     shell:
-        """
-        mkdir -p $(dirname {output.ase_infile})
-        python -u {params.script} \\
-            --bam        {input.bam} \\
-            --bed        {input.bed} \\
-            --nanoTS-vcf       {input.nanots} \\
-            --clair3-vcf       {input.clair3} \\
-            --deepvariant-vcf  {input.deepvar} \\
-            --min-dp     {params.min_dp} \\
-            --min-af     {params.min_af} \\
-            --genome     {params.genome} \\
-            --outdir     {params.phased_dir} \\
-            --name       {wildcards.sample} \\
-            --threads    {threads} \\
-            --phasing-threshold             {params.phasing_thr} \\
-            --terminal-variant-proportion   {params.terminal_prop} \\
-            --min-distance-from-read-end    {params.min_dist} \\
-        2>&1 | tee {log}
-        """
