@@ -1,4 +1,3 @@
-
 import argparse
 import re
 
@@ -9,8 +8,8 @@ from sample_alias import add_alias_map_arg, parse_alias_map, resolve
 _KEPT_COLUMNS = [
     'sample', 'gene', 'phenotypes', 'inheritance_patterns', 'haploinsufficient',
     'ranking', 'tier', 'variant', 'pathogenic_variant', 'ASE', 'outlier_junction',
-    'cohort_outlier_junction', 'relative_gene_expression', 'cohort_relative_gene_expression',
-    'n_cohort', 'variant_ID',
+    'cohort_outlier_junction', 'RNA_dysregulation', 'relative_gene_expression_motr',
+    'cohort_relative_gene_expression_motr', 'n_cohort', 'variant_ID',
 ]
 
 _MISSING_SENTINELS = {'', '.', 'nan', 'none'}

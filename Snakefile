@@ -333,6 +333,17 @@ def all_outputs():
             outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_cptm.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_motr.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/annotation/annotated.gtf.gz")
+            for subdir, prefix in (
+                ("by_count", "gene_count"),
+                ("by_coverage", "gene_coverage"),
+                ("by_assignment", "gene_assignment"),
+                ("by_amalgam", "gene_amalgam"),
+            ):
+                for method in ("cptm", "motr"):
+                    for suffix in ("outliers_by_sample.tsv", "outliers_by_gene.tsv",
+                                   "outliers_by_sample_boxplot.pdf", "outliers_by_gene_boxplot.pdf"):
+                        outs.append(god + "/gene_quantification/" + subdir + "/" + prefix
+                                    + "_zscores_" + method + "_" + suffix)
             if group_has_alias(gid):
                 outs.append(god + "/gene_quantification/by_count/gene_count_matrix_cptm_alias.tsv")
                 outs.append(god + "/gene_quantification/by_count/gene_count_matrix_motr_alias.tsv")

@@ -337,9 +337,10 @@ rule _9F_plot_hits_upset:
     input:
         all_hits = _cohort_outdir + "/{bed_id}/output/merged_all_hits.tsv",
     output:
-        pdf_density     = _cohort_outdir + "/{bed_id}/output/hits_upset_density.pdf",
-        pdf_density_log = _cohort_outdir + "/{bed_id}/output/hits_upset_density_log.pdf",
-        tsv = _cohort_outdir + "/{bed_id}/output/hits_upset_counts.tsv",
+        pdf_density      = _cohort_outdir + "/{bed_id}/output/hits_upset_density.pdf",
+        tsv              = _cohort_outdir + "/{bed_id}/output/hits_upset_counts.tsv",
+        tier_pdf_density = _cohort_outdir + "/{bed_id}/output/tier_gene_counts_density.pdf",
+        tier_tsv         = _cohort_outdir + "/{bed_id}/output/tier_gene_counts.tsv",
     params:
         samples      = lambda wc: bed_samples(wc.cohort_id, wc.bed_id),
         sample_types = lambda wc: [SAMPLES[s]["sample_type"] for s in bed_samples(wc.cohort_id, wc.bed_id)],
@@ -613,6 +614,50 @@ rule _9K_merge_gene_count:
         """
 
 
+# Outlier report/boxplots for the by-count z-scores (both CPTM and MOTR)
+rule _9K2_gene_count_zscore_report:
+    input:
+        zscores_cptm = rules._9K_merge_gene_count.output.zscores_cptm,
+        zscores_motr = rules._9K_merge_gene_count.output.zscores_motr,
+    output:
+        cptm_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_cptm_outliers_by_sample.tsv",
+        cptm_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_cptm_outliers_by_gene.tsv",
+        cptm_sample_boxplot = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_cptm_outliers_by_sample_boxplot.pdf",
+        cptm_gene_boxplot   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_cptm_outliers_by_gene_boxplot.pdf",
+        motr_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_motr_outliers_by_sample.tsv",
+        motr_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_motr_outliers_by_gene.tsv",
+        motr_sample_boxplot = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_motr_outliers_by_sample_boxplot.pdf",
+        motr_gene_boxplot   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_motr_outliers_by_gene_boxplot.pdf",
+    params:
+        cptm_outprefix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_cptm_outliers",
+        motr_outprefix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_motr_outliers",
+        threshold  = config.get("gene_outlier_report_zscore_threshold", -3.5),
+        cptm_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene count CPTM",
+        motr_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene count MOTR",
+        script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: max(2048, attempt * 2 * 1024),
+        runtime = 30,
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_count_zscore_report.log"
+    shell:
+        """
+        python -u {params.script} \\
+            --zscore-matrix {input.zscores_cptm} \\
+            --threshold     {params.threshold} \\
+            --title         {params.cptm_title:q} \\
+            --outprefix     {params.cptm_outprefix} \\
+        2>&1 | tee {log}
+        python -u {params.script} \\
+            --zscore-matrix {input.zscores_motr} \\
+            --threshold     {params.threshold} \\
+            --title         {params.motr_title:q} \\
+            --outprefix     {params.motr_outprefix} \\
+        2>&1 | tee -a {log}
+        """
+
+
 # Coverage-based expression matrix
 rule _9L_merge_gene_coverage:
     input:
@@ -649,6 +694,50 @@ rule _9L_merge_gene_coverage:
             --alias-map {params.alias_args} \\
             {params.outlier_args} \\
         2>&1 | tee {log}
+        """
+
+
+# Outlier report/boxplots for the by-coverage z-scores (both CPTM and MOTR)
+rule _9L2_gene_coverage_zscore_report:
+    input:
+        zscores_cptm = rules._9L_merge_gene_coverage.output.zscores_cptm,
+        zscores_motr = rules._9L_merge_gene_coverage.output.zscores_motr,
+    output:
+        cptm_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_cptm_outliers_by_sample.tsv",
+        cptm_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_cptm_outliers_by_gene.tsv",
+        cptm_sample_boxplot = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_cptm_outliers_by_sample_boxplot.pdf",
+        cptm_gene_boxplot   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_cptm_outliers_by_gene_boxplot.pdf",
+        motr_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_motr_outliers_by_sample.tsv",
+        motr_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_motr_outliers_by_gene.tsv",
+        motr_sample_boxplot = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_motr_outliers_by_sample_boxplot.pdf",
+        motr_gene_boxplot   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_motr_outliers_by_gene_boxplot.pdf",
+    params:
+        cptm_outprefix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_cptm_outliers",
+        motr_outprefix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_motr_outliers",
+        threshold  = config.get("gene_outlier_report_zscore_threshold", -3.5),
+        cptm_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene coverage CPTM",
+        motr_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene coverage MOTR",
+        script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: max(2048, attempt * 2 * 1024),
+        runtime = 30,
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_coverage_zscore_report.log"
+    shell:
+        """
+        python -u {params.script} \\
+            --zscore-matrix {input.zscores_cptm} \\
+            --threshold     {params.threshold} \\
+            --title         {params.cptm_title:q} \\
+            --outprefix     {params.cptm_outprefix} \\
+        2>&1 | tee {log}
+        python -u {params.script} \\
+            --zscore-matrix {input.zscores_motr} \\
+            --threshold     {params.threshold} \\
+            --title         {params.motr_title:q} \\
+            --outprefix     {params.motr_outprefix} \\
+        2>&1 | tee -a {log}
         """
 
 
@@ -692,6 +781,51 @@ rule _9M_merge_gene_by_assignment:
             --alias-map     {params.alias_args} \\
             {params.outlier_args} \\
         2>&1 | tee {log}
+        """
+
+
+# Outlier report/boxplots for the by-assignment z-scores (both CPTM and MOTR) -- MOTR is the
+# metric that actually feeds the RNA_dysregulation call in merge_hits.py
+rule _9M2_gene_assignment_zscore_report:
+    input:
+        zscores_cptm = rules._9M_merge_gene_by_assignment.output.zscores_cptm,
+        zscores_motr = rules._9M_merge_gene_by_assignment.output.zscores_motr,
+    output:
+        cptm_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_cptm_outliers_by_sample.tsv",
+        cptm_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_cptm_outliers_by_gene.tsv",
+        cptm_sample_boxplot = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_cptm_outliers_by_sample_boxplot.pdf",
+        cptm_gene_boxplot   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_cptm_outliers_by_gene_boxplot.pdf",
+        motr_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_motr_outliers_by_sample.tsv",
+        motr_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_motr_outliers_by_gene.tsv",
+        motr_sample_boxplot = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_motr_outliers_by_sample_boxplot.pdf",
+        motr_gene_boxplot   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_motr_outliers_by_gene_boxplot.pdf",
+    params:
+        cptm_outprefix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_cptm_outliers",
+        motr_outprefix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_motr_outliers",
+        threshold  = config.get("gene_outlier_report_zscore_threshold", -3.5),
+        cptm_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene assignment CPTM",
+        motr_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene assignment MOTR",
+        script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: max(2048, attempt * 2 * 1024),
+        runtime = 30,
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_assignment_zscore_report.log"
+    shell:
+        """
+        python -u {params.script} \\
+            --zscore-matrix {input.zscores_cptm} \\
+            --threshold     {params.threshold} \\
+            --title         {params.cptm_title:q} \\
+            --outprefix     {params.cptm_outprefix} \\
+        2>&1 | tee {log}
+        python -u {params.script} \\
+            --zscore-matrix {input.zscores_motr} \\
+            --threshold     {params.threshold} \\
+            --title         {params.motr_title:q} \\
+            --outprefix     {params.motr_outprefix} \\
+        2>&1 | tee -a {log}
         """
 
 
@@ -923,4 +1057,48 @@ rule _9N6_amalgam_normalize_matrix:
             --alias-map   {params.alias_args} \\
             {params.outlier_args} \\
         2>&1 | tee {log}
+        """
+
+
+# Outlier report/boxplots for the AMALGAM z-scores (both CPTM and MOTR)
+rule _9N7_amalgam_zscore_report:
+    input:
+        zscores_cptm = rules._9N6_amalgam_normalize_matrix.output.zscores_cptm,
+        zscores_motr = rules._9N6_amalgam_normalize_matrix.output.zscores_motr,
+    output:
+        cptm_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_cptm_outliers_by_sample.tsv",
+        cptm_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_cptm_outliers_by_gene.tsv",
+        cptm_sample_boxplot = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_cptm_outliers_by_sample_boxplot.pdf",
+        cptm_gene_boxplot   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_cptm_outliers_by_gene_boxplot.pdf",
+        motr_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_motr_outliers_by_sample.tsv",
+        motr_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_motr_outliers_by_gene.tsv",
+        motr_sample_boxplot = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_motr_outliers_by_sample_boxplot.pdf",
+        motr_gene_boxplot   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_motr_outliers_by_gene_boxplot.pdf",
+    params:
+        cptm_outprefix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_cptm_outliers",
+        motr_outprefix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_motr_outliers",
+        threshold  = config.get("gene_outlier_report_zscore_threshold", -3.5),
+        cptm_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", AMALGAM CPTM",
+        motr_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", AMALGAM MOTR",
+        script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: max(2048, attempt * 2 * 1024),
+        runtime = 30,
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_zscore_report.log"
+    shell:
+        """
+        python -u {params.script} \\
+            --zscore-matrix {input.zscores_cptm} \\
+            --threshold     {params.threshold} \\
+            --title         {params.cptm_title:q} \\
+            --outprefix     {params.cptm_outprefix} \\
+        2>&1 | tee {log}
+        python -u {params.script} \\
+            --zscore-matrix {input.zscores_motr} \\
+            --threshold     {params.threshold} \\
+            --title         {params.motr_title:q} \\
+            --outprefix     {params.motr_outprefix} \\
+        2>&1 | tee -a {log}
         """
