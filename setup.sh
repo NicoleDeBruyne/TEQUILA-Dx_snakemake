@@ -162,6 +162,7 @@ declare -A GTEX_TISSUE_MAP=(
     ["fibroblasts"]="Cells - Cultured fibroblasts"
     ["wholeblood"]="Whole Blood"
     ["lymphocytes"]="Cells - EBV-transformed lymphocytes"
+    ["muscle"]="Muscle - Skeletal"
 )
 
 GTEX_DIR="$RESOURCES_DIR/gtex_data"
@@ -285,9 +286,9 @@ else
         rm -f "$tmpfile"
     done
 fi
-echo "  Done. (Raw downloads kept in $GTEX_RAW_DIR for re-filtering later, e.g. if"
-echo "  you add a sample_type to GTEX_TISSUE_MAP -- safe to delete if you don't"
-echo "  expect to add more and want to reclaim the disk space.)"
+echo "  Done. (Raw downloads kept in $GTEX_RAW_DIR for re-filtering later, "
+echo "  e.g. if you add a sample_type to GTEX_TISSUE_MAP -- safe to delete "
+echo "  if you don't expect to add more and want to reclaim the disk space.)"
 ) > "$GTEX_LOG" 2>&1 || error "GTEx step failed (see $GTEX_LOG)"
 
 ##############################################################################

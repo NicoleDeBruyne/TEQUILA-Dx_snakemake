@@ -156,12 +156,15 @@ cohort_jxn_min_reads: 20    # minimum bulk read count for a junction to be inclu
 
 # QC / plotting: reference tissues and colors used in sample-type plots
 validate_ref_tissues: ["fibroblasts", "lymphocytes", "wholeblood"]    # GTEx tissues to plot alongside samples in the sample-type validation heatmap
-validate_ref_colors: ["#D95D5B", "#57AA3E", "#B271AB"]    # colors for each reference tissue above, in the same order
+validate_ref_colors: # plot color per GTEx reference tissue above; any tissue not listed here gets an auto-assigned color
+  fibroblasts: "#009099"
+  lymphocytes: "#3D892E"
+  wholeblood: "#C23637"
 sample_type_colors: # plot color per sample_type; any sample_type not listed here gets an auto-assigned color
-  fibroblasts: "#D95D5B"
-  lymphocytes: "#57AA3E"
-  PBMCs: "#4C8FCA"
-  wholeblood: "#B271AB"
+  fibroblasts: "#009099"
+  lymphocytes: "#3D892E"
+  PBMCs: "#9d4588"
+  wholeblood: "#C23637"
 cohort_qc_title: "Cohort QC"    # title prefix used on cohort QC plots
 gene_quant_title: null    # title override for gene-quantification plots; defaults to an auto-generated title if null
 

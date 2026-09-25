@@ -16,14 +16,11 @@ def _bam_size_gb(wc):
         return 10
 
 # Directories to mount into a caller's container (its own input/output/resource paths)
-def _bind_dirs(*paths):
+def _bind_dirs(files=(), dirs=()):
     import os
-    dirs = []
-    for p in paths:
-        d = p if os.path.isdir(p) else os.path.dirname(os.path.abspath(p))
-        if d and d not in dirs:
-            dirs.append(d)
-    return ",".join(dirs)
+    out = [os.path.dirname(os.path.abspath(f)) for f in files]
+    out += [os.path.abspath(d) for d in dirs]
+    return ",".join(dict.fromkeys(d for d in out if d))
 
 
 # nanoTS: nanopore-tuned variant caller (Singularity container)
@@ -36,8 +33,10 @@ rule _1A_nanots:
     params:
         genome        = config["genome"],
         image         = config["nanots_image"],
-        binds         = lambda wc: _bind_dirs(_bam(wc), config["genome"], _outdir(wc),
-                                               config["nanots_model_unphased"], config["nanots_model_phased"]),
+        binds         = lambda wc: _bind_dirs(
+                            files=[_bam(wc), config["genome"],
+                                   config["nanots_model_unphased"], config["nanots_model_phased"]],
+                            dirs=[_outdir(wc)]),
         model_unphased= config["nanots_model_unphased"],
         model_phased  = config["nanots_model_phased"],
         work_dir      = "{outdir}/variant_calling/nanoTS/work",
@@ -115,7 +114,9 @@ rule _1C_clair3_rna:
     params:
         genome   = config["genome"],
         image    = config["clair3_rna_image"],
-        binds    = lambda wc: _bind_dirs(_bam(wc), config["genome"], _outdir(wc), config["conda_env"]),
+        binds    = lambda wc: _bind_dirs(
+                       files=[_bam(wc), config["genome"]],
+                       dirs=[_outdir(wc), config["conda_env"]]),
         whatshap = lambda wc: (str(config['conda_env']) + '/bin/whatshap'),
         work_dir = "{outdir}/variant_calling/clair3_rna/work",
     threads: lambda wc: _rule_threads(wc, "clair3_rna")
@@ -158,7 +159,9 @@ rule _1D_deepvariant:
     params:
         genome   = config["genome"],
         image    = config["deepvariant_image"],
-        binds    = lambda wc: _bind_dirs(_bam(wc), config["genome"], _outdir(wc)),
+        binds    = lambda wc: _bind_dirs(
+                       files=[_bam(wc), config["genome"]],
+                       dirs=[_outdir(wc)]),
         work_dir = "{outdir}/variant_calling/deepvariant/work",
     threads: lambda wc: _rule_threads(wc, "deepvariant")
     resources:

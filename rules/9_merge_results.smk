@@ -488,7 +488,7 @@ rule _9I2_validate_sample_types:
     params:
         outprefix    = lambda wc: (str(bed_outdir(wc.cohort_id, wc.bed_id)) + '/cohort_qc/validate_sample_types/' + str(wc.bed_id)),
         ref_names    = lambda wc: _quoted(config["validate_ref_tissues"]),
-        ref_colors   = lambda wc: _quoted(config["validate_ref_colors"]),
+        ref_colors   = lambda wc: _quoted([validate_ref_color(t) for t in config["validate_ref_tissues"]]),
         query_names  = lambda wc: _quoted([GROUP_SAMPLE_TYPE[gid] for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]]),
         query_colors = lambda wc: _quoted([sample_type_color(GROUP_SAMPLE_TYPE[gid]) for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]]),
         alias_args   = lambda wc: _quoted(alias_map_args(bed_samples(wc.cohort_id, wc.bed_id))),

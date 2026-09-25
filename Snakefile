@@ -223,6 +223,14 @@ def sample_type_color(sample_type):
     idx = all_types.index(sample_type) % len(_DEFAULT_SAMPLE_TYPE_PALETTE)
     return _DEFAULT_SAMPLE_TYPE_PALETTE[idx]
 
+def validate_ref_color(tissue):
+    configured = config.get("validate_ref_colors", {})
+    if tissue in configured:
+        return configured[tissue]
+    all_tissues = sorted(config.get("validate_ref_tissues", []))
+    idx = all_tissues.index(tissue) % len(_DEFAULT_SAMPLE_TYPE_PALETTE)
+    return _DEFAULT_SAMPLE_TYPE_PALETTE[idx]
+
 def sample_alias(sample):
     return SAMPLES[sample].get("alias") or sample
 
