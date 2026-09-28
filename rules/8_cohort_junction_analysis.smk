@@ -21,8 +21,6 @@ rule _8A_cohort_junction_analysis:
     params:
         raw_outdir  = lambda wc: (str(group_outdir(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))) + '/cohort_junction_analysis/' + str(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)) + '_raw'),
         genome      = config["genome"],
-        cov_thr     = config["sample_coverage_threshold"],
-        phasing_thr = config["cohort_jxn_phasing_threshold"],
         min_reads   = config["cohort_jxn_min_reads"],
         min_samples = config["cohort_jxn_min_samples"],
         script      = workflow.basedir + "/scripts/cohort_junction_analysis.py",
@@ -44,17 +42,15 @@ rule _8A_cohort_junction_analysis:
         done >> {output.cohort_mapping}
 
         python -u {params.script} \\
-            --mapping-file       {output.cohort_mapping} \\
-            --bed                {input.bed} \\
-            --outdir             {params.raw_outdir} \\
-            --manifest           {output.manifest} \\
-            --note               {output.note} \\
-            --min-samples        {params.min_samples} \\
-            --genome             {params.genome} \\
-            --coverage-threshold {params.cov_thr} \\
-            --phasing-threshold  {params.phasing_thr} \\
-            --min-jxn-reads      {params.min_reads} \\
-            --threads            {threads} \\
+            --mapping-file  {output.cohort_mapping} \\
+            --bed           {input.bed} \\
+            --outdir        {params.raw_outdir} \\
+            --manifest      {output.manifest} \\
+            --note          {output.note} \\
+            --min-samples   {params.min_samples} \\
+            --genome        {params.genome} \\
+            --min-jxn-reads {params.min_reads} \\
+            --threads       {threads} \\
         2>&1 | tee {log}
         """
 
@@ -70,10 +66,11 @@ rule _8B_identify_cohort_junction_outliers:
         outliers_alias    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{cohort_id}_{bed_id}_{sample_type}_{thr_label}/{cohort_id}_{bed_id}_{sample_type}_outliers_alias.tsv",
     params:
         outprefix  = lambda wc: (str(group_outdir(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))) + '/cohort_junction_analysis/' + str(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))),
-        has_ipa    = "--has-ipa" if config["genome"] else "",
-        thr_flag   = lambda wc: _cja_thr_flag(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-        gtf        = config["annotation"],
-        cov_thr    = config["sample_coverage_threshold"],
+        has_ipa      = "--has-ipa" if config["genome"] else "",
+        thr_flag     = lambda wc: _cja_thr_flag(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
+        gtf          = config["annotation"],
+        cov_thr      = config["sample_coverage_threshold"],
+        phasing_thr  = config["cohort_jxn_phasing_threshold"],
         n_thr      = lambda wc: _cja_n_threshold(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
         alias_args = lambda wc: _quoted(alias_map_args(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])),
         script     = workflow.basedir + "/scripts/identify_cohort_junction_outliers.py",
@@ -95,6 +92,7 @@ rule _8B_identify_cohort_junction_outliers:
             {params.thr_flag} \\
             --gtf                {params.gtf} \\
             --coverage-threshold {params.cov_thr} \\
+            --phasing-threshold  {params.phasing_thr} \\
             --n-threshold        {params.n_thr} \\
             --alias-map          {params.alias_args} \\
             --threads            {threads} \\

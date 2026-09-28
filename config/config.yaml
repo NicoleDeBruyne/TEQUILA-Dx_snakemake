@@ -108,7 +108,7 @@ min_dist_from_read_end_variant_phasing: 20  # a variant is considered to be at t
 phasing_threshold: 0.5    # only keep phasing result if this proportion of the total gene coverage can be phased
 
 # ASE (allele-specific expression) analysis thresholds
-sample_coverage_threshold: 20    # only run ASE analysis for genes with max coverage greater than this
+sample_coverage_threshold: 50    # only run ASE analysis for genes with max coverage greater than this
 ase_phasing_threshold: 0.5    # only run ASE analysis for genes in which this proportion of the max bulk coverage could be phased
 ase_padj_threshold: 0.01    # for calling significance
 minor_haplotype_frequency_threshold: 0.3    # for calling significance (when minor haplotype accounts for <30% of reads, ASE is applicable)
@@ -116,30 +116,36 @@ minor_haplotype_frequency_threshold: 0.3    # for calling significance (when min
 # Junction analysis (vs GTEx)
 gtex_data_dir: "resources/gtex_data"
 gtex_coverage_threshold: 20    # only calculate PSI-approx for junctions with at least this coverage (PSI-approx denom)
-jxn_phasing_threshold: 0.8    # only calculate hap1/hap2 PSI-approx values when phased coverage is at least this proportion of bulk coverage
+jxn_phasing_threshold: 0.5    # only calculate hap1/hap2 PSI-approx values when phased coverage is at least this proportion of bulk coverage
 gtex_n_threshold: 100    # only fit beta distribution for junctions with at least this many PSI-approx values in GTEx
 psi_rescale_factor: 0.001    # rescale PSI-approx values away from 0 and 1 for beta distribution fitting
 psi_padj_threshold: 0.01    # for calling significance
 delta_psi_threshold: 0.1    # difference between the sample's PSI-approx and the 1st/99th percentile of GTEx PSI-approx values; for calling significance
 
 # Merging variant results across variant callers and samples
-merge_min_dp_snv: 20    # DP filter applied at merge step
-merge_min_dp_indel: 20    # DP filter applied at merge step
+merge_min_dp_snv: 50    # DP filter applied at merge step
+merge_min_dp_indel: 50    # DP filter applied at merge step
 merge_num_callers_threshold_snv: 2    # SNVs must be called by at least this many tools
 merge_num_callers_threshold_indel: 2    # indels must be called by at least this many tools
-merge_variant_sample_fraction: 0.05    # variants present in greater than 5% of samples are filtered out
+merge_variant_sample_fraction: 0.05           # default: variants present in >= 5% of samples are filtered out
+merge_variant_sample_fraction_stringent: 0.01 # stringent: variants present in >= 1% of samples are filtered out
 
 # Merging ASE results samples
 merge_min_haplotype_ratio: 0.1    # ignore genes with minor haplotype frequency < 10%
 merge_ase_padj_threshold: 0.01    # similar to padj_threshold but applied at the merge step
 merge_minor_haplotype_frequency_threshold: 0.3    # similar to minor_haplotype_frequency_threshold but applied at the merge step
-merge_ase_sample_fraction: 0.05    # genes with ASE in greater than 5% of samples are filtered out
+merge_ase_sample_fraction: 0.05           # default: genes with ASE in >= 5% of samples are filtered out
+merge_ase_sample_fraction_stringent: 0.01 # stringent: genes with ASE in >= 1% of samples are filtered out
 
 # Merging junction results samples
-merge_jxn_coverage_threshold: 50    # similar to gtex_coverage_threshold but applied at the merge step
+# Two filter sets are run in parallel: "default" and "stringent".
+# Results are written to merged_junction_analysis/{default,stringent}/,
+# merged_hits/{default,stringent}/, and output/{default,stringent}/ at the BED level.
+merge_jxn_coverage_threshold: 50    # similar to gtex_coverage_threshold but applied at the merge step (shared by both filter sets)
 merge_jxn_padj_threshold: 0.01    # similar to padj_threshold but applied at the merge step
 merge_delta_psi_threshold: 0.1    # similar to delta_psi_threshold but applied at the merge step
-merge_jxn_sample_fraction: 0.05    # junctions with an outlier call in greater than 5% of samples are filtered out
+merge_jxn_sample_fraction: 0.05           # default: junctions in >= 5% of samples are filtered out
+merge_jxn_sample_fraction_stringent: 0.01 # stringent: junctions in >= 1% of samples are filtered out
 
 # Cohort-level junction analysis (beta-binomial for larger groups, modified z-score for smaller ones)
 cohort_jxn_min_samples: 10    # skip cohort junction analysis entirely for groups smaller than this
@@ -151,7 +157,7 @@ cohort_jxn_beta_padj_threshold: 0.05    # significance threshold for beta-binomi
 cohort_jxn_beta_delta_threshold: 0.1    # significance threshold for beta-binomial method
 cohort_jxn_z_threshold: 3.5    # significance threshold for modified_zscore method
 cohort_jxn_z_delta_threshold: 0.1    # significance threshold for modified_zscore method
-cohort_jxn_phasing_threshold: 0.8    # only calculate hap1/hap2 values when phased coverage is at least this proportion of bulk coverage
+cohort_jxn_phasing_threshold: 0.5    # only calculate hap1/hap2 values when phased coverage is at least this proportion of bulk coverage
 cohort_jxn_min_reads: 20    # minimum bulk read count for a junction to be included in the analysis (at least one sample must have this many reads supporting junction)
 
 # QC / plotting: reference tissues and colors used in sample-type plots

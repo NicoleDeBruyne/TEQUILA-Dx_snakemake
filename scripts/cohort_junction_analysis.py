@@ -57,9 +57,7 @@ def parse_args() -> argparse.Namespace:
                         "and --note explains why) -- fitting a per-junction cohort "
                         "distribution from a handful of samples isn't meaningful.")
     p.add_argument("--approx",                     action="store_true")
-    p.add_argument("--coverage-threshold",         type=int,   default=20)
     p.add_argument("--PSI-rescale-factor",         type=float, default=1e-3)
-    p.add_argument("--phasing-threshold",          type=float, default=0.8)
     p.add_argument("--min-jxn-reads",              type=int,   default=20)
     p.add_argument("--include-monoexonic",         action="store_true")
     p.add_argument("--genome",                     default=None)
@@ -396,8 +394,6 @@ def process_sample(
     gene: str,
     all_jxns: List[str],
     approx_only: bool,
-    coverage_threshold: int,
-    phasing_threshold: float,
     PSI_rescale_factor: float,
     strand: str = "+",
     include_monoexonic: bool = False,
@@ -450,38 +446,19 @@ def process_sample(
                 if jxn in jxn_index: c[jxn_index[jxn]] = cnt
             chunks.append((label, u, c))
 
-        label_cov = {label: c for label, _, c in chunks}
-        lp_psi_approx = np.zeros(n_jxns, dtype=bool)
-        if phasing_threshold > 0 and ("hap1" in label_cov or "hap2" in label_cov):
-            bulk_cov  = label_cov.get("bulk", np.zeros(n_jxns, dtype=np.int32))
-            hap1_cov  = label_cov.get("hap1", np.zeros(n_jxns, np.int32))
-            hap2_cov  = label_cov.get("hap2", np.zeros(n_jxns, np.int32))
-            hap_total = hap1_cov + hap2_cov
-            lp_psi_approx = (
-                (bulk_cov * phasing_threshold > hap_total) |
-                (hap1_cov < coverage_threshold) |
-                (hap2_cov < coverage_threshold)
-            )
-
-        def _lc_approx(arr):
-            out = arr.astype(object); out[~np.isfinite(arr)] = "low_coverage"; return out
-
         rows = []
         for label, u, c in chunks:
-            is_hap = label in ("hap1", "hap2")
-            lp_col = lp_psi_approx if is_hap else np.zeros(n_jxns, dtype=bool)
             cf = c.astype(np.float32); uf = u.astype(np.float32)
             with np.errstate(divide="ignore", invalid="ignore"):
-                psi = np.where(cf >= coverage_threshold, uf / cf, np.nan)
+                psi = np.where(cf > 0, uf / cf, np.nan)
             rsc = np.where(np.isfinite(psi), psi*(1-2*PSI_rescale_factor)+PSI_rescale_factor, np.nan)
             rows.append(pd.DataFrame({
-                "junction":          all_jxns,
-                "junction_usage":    u,
-                "junction_coverage_approx": c,
-                "junction_PSI_approx":          _lc_approx(psi),
-                "rescaled_junction_PSI_approx": _lc_approx(rsc),
-                "phasing":           label,
-                "low_phased_junction_PSI_approx": lp_col,
+                "junction":                     all_jxns,
+                "junction_usage":               u,
+                "junction_coverage_approx":     c,
+                "junction_PSI_approx":          psi,
+                "rescaled_junction_PSI_approx": rsc,
+                "phasing":                      label,
             }))
         df = pd.concat(rows, ignore_index=True)
         df["sample"] = sample_name; df["region"] = region; df["gene"] = gene
@@ -613,31 +590,9 @@ def process_sample(
         "hap2": _arr_approx("hap2"),
     }
 
-    def _compute_lp(denom_col: str) -> np.ndarray:
-        arrs = denom_arrays.get(denom_col, {})
-        if not arrs or phasing_threshold <= 0:
-            return np.zeros(n_jxns, dtype=bool)
-        b = arrs.get("bulk", np.zeros(n_jxns, np.int32))
-        h1 = arrs.get("hap1", np.zeros(n_jxns, np.int32))
-        h2 = arrs.get("hap2", np.zeros(n_jxns, np.int32))
-        return (
-            (b * phasing_threshold > (h1 + h2)) |
-            (h1 < coverage_threshold) |
-            (h2 < coverage_threshold)
-        )
-
-    lp_per_metric: Dict[str, np.ndarray] = {}
-    for mc, denom_col in _METRIC_DENOMINATOR.items():
-        lp_per_metric[mc] = _compute_lp(denom_col)
-
     def _rescale(arr_f):
         return np.where(np.isfinite(arr_f),
                         arr_f * (1 - 2*PSI_rescale_factor) + PSI_rescale_factor, np.nan)
-
-    def _fill_lc(arr):
-        out = arr.astype(object)
-        out[~np.isfinite(arr)] = "low_coverage"
-        return out
 
     rows = []
     for label, cov_result, jxn_raw_str, approx_cov in chunks_wide:
@@ -659,21 +614,18 @@ def process_sample(
         five_ss_arr  = [cov_result.get(j, {}).get("five_ss",  f"{chrom}_0") for j in all_jxns]
         three_ss_arr = [cov_result.get(j, {}).get("three_ss", f"{chrom}_0") for j in all_jxns]
 
-        is_hap = label in ("hap1", "hap2")
-
         jcf  = jc.astype(np.float32)
         s1cf = s1c.astype(np.float32)
         s2cf = s2c.astype(np.float32)
         jc_approx_f = jc_approx.astype(np.float32)
 
         with np.errstate(divide="ignore", invalid="ignore"):
-            psi_approx_v = np.where(jc_approx_f >= coverage_threshold,
-                                    ju.astype(np.float32) / jc_approx_f, np.nan)
-            psi_v    = np.where(jcf  >= coverage_threshold, ju.astype(np.float32) / jcf,  np.nan)
-            irr1     = np.where(s1cf >= coverage_threshold, s1ir.astype(np.float32) / s1cf, np.nan)
-            irr2     = np.where(s2cf >= coverage_threshold, s2ir.astype(np.float32) / s2cf, np.nan)
-            full_irr = np.where(jcf  >= coverage_threshold, fir.astype(np.float32) / jcf,  np.nan)
-            ipar     = np.where(s1cf >= coverage_threshold, ipa.astype(np.float32) / s1cf,  np.nan)
+            psi_approx_v = np.where(jc_approx_f > 0, ju.astype(np.float32) / jc_approx_f, np.nan)
+            psi_v    = np.where(jcf  > 0, ju.astype(np.float32) / jcf,  np.nan)
+            irr1     = np.where(s1cf > 0, s1ir.astype(np.float32) / s1cf, np.nan)
+            irr2     = np.where(s2cf > 0, s2ir.astype(np.float32) / s2cf, np.nan)
+            full_irr = np.where(jcf  > 0, fir.astype(np.float32) / jcf,  np.nan)
+            ipar     = np.where(s1cf > 0, ipa.astype(np.float32) / s1cf,  np.nan)
 
         row_dict = {
             "junction":                        all_jxns,
@@ -686,32 +638,27 @@ def process_sample(
                 for i, j in enumerate(all_jxns)
             ],
             "junction_coverage_approx":        jc_approx,
-            "junction_PSI_approx":             _fill_lc(psi_approx_v),
-            "rescaled_junction_PSI_approx":    _fill_lc(_rescale(psi_approx_v)),
+            "junction_PSI_approx":             psi_approx_v,
+            "rescaled_junction_PSI_approx":    _rescale(psi_approx_v),
             "junction_coverage":               jc,
-            "junction_PSI":                    _fill_lc(psi_v),
-            "rescaled_junction_PSI":           _fill_lc(_rescale(psi_v)),
-            "5ss_usage":         s1u,
-            "5ss_coverage":      s1c,
-            "5ss_IR_ratio":                    _fill_lc(irr1),
-            "rescaled_5ss_IR_ratio":           _fill_lc(_rescale(irr1)),
-            "3ss_usage":         s2u,
-            "3ss_coverage":      s2c,
-            "3ss_IR_ratio":                    _fill_lc(irr2),
-            "rescaled_3ss_IR_ratio":           _fill_lc(_rescale(irr2)),
+            "junction_PSI":                    psi_v,
+            "rescaled_junction_PSI":           _rescale(psi_v),
+            "5ss_usage":                       s1u,
+            "5ss_coverage":                    s1c,
+            "5ss_IR_ratio":                    irr1,
+            "rescaled_5ss_IR_ratio":           _rescale(irr1),
+            "3ss_usage":                       s2u,
+            "3ss_coverage":                    s2c,
+            "3ss_IR_ratio":                    irr2,
+            "rescaled_3ss_IR_ratio":           _rescale(irr2),
             "junction_full_IR_count":          fir,
-            "junction_full_IR_ratio":          _fill_lc(full_irr),
-            "rescaled_junction_full_IR_ratio": _fill_lc(_rescale(full_irr)),
+            "junction_full_IR_ratio":          full_irr,
+            "rescaled_junction_full_IR_ratio": _rescale(full_irr),
             "junction_IPA_count":              ipa,
-            "junction_IPA_ratio":              _fill_lc(ipar),
-            "rescaled_junction_IPA_ratio":     _fill_lc(_rescale(ipar)),
+            "junction_IPA_ratio":              ipar,
+            "rescaled_junction_IPA_ratio":     _rescale(ipar),
             "phasing":                         label,
         }
-        for mc in _METRIC_DENOMINATOR:
-            col_name = f"low_phased_{mc}"
-            lp_arr = lp_per_metric[mc] if is_hap else np.zeros(n_jxns, dtype=bool)
-            row_dict[col_name] = lp_arr
-
         rows.append(pd.DataFrame(row_dict))
 
     df = pd.concat(rows, ignore_index=True)
@@ -749,9 +696,7 @@ def compute_gene_junction_metrics(
     region: str,
     region_df: pd.DataFrame,
     approx_only: bool,
-    coverage_threshold: int,
     PSI_rescale_factor: float,
-    phasing_threshold: float,
     threads: int,
     strand: str = "+",
     include_monoexonic: bool = False,
@@ -784,8 +729,7 @@ def compute_gene_junction_metrics(
                 hap2  = row["hap2"] if pd.notna(row.get("hap2","")) else None
                 futures[pool.submit(
                     process_sample, sname, bulk, hap1, hap2,
-                    region, gene, [], True, coverage_threshold,
-                    phasing_threshold, PSI_rescale_factor, strand,
+                    region, gene, [], True, PSI_rescale_factor, strand,
                     include_monoexonic,
                 )] = sname
             _lines: List[str] = []
@@ -863,8 +807,7 @@ def compute_gene_junction_metrics(
                 bulk_jxn_raw = sample_jxn_raw.get(sname)
                 psi_futures[pool.submit(
                     process_sample, sname, bulk, hap1, hap2,
-                    region, gene, all_jxns, approx_only, coverage_threshold,
-                    phasing_threshold, PSI_rescale_factor, strand,
+                    region, gene, all_jxns, approx_only, PSI_rescale_factor, strand,
                     include_monoexonic, genome_path, alu,
                     bulk_jxn_raw,
                 )] = sname
@@ -973,9 +916,7 @@ def main() -> None:
             combined = compute_gene_junction_metrics(
                 gene=gene, region=region, region_df=region_df,
                 approx_only=approx_only,
-                coverage_threshold=args.coverage_threshold,
                 PSI_rescale_factor=args.PSI_rescale_factor,
-                phasing_threshold=args.phasing_threshold,
                 threads=args.threads, strand=strand,
                 include_monoexonic=args.include_monoexonic,
                 min_jxn_reads=args.min_jxn_reads,

@@ -304,17 +304,21 @@ def all_outputs():
             outs.append((str(od) + '/gene_quantification/' + str(s) + '_gene_assignment.tsv'))
 
     if flag("merge_results"):
+        # Junction-derived outputs run for each filter set ("default" and "stringent")
+        _jxn_filter_sets = ["default", "stringent"]
         for (cid, bid) in BED_GROUPS:
             bod = bed_outdir(cid, bid)
-            outs.append((str(bod) + '/hits_upset_density.pdf'))
-            outs.append((str(bod) + '/merged_all_hits_simplified.tsv'))
-            if bed_has_alias(cid, bid):
-                outs.append((str(bod) + '/merged_all_hits_simplified_alias.tsv'))
+            for fs in _jxn_filter_sets:
+                outs.append((str(bod) + '/' + str(fs) + '/hits_upset_density.pdf'))
+                outs.append((str(bod) + '/' + str(fs) + '/merged_all_hits_simplified.tsv'))
+                if bed_has_alias(cid, bid):
+                    outs.append((str(bod) + '/' + str(fs) + '/merged_all_hits_simplified_alias.tsv'))
         for gid in GROUPS:
             god = group_outdir(gid)
-            for fname in ('genes_with_pathogenic_variant_boxplot.pdf', 'genes_with_ASE_boxplot.pdf',
-                          'genes_with_outlier_junction_boxplot.pdf', 'genes_with_RNA_dysregulation_boxplot.pdf'):
-                outs.append((str(god) + '/merged_hits/' + fname))
+            for fs in _jxn_filter_sets:
+                for fname in ('genes_with_pathogenic_variant_boxplot.pdf', 'genes_with_ASE_boxplot.pdf',
+                              'genes_with_outlier_junction_boxplot.pdf', 'genes_with_RNA_dysregulation_boxplot.pdf'):
+                    outs.append((str(god) + '/merged_hits/' + str(fs) + '/' + fname))
 
     if flag("cohort_junction_analysis"):
         for gid in GROUPS:
@@ -338,6 +342,10 @@ def all_outputs():
             outs.append(god + "/gene_quantification/by_coverage/gene_coverage_matrix_motr.tsv")
             outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix_cptm.tsv")
             outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix_motr.tsv")
+            outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_raw_all_genes.tsv")
+            outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_raw.tsv")
+            outs.append(god + "/gene_quantification/by_amalgam/transcript_amalgam_matrix_raw_all_genes.tsv")
+            outs.append(god + "/gene_quantification/by_amalgam/transcript_amalgam_matrix_raw.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_cptm.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_motr.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/annotation/annotated.gtf.gz")

@@ -1,8 +1,6 @@
 
 import argparse
-import gzip
 import os
-import re
 
 import pandas as pd
 import numpy as np
@@ -13,73 +11,17 @@ from motr import add_motr_args, compute_size_factors
 from gene_boxplots import make_gene_boxplots
 
 
-_ATTR_RE_CACHE = {}
-
-
-def _attr(attr_str, key):
-    rx = _ATTR_RE_CACHE.get(key)
-    if rx is None:
-        rx = re.compile(key + r'\s+"([^"]+)"')
-        _ATTR_RE_CACHE[key] = rx
-    m = rx.search(attr_str)
-    return m.group(1) if m else None
-
-
-def _strip_ver(s):
-    return re.sub(r'\.\d+$', '', s) if s else s
-
-
-def load_gene_id_to_symbol(gtf_path):
-    open_fn = gzip.open if gtf_path.endswith(".gz") else open
-    mapping = {}
-    with open_fn(gtf_path, "rt") as fh:
-        for line in fh:
-            if line.startswith("#"):
-                continue
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 9:
-                continue
-            attrs = parts[8]
-            gid = _strip_ver(_attr(attrs, "gene_id"))
-            gname = _attr(attrs, "gene_name") or _attr(attrs, "gene_symbol")
-            if gid and gname:
-                mapping[gid] = gname
-    return mapping
-
-
-def load_targeted_genes(bed_path):
-    genes = []
-    seen = set()
-    with open(bed_path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            cols = line.split("\t")
-            if len(cols) < 4:
-                continue
-            gene = cols[3]
-            if gene not in seen:
-                seen.add(gene)
-                genes.append(gene)
-    return sorted(genes)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Restrict AMALGAM's genome-wide gene_matrix.tsv to the run's BED panel "
-                    "(translating gene_id -> gene symbol via the reference GTF) and add "
-                    "CPTM/MOTR normalization, z-scores, and per-gene boxplots -- the same "
-                    "outputs the other three quantification methods produce.")
-    parser.add_argument('--gene-matrix', required=True,
-        help="by_amalgam/quantification/*_gene_matrix.tsv from scripts/aggregate_amalgam_matrices.py "
-             "(raw counts, gene_id-keyed, genome-wide).")
-    parser.add_argument('--bed', required=True,
-        help="This group's BED panel (column 4 = target gene symbols).")
-    parser.add_argument('--gtf', required=True,
-        help="Reference annotation GTF, for gene_id -> gene_name translation.")
+        description="CPTM/MOTR normalization, outlier z-scores, and per-gene boxplots for the "
+                    "AMALGAM gene expression matrix -- the same outputs the other three "
+                    "quantification methods produce. Expects a symbol-keyed, BED-panel-filtered "
+                    "raw count matrix (gene_amalgam_matrix_raw.tsv from aggregate_amalgam_matrices.py).")
+    parser.add_argument('--raw-matrix', required=True,
+        help="by_amalgam/gene_amalgam_matrix_raw.tsv from scripts/aggregate_amalgam_matrices.py "
+             "(raw counts, gene-symbol-keyed, BED-panel genes only).")
     parser.add_argument('--outprefix', required=True,
-        help="Prefix for output files: <outprefix>_matrix_raw.tsv, <outprefix>_matrix_cptm.tsv, "
+        help="Prefix for output files: <outprefix>_matrix_cptm.tsv, "
              "<outprefix>_matrix_motr.tsv, <outprefix>_zscores_cptm.tsv, "
              "<outprefix>_zscores_motr.tsv, and "
              "<outdir>/<gene>_cptm.pdf + <outdir>/<gene>_motr.pdf per targeted-panel gene "
@@ -108,22 +50,10 @@ def add_outlier_args_local(parser):
 def main():
     args = parse_args()
 
-    raw_all_df = pd.read_csv(args.gene_matrix, sep="\t", index_col=0)
-
-    gid_to_symbol = load_gene_id_to_symbol(args.gtf)
-    symbol_index = [gid_to_symbol.get(_strip_ver(gid), gid) for gid in raw_all_df.index]
-
-    raw_all_df.index = symbol_index
-    raw_all_df.index.name = "gene"
-    raw_by_symbol = raw_all_df.groupby(level=0).sum()
-
-    targeted_genes = load_targeted_genes(args.bed)
-    raw_df = raw_by_symbol.reindex(targeted_genes).fillna(0).astype(int)
+    # N5 (aggregate_amalgam_matrices.py) has already translated gene_id -> symbol,
+    # collapsed duplicates, and filtered to the BED panel.
+    raw_df = pd.read_csv(args.raw_matrix, sep="\t", index_col=0)
     raw_df.index.name = "gene"
-
-    out_raw = args.outprefix + "_matrix_raw.tsv"
-    raw_df.to_csv(out_raw, sep="\t")
-    print("Saved targeted-panel raw-value matrix: " + out_raw)
 
     alias_map = parse_alias_map(args.alias_map)
 

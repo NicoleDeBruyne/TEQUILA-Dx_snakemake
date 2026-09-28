@@ -36,10 +36,6 @@ _METRIC_EVENTS: Dict[str, List[str]] = {
     "junction_IPA_ratio":     ["IPA"],
 }
 
-_BOOL_COLUMN_PREFIXES = ("low_phased_",)
-
-
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Identifies splice junctions with unusual usage frequencies "
@@ -55,6 +51,9 @@ def parse_args() -> argparse.Namespace:
                    help="Set if --genome was provided to cohort_junction_analysis.py "
                         "(enables testing junction_IPA_ratio as a metric).")
     p.add_argument("--coverage-threshold",         type=int,   default=20)
+    p.add_argument("--phasing-threshold",          type=float, default=0.5,
+                   help="Minimum fraction of bulk coverage that must be phased "
+                        "(hap1+hap2 denom / bulk denom) for haplotype metrics to be scored.")
     p.add_argument("--PSI-rescale-factor",         type=float, default=1e-3)
     p.add_argument("--n-threshold",                type=int,   default=30)
     method_group = p.add_mutually_exclusive_group(required=True)
@@ -129,14 +128,10 @@ def load_manifest(path: str) -> List[Tuple[str, Optional[str]]]:
 def load_gene_raw_metrics(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, sep="\t", dtype=str)
     for col in df.columns:
-        if any(col.startswith(p) for p in _BOOL_COLUMN_PREFIXES):
-            df[col] = (df[col].astype(str).str.strip().str.lower()
-                       .map({"true": True, "false": False}).fillna(False))
-        else:
-            try:
-                df[col] = pd.to_numeric(df[col])
-            except (ValueError, TypeError):
-                pass
+        try:
+            df[col] = pd.to_numeric(df[col])
+        except (ValueError, TypeError):
+            pass
     return df
 
 
@@ -303,6 +298,7 @@ def _run_one_metric(
     coverage_col:       str,
     id_col:             str,
     coverage_threshold: int,
+    phasing_threshold:  float,
     PSI_rescale_factor: float,
     n_threshold:        int,
     threads:            int,
@@ -422,12 +418,35 @@ def _run_one_metric(
     coverage_arr = combined_df[coverage_col].to_numpy(dtype=float)
     has_cov      = coverage_arr >= coverage_threshold
 
-    lp_col_name = f"low_phased_{metric_col}"
+    # Compute low_phased flag on-the-fly from raw denominator values.
+    # For each (fit_id, sample), a hap row is "low phased" when
+    # bulk_denom * phasing_threshold > hap1_denom + hap2_denom.
     is_hap = combined_df["phasing"].isin(["hap1", "hap2"])
-    if lp_col_name in combined_df.columns:
-        is_low_phased = combined_df[lp_col_name].astype(bool)
-    else:
-        is_low_phased = pd.Series(False, index=combined_df.index)
+    bulk_denom = (
+        combined_df[combined_df["phasing"] == "bulk"]
+        [["sample", fit_id_col, coverage_col]]
+        .rename(columns={coverage_col: "_bulk_denom"})
+    )
+    hap_denom_sum = (
+        combined_df[is_hap]
+        .groupby(["sample", fit_id_col])[coverage_col]
+        .sum()
+        .reset_index()
+        .rename(columns={coverage_col: "_hap_denom_sum"})
+    )
+    phased_check = bulk_denom.merge(hap_denom_sum, on=["sample", fit_id_col], how="left")
+    phased_check["_low_phased"] = (
+        phased_check["_bulk_denom"].fillna(0) * phasing_threshold
+        > phased_check["_hap_denom_sum"].fillna(0)
+    )
+    lp_map = phased_check.set_index(["sample", fit_id_col])["_low_phased"].to_dict()
+    # Vectorized lookup via tuple key Series
+    _lp_keys = list(zip(combined_df["sample"], combined_df[fit_id_col]))
+    is_low_phased = pd.Series(
+        [lp_map.get(k, False) for k in _lp_keys],
+        index=combined_df.index,
+        dtype=bool,
+    )
     is_low_phased_hap = is_hap & is_low_phased & has_cov
 
     p1_vals  = np.full(len(feat_names), np.nan)
@@ -511,6 +530,7 @@ def _run_one_metric(
 def run_all_metrics(
     combined_df:        pd.DataFrame,
     coverage_threshold: int,
+    phasing_threshold:  float,
     PSI_rescale_factor: float,
     n_threshold:        int,
     threads:            int,
@@ -535,8 +555,8 @@ def run_all_metrics(
             continue
         combined_df = _run_one_metric(
             combined_df, metric_col, rescaled_col, usage_col, coverage_col,
-            id_col, coverage_threshold, PSI_rescale_factor, n_threshold, threads,
-            method,
+            id_col, coverage_threshold, phasing_threshold, PSI_rescale_factor,
+            n_threshold, threads, method,
         )
     return combined_df
 
@@ -546,6 +566,7 @@ def run_gene_stats_pipeline(
     combined:            pd.DataFrame,
     approx_only:         bool,
     coverage_threshold:  int,
+    phasing_threshold:   float,
     PSI_rescale_factor:  float,
     n_threshold:         int,
     threads:             int,
@@ -560,12 +581,13 @@ def run_gene_stats_pipeline(
         combined = _run_one_metric(
             combined, "junction_PSI_approx", "rescaled_junction_PSI_approx",
             "junction_usage", "junction_coverage_approx", "junction",
-            coverage_threshold, PSI_rescale_factor, n_threshold, threads,
-            method,
+            coverage_threshold, phasing_threshold, PSI_rescale_factor, n_threshold,
+            threads, method,
         )
     else:
-        combined = run_all_metrics(combined, coverage_threshold, PSI_rescale_factor,
-                                   n_threshold, threads, has_ipa, method, no_ss_ir)
+        combined = run_all_metrics(combined, coverage_threshold, phasing_threshold,
+                                   PSI_rescale_factor, n_threshold, threads, has_ipa,
+                                   method, no_ss_ir)
 
     fit_prefix  = "alpha_" if method == "beta_binomial" else "median_"
     test_prefix = "p_value_" if method == "beta_binomial" else "modz_"
@@ -1492,7 +1514,8 @@ def main() -> None:
             combined = load_gene_raw_metrics(path)
             res = run_gene_stats_pipeline(
                 gene, combined, approx_only,
-                args.coverage_threshold, args.PSI_rescale_factor, args.n_threshold,
+                args.coverage_threshold, args.phasing_threshold,
+                args.PSI_rescale_factor, args.n_threshold,
                 args.threads, args.has_ipa, args.no_ss_IR, method,
             )
         except Exception as e:
