@@ -151,8 +151,9 @@ def group_outdir(group_id):
     return (str(config['output_dir']) + '/' + str(GROUP_COHORT_ID[group_id]) + '/' + str(GROUP_BED_ID[group_id]) + '/output/sample_types/' + str(GROUP_SAMPLE_TYPE[group_id]) + '/output')
 
 # --- Cohort junction analysis settings ---------------
-# Small groups use a modified-z-score outlier test; larger groups use a
-# beta-binomial test (auto-selected by sample count unless overridden).
+# 8A always runs to compute raw metrics. 8B runs only when n >= cohort_jxn_zscore_n_threshold (default 10).
+# Small groups (10 <= n < 30) use modified z-score; larger groups (n >= 30) use beta-binomial
+# (auto-selected by sample count unless overridden by cohort_jxn_method).
 
 def _cja_method_for_group(group_id):
     method = config.get("cohort_jxn_method", "auto")
@@ -313,6 +314,8 @@ def all_outputs():
                 outs.append((str(bod) + '/' + str(fs) + '/merged_all_hits_simplified.tsv'))
                 if bed_has_alias(cid, bid):
                     outs.append((str(bod) + '/' + str(fs) + '/merged_all_hits_simplified_alias.tsv'))
+            # Distribution plots use the default hit set only (stringent is a subset)
+            outs.append((str(bod) + '/default/junction_distributions.done'))
         for gid in GROUPS:
             god = group_outdir(gid)
             for fs in _jxn_filter_sets:
@@ -321,8 +324,11 @@ def all_outputs():
                     outs.append((str(god) + '/merged_hits/' + str(fs) + '/' + fname))
 
     if flag("cohort_junction_analysis"):
+        _cja_min_n = config.get("cohort_jxn_zscore_n_threshold", 10)
         for gid in GROUPS:
             god = group_outdir(gid)
+            if len(GROUPS[gid]) < _cja_min_n:
+                continue  # 8A always runs; 8B (fitting) and 8C (outlier calling) require at least min_n samples
             outs.append(
                 god + "/cohort_junction_analysis/" + gid + "_" + _cja_thr_label(gid)
                 + "/" + gid + "_outliers.tsv"

@@ -867,16 +867,7 @@ def main() -> None:
     mapping_df = load_and_validate_mapping(args.mapping_file)
 
     n_samples = mapping_df["sample"].nunique()
-    if n_samples < args.min_samples:
-        msg = (f"SKIPPED: only {n_samples} sample(s) in this group "
-               f"(minimum {args.min_samples} required to run cohort junction analysis). "
-               f"No genes were processed.")
-        print(f"\n[WARNING] {msg}")
-        with open(args.note, "w") as fh:
-            fh.write(msg + "\n")
-        _write_manifest(gene_info, {}, args.manifest)
-        print("\nDone (skipped).")
-        return
+    print(f"  {n_samples} sample(s) in this group.")
 
     missing = set(mapping_df["gene"].unique()) - set(gene_info)
     if missing:

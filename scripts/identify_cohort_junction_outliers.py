@@ -8,6 +8,7 @@ import warnings
 import traceback
 import time
 import math
+import glob as _glob
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
@@ -16,15 +17,12 @@ from sample_alias import add_alias_map_arg, parse_alias_map, resolve
 import numpy as np
 import pandas as pd
 import concurrent.futures
-from scipy.stats import betabinom, beta
-from statsmodels.stats.multitest import multipletests
 from pandas.errors import PerformanceWarning
 
 warnings.filterwarnings("ignore", category=PerformanceWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*Glyph.*missing from font.*", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*Adding colorbar to a different Figure.*", category=UserWarning)
-
 
 
 _METRIC_EVENTS: Dict[str, List[str]] = {
@@ -36,59 +34,42 @@ _METRIC_EVENTS: Dict[str, List[str]] = {
     "junction_IPA_ratio":     ["IPA"],
 }
 
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Identifies splice junctions with unusual usage frequencies "
-                     "from the per-gene metrics computed by cohort_junction_analysis.py."
+        description="Reads a combined scored TSV from fit_and_score_cohort_junctions.py, "
+                     "applies thresholds, and writes outlier outputs (step 8C)."
     )
-    p.add_argument("--manifest",                   required=True,
-                   help="gene -> result-file manifest TSV from cohort_junction_analysis.py.")
-    p.add_argument("--bed",                        required=True)
     p.add_argument("--outprefix",                  required=True)
+    p.add_argument("--bed",                        required=True)
     add_alias_map_arg(p)
     p.add_argument("--approx",                     action="store_true")
-    p.add_argument("--has-ipa",                     action="store_true",
+    p.add_argument("--has-ipa",                    action="store_true",
                    help="Set if --genome was provided to cohort_junction_analysis.py "
                         "(enables testing junction_IPA_ratio as a metric).")
     p.add_argument("--coverage-threshold",         type=int,   default=20)
     p.add_argument("--phasing-threshold",          type=float, default=0.5,
                    help="Minimum fraction of bulk coverage that must be phased "
                         "(hap1+hap2 denom / bulk denom) for haplotype metrics to be scored.")
-    p.add_argument("--PSI-rescale-factor",         type=float, default=1e-3)
-    p.add_argument("--n-threshold",                type=int,   default=30)
     method_group = p.add_mutually_exclusive_group(required=True)
     method_group.add_argument(
         "--bb-thresholds",
         nargs="*", default=None,
         metavar="PADJ:DELTA",
-        help="Use beta-binomial testing (per-junction Beta distribution + "
-             "beta-binomial test, FDR-corrected). One or more padj:delta "
+        help="Use beta-binomial testing thresholds. One or more padj:delta "
              "threshold pairs, e.g. 0.05:0.1 0.01:0.1 0.01:0.2 -- each "
-             "combination produces its own output subdirectory. Pass with "
-             "no values to compute beta-binomial statistics (columns "
-             "n/alpha/beta/expected/p1/p99/delta/p_value/padj per metric) "
-             "without identifying outliers.")
+             "combination produces its own output subdirectory.")
     method_group.add_argument(
         "--z-thresholds",
         nargs="*", default=None,
         metavar="MODZ:DELTA",
-        help="Use modified z-score testing (per-junction median/MAD, no "
-             "p-values or FDR correction). One or more modZ:delta threshold "
-             "pairs, e.g. 3.5:0.1 5:0.1 -- each combination produces its own "
-             "output subdirectory. Outlier = |modZ| >= modZ AND |delta| >= "
-             "delta, where delta is the same empirical p1/p99-based effect "
-             "size used by --bb-thresholds. Pass with no values to compute "
-             "modified z-score statistics (columns "
-             "n/median/mad/modz/p1/p99/delta per metric) without "
-             "identifying outliers. Defaults to 3.5:0.1 if the flag is "
-             "given with no values.")
-    p.add_argument("--no-ss-IR",                   action="store_true")
+        help="Use modified z-score testing thresholds. One or more modZ:delta "
+             "threshold pairs, e.g. 3.5:0.1 5:0.1. "
+             "Defaults to 3.5:0.1 if the flag is given with no values.")
     p.add_argument("--gtf",                        default=None,
                    help="GTF/GTF.gz. If provided, adds junction_type column.")
     p.add_argument("--threads",                    type=int,   default=1)
-    p.add_argument("--test-n-genes",               type=int,   default=None)
     return p.parse_args()
-
 
 
 def load_bed(path: str) -> Dict[str, Tuple[str, str, str]]:
@@ -111,557 +92,6 @@ def load_bed(path: str) -> Dict[str, Tuple[str, str, str]]:
             gene_info[gene] = (chrom.strip(), region, strand)
     print(f"BED file loaded: {len(gene_info)} gene(s)")
     return gene_info
-
-
-def load_manifest(path: str) -> List[Tuple[str, Optional[str]]]:
-    df = pd.read_csv(path, sep="\t", dtype=str)
-    rows: List[Tuple[str, Optional[str]]] = []
-    for _, row in df.iterrows():
-        gene = row["gene"]
-        path_val = row.get("result_path")
-        rows.append((gene, None if (pd.isna(path_val) or path_val == "None") else path_val))
-    n_with_data = sum(1 for _, p in rows if p is not None)
-    print(f"Manifest loaded: {len(rows)} gene(s), {n_with_data} with results")
-    return rows
-
-
-def load_gene_raw_metrics(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, sep="\t", dtype=str)
-    for col in df.columns:
-        try:
-            df[col] = pd.to_numeric(df[col])
-        except (ValueError, TypeError):
-            pass
-    return df
-
-
-
-def _fit_one_beta(x: np.ndarray, tol: float, n_threshold: int):
-    x = x[np.isfinite(x)]
-    n = len(x)
-    if n < n_threshold: return n, "low_n", "low_n", "low_n"
-    var = float(np.var(x))
-    if var < tol:
-        m = float(np.clip(np.median(x), tol, 1.0 - tol))
-        k = max(m * (1.0 - m) / tol - 1.0, tol)
-        a = m * k; b = (1.0 - m) * k
-        return n, float(a), float(b), float(m)
-    try:
-        a, b, *_ = beta.fit(x, floc=0, fscale=1)
-        return n, float(a), float(b), float(a / (a + b))
-    except Exception:
-        return n, "error", "error", "error"
-
-
-def _fit_beta_rows(args):
-    mat_block, tol, n_threshold = args
-    return [_fit_one_beta(mat_block[i], tol, n_threshold)
-            for i in range(len(mat_block))]
-
-
-def fit_beta_dist_chunk(mat, feat_names, tol, n_threshold, threads: int = 1):
-    n = len(mat)
-    if n == 0:
-        return pd.DataFrame(columns=["n", "alpha", "beta_param", "expected"])
-
-    n_workers = min(threads, n)
-    if n_workers <= 1:
-        results = [_fit_one_beta(mat[i], tol, n_threshold) for i in range(n)]
-    else:
-        chunk_size = max(1, (n + n_workers - 1) // n_workers)
-        chunks = [
-            (mat[i : i + chunk_size], tol, n_threshold)
-            for i in range(0, n, chunk_size)
-        ]
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
-            results = []
-            for block in ex.map(_fit_beta_rows, chunks):
-                results.extend(block)
-
-    return pd.DataFrame(results, index=feat_names,
-                        columns=["n", "alpha", "beta_param", "expected"])
-
-
-
-def _betabinom_test_rows(args):
-    usage, coverage, alpha_v, beta_v, val, cov_thresh = args
-    valid = (np.isfinite(usage) & np.isfinite(coverage) &
-             np.isfinite(alpha_v) & np.isfinite(beta_v) & np.isfinite(val) &
-             (coverage >= cov_thresh))
-    p = np.full(len(usage), np.nan)
-    if valid.any():
-        u   = np.round(usage[valid]).astype(int)
-        cv  = np.round(coverage[valid]).astype(int)
-        lte = betabinom.cdf(u, cv, alpha_v[valid], beta_v[valid])
-        gte = betabinom.cdf(cv - u, cv, beta_v[valid], alpha_v[valid])
-        p[valid] = np.clip(2.0 * np.minimum(lte, gte), 0.0, 1.0)
-    return p
-
-
-def beta_binomial_test_chunk(
-    df: pd.DataFrame,
-    coverage_threshold: int,
-    metric_col: str,
-    usage_col: str,
-    coverage_col: str,
-    p_col: str,
-    threads: int = 1,
-) -> pd.DataFrame:
-    df = df.copy()
-    usage    = df[usage_col].to_numpy(dtype=float)
-    coverage = df[coverage_col].to_numpy(dtype=float)
-    alpha_v  = pd.to_numeric(df[f"alpha_{metric_col}"], errors="coerce").to_numpy()
-    beta_v   = pd.to_numeric(df[f"beta_{metric_col}"],  errors="coerce").to_numpy()
-    val      = df[metric_col].to_numpy(dtype=float)
-
-    n = len(df)
-    n_workers = min(threads, n)
-
-    if n_workers <= 1:
-        p = _betabinom_test_rows(
-            (usage, coverage, alpha_v, beta_v, val, coverage_threshold)
-        )
-    else:
-        chunk_size = max(1, (n + n_workers - 1) // n_workers)
-        chunks = [
-            (
-                usage   [i : i + chunk_size],
-                coverage[i : i + chunk_size],
-                alpha_v [i : i + chunk_size],
-                beta_v  [i : i + chunk_size],
-                val     [i : i + chunk_size],
-                coverage_threshold,
-            )
-            for i in range(0, n, chunk_size)
-        ]
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
-            p = np.concatenate(list(ex.map(_betabinom_test_rows, chunks)))
-
-    df[p_col] = p
-    return df
-
-
-
-_MODZ_CONST = 0.6745
-_MEANAD_CONST = 0.7979
-
-
-def _fit_one_modz(x: np.ndarray, tol: float, n_threshold: int):
-    x = x[np.isfinite(x)]
-    n = len(x)
-    if n < n_threshold:
-        return n, "low_n", "low_n"
-    med = float(np.median(x))
-    mad = float(np.median(np.abs(x - med)))
-    if mad < tol:
-        meanad = float(np.mean(np.abs(x - med)))
-        if meanad < tol:
-            return n, "no_variance", "no_variance"
-        mad = meanad * (_MODZ_CONST / _MEANAD_CONST)
-    return n, med, mad
-
-
-def _fit_modz_rows(args):
-    mat_block, tol, n_threshold = args
-    return [_fit_one_modz(mat_block[i], tol, n_threshold)
-            for i in range(len(mat_block))]
-
-
-def fit_modz_dist_chunk(mat, feat_names, tol, n_threshold, threads: int = 1):
-    n = len(mat)
-    if n == 0:
-        return pd.DataFrame(columns=["n", "median", "mad"])
-
-    n_workers = min(threads, n)
-    if n_workers <= 1:
-        results = [_fit_one_modz(mat[i], tol, n_threshold) for i in range(n)]
-    else:
-        chunk_size = max(1, (n + n_workers - 1) // n_workers)
-        chunks = [
-            (mat[i : i + chunk_size], tol, n_threshold)
-            for i in range(0, n, chunk_size)
-        ]
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
-            results = []
-            for block in ex.map(_fit_modz_rows, chunks):
-                results.extend(block)
-
-    return pd.DataFrame(results, index=feat_names, columns=["n", "median", "mad"])
-
-
-
-def _run_one_metric(
-    combined_df:        pd.DataFrame,
-    metric_col:         str,
-    rescaled_col:       str,
-    usage_col:          str,
-    coverage_col:       str,
-    id_col:             str,
-    coverage_threshold: int,
-    phasing_threshold:  float,
-    PSI_rescale_factor: float,
-    n_threshold:        int,
-    threads:            int,
-    method:             str,
-) -> pd.DataFrame:
-    is_ss_metric = metric_col in ("5ss_IR_ratio", "3ss_IR_ratio")
-
-    if is_ss_metric:
-        ss_pos_col = "5ss" if metric_col == "5ss_IR_ratio" else "3ss"
-        combined_df = combined_df.copy()
-        combined_df["_ss_id"] = combined_df["region"].str.split(":").str[0] + "_" + \
-                                  combined_df[ss_pos_col].astype(str)
-        fit_id_col = "_ss_id"
-    else:
-        fit_id_col = id_col
-
-    bulk_sub = combined_df[combined_df["phasing"] == "bulk"][
-        ["sample", fit_id_col, coverage_col, rescaled_col]
-    ].copy()
-
-    low_cov = bulk_sub[coverage_col].to_numpy(dtype=float) < coverage_threshold
-    rvals   = np.array(pd.to_numeric(bulk_sub[rescaled_col], errors="coerce"), dtype=float)
-    rvals[low_cov] = np.nan
-
-    bulk_wide = (
-        bulk_sub.assign(**{rescaled_col: rvals})
-        .drop_duplicates(subset=["sample", fit_id_col])
-        .pivot(index=fit_id_col, columns="sample", values=rescaled_col)
-        .astype(np.float32)
-    )
-
-    n_col   = f"n_{metric_col}"
-    p1_col  = f"p1_{metric_col}"
-    p99_col = f"p99_{metric_col}"
-    delta_col = f"delta_{metric_col}"
-    if method == "beta_binomial":
-        alpha_col    = f"alpha_{metric_col}"
-        beta_col     = f"beta_{metric_col}"
-        expected_col = f"expected_{metric_col}"
-        p_col        = f"p_value_{metric_col}"
-        fit_indicator_col = alpha_col
-        empty_cols = (alpha_col, beta_col, expected_col, p1_col, p99_col, delta_col, p_col)
-    else:
-        median_col = f"median_{metric_col}"
-        mad_col    = f"mad_{metric_col}"
-        modz_col   = f"modz_{metric_col}"
-        fit_indicator_col = median_col
-        empty_cols = (median_col, mad_col, modz_col, p1_col, p99_col, delta_col)
-
-    if bulk_wide.empty:
-        combined_df[n_col] = 0
-        for col in empty_cols:
-            combined_df[col] = "low_n"
-        return combined_df
-
-    mat        = bulk_wide.to_numpy(dtype=np.float32)
-    feat_names = bulk_wide.index.tolist()
-
-    n_valid  = np.sum(~np.isnan(mat), axis=1)
-
-    fit_mask    = n_valid >= n_threshold
-    low_n_names = [feat_names[i] for i in range(len(feat_names)) if not fit_mask[i]]
-    fit_names   = [feat_names[i] for i in range(len(feat_names)) if fit_mask[i]]
-
-    if method == "beta_binomial":
-        if fit_names:
-            beta_df = fit_beta_dist_chunk(
-                mat[fit_mask], fit_names, PSI_rescale_factor, n_threshold, threads
-            ).reset_index().rename(
-                columns={"index": fit_id_col, "n": n_col, "alpha": alpha_col,
-                         "beta_param": beta_col, "expected": expected_col})
-        else:
-            beta_df = pd.DataFrame(columns=[fit_id_col, n_col, alpha_col, beta_col, expected_col])
-
-        if low_n_names:
-            low_n_df = pd.DataFrame({
-                fit_id_col:   low_n_names,
-                n_col:        [int(n_valid[i]) for i in range(len(feat_names)) if not fit_mask[i]],
-                alpha_col:    "low_n",
-                beta_col:     "low_n",
-                expected_col: "low_n",
-            })
-            beta_df = pd.concat([beta_df, low_n_df], ignore_index=True)
-
-        combined_df = combined_df.merge(beta_df, on=fit_id_col, how="left")
-        combined_df[n_col] = combined_df[n_col].fillna(0)
-        for col in (alpha_col, beta_col, expected_col):
-            combined_df[col] = combined_df[col].fillna("low_n")
-    else:
-        if fit_names:
-            modz_df = fit_modz_dist_chunk(
-                mat[fit_mask], fit_names, PSI_rescale_factor, n_threshold, threads
-            ).reset_index().rename(
-                columns={"index": fit_id_col, "n": n_col, "median": median_col, "mad": mad_col})
-        else:
-            modz_df = pd.DataFrame(columns=[fit_id_col, n_col, median_col, mad_col])
-
-        if low_n_names:
-            low_n_df = pd.DataFrame({
-                fit_id_col: low_n_names,
-                n_col:      [int(n_valid[i]) for i in range(len(feat_names)) if not fit_mask[i]],
-                median_col: "low_n",
-                mad_col:    "low_n",
-            })
-            modz_df = pd.concat([modz_df, low_n_df], ignore_index=True)
-
-        combined_df = combined_df.merge(modz_df, on=fit_id_col, how="left")
-        combined_df[n_col] = combined_df[n_col].fillna(0)
-        for col in (median_col, mad_col):
-            combined_df[col] = combined_df[col].fillna("low_n")
-
-    fit_vals     = combined_df[fit_indicator_col]
-    is_low_n     = fit_vals == "low_n"
-    is_error     = fit_vals == "error"
-    is_no_var    = fit_vals == "no_variance"
-    has_fit      = ~is_low_n & ~is_error & ~is_no_var
-    coverage_arr = combined_df[coverage_col].to_numpy(dtype=float)
-    has_cov      = coverage_arr >= coverage_threshold
-
-    # Compute low_phased flag on-the-fly from raw denominator values.
-    # For each (fit_id, sample), a hap row is "low phased" when
-    # bulk_denom * phasing_threshold > hap1_denom + hap2_denom.
-    is_hap = combined_df["phasing"].isin(["hap1", "hap2"])
-    bulk_denom = (
-        combined_df[combined_df["phasing"] == "bulk"]
-        [["sample", fit_id_col, coverage_col]]
-        .rename(columns={coverage_col: "_bulk_denom"})
-    )
-    hap_denom_sum = (
-        combined_df[is_hap]
-        .groupby(["sample", fit_id_col])[coverage_col]
-        .sum()
-        .reset_index()
-        .rename(columns={coverage_col: "_hap_denom_sum"})
-    )
-    phased_check = bulk_denom.merge(hap_denom_sum, on=["sample", fit_id_col], how="left")
-    phased_check["_low_phased"] = (
-        phased_check["_bulk_denom"].fillna(0) * phasing_threshold
-        > phased_check["_hap_denom_sum"].fillna(0)
-    )
-    lp_map = phased_check.set_index(["sample", fit_id_col])["_low_phased"].to_dict()
-    # Vectorized lookup via tuple key Series
-    _lp_keys = list(zip(combined_df["sample"], combined_df[fit_id_col]))
-    is_low_phased = pd.Series(
-        [lp_map.get(k, False) for k in _lp_keys],
-        index=combined_df.index,
-        dtype=bool,
-    )
-    is_low_phased_hap = is_hap & is_low_phased & has_cov
-
-    p1_vals  = np.full(len(feat_names), np.nan)
-    p99_vals = np.full(len(feat_names), np.nan)
-    for row_i in range(len(mat)):
-        row  = mat[row_i]
-        vals = np.sort(row[~np.isnan(row)])
-        n    = len(vals)
-        if n == 0:
-            continue
-        if n <= 10:
-            p1_vals[row_i]  = vals[0]
-            p99_vals[row_i] = vals[-1]
-        else:
-            k = math.ceil(n * 0.01)
-            p1_vals[row_i]  = vals[k]
-            p99_vals[row_i] = vals[n - 1 - k]
-    p1_series  = pd.Series(p1_vals,  index=feat_names, name=p1_col)
-    p99_series = pd.Series(p99_vals, index=feat_names, name=p99_col)
-    combined_df = combined_df.merge(
-        p1_series.reset_index().rename(columns={"index": fit_id_col}),
-        on=fit_id_col, how="left")
-    combined_df = combined_df.merge(
-        p99_series.reset_index().rename(columns={"index": fit_id_col}),
-        on=fit_id_col, how="left")
-    for pc in (p1_col, p99_col):
-        combined_df[pc] = combined_df[pc].where(combined_df[pc].notna(), other="low_n")
-
-    rescaled_v = pd.to_numeric(combined_df[rescaled_col], errors="coerce")
-    p1_v       = pd.to_numeric(combined_df[p1_col],       errors="coerce")
-    p99_v      = pd.to_numeric(combined_df[p99_col],      errors="coerce")
-    delta_num  = np.where(
-        rescaled_v > p99_v, rescaled_v - p99_v,
-        np.where(rescaled_v < p1_v, rescaled_v - p1_v, 0.0)
-    )
-    delta_v = pd.Series(delta_num, index=combined_df.index).astype(object)
-    delta_v[is_low_n]                    = "low_n"
-    delta_v[is_error]                    = "error"
-    delta_v[is_no_var]                   = "no_variance"
-    delta_v[has_fit & ~has_cov]          = "low_coverage"
-    delta_v[has_fit & is_low_phased_hap] = "low_phased_coverage"
-    combined_df[delta_col] = delta_v
-
-    if method == "beta_binomial":
-        combined_df[p_col] = pd.Series(np.nan, index=combined_df.index, dtype=object)
-        combined_df.loc[is_low_n,                    p_col] = "low_n"
-        combined_df.loc[is_error,                    p_col] = "error"
-        combined_df.loc[has_fit & ~has_cov,          p_col] = "low_coverage"
-        combined_df.loc[has_fit & is_low_phased_hap, p_col] = "low_phased_coverage"
-
-        testable = combined_df[has_fit & has_cov & ~is_low_phased_hap].copy()
-        if len(testable) > 0:
-            orig_index = testable.index
-            tested = beta_binomial_test_chunk(
-                testable.reset_index(drop=True),
-                coverage_threshold, metric_col, usage_col, coverage_col, p_col,
-                threads,
-            )
-            combined_df.loc[orig_index, p_col] = tested[p_col].values
-    else:
-        combined_df[modz_col] = pd.Series(np.nan, index=combined_df.index, dtype=object)
-        combined_df.loc[is_low_n,                    modz_col] = "low_n"
-        combined_df.loc[is_no_var,                    modz_col] = "no_variance"
-        combined_df.loc[has_fit & ~has_cov,          modz_col] = "low_coverage"
-        combined_df.loc[has_fit & is_low_phased_hap, modz_col] = "low_phased_coverage"
-
-        testable = has_fit & has_cov & ~is_low_phased_hap
-        if testable.any():
-            rescaled_v2 = pd.to_numeric(combined_df.loc[testable, rescaled_col], errors="coerce")
-            median_v   = pd.to_numeric(combined_df.loc[testable, median_col],   errors="coerce")
-            mad_v      = pd.to_numeric(combined_df.loc[testable, mad_col],      errors="coerce")
-            modz_v     = _MODZ_CONST * (rescaled_v2 - median_v) / mad_v
-            combined_df.loc[testable, modz_col] = modz_v.astype(object)
-
-    if is_ss_metric:
-        combined_df = combined_df.drop(columns=["_ss_id"])
-
-    return combined_df
-
-
-def run_all_metrics(
-    combined_df:        pd.DataFrame,
-    coverage_threshold: int,
-    phasing_threshold:  float,
-    PSI_rescale_factor: float,
-    n_threshold:        int,
-    threads:            int,
-    has_ipa:            bool,
-    method:             str,
-    no_ss_ir:           bool = False,
-) -> pd.DataFrame:
-    metrics = [
-        ("junction_PSI_approx", "rescaled_junction_PSI_approx", "junction_usage", "junction_coverage_approx", "junction"),
-        ("junction_PSI",        "rescaled_junction_PSI",        "junction_usage", "junction_coverage",        "junction"),
-        ("junction_full_IR_ratio", "rescaled_junction_full_IR_ratio", "junction_full_IR_count", "junction_coverage", "junction"),
-    ]
-    if not no_ss_ir:
-        metrics.insert(2, ("5ss_IR_ratio", "rescaled_5ss_IR_ratio", "5ss_usage", "5ss_coverage", "junction"))
-        metrics.insert(3, ("3ss_IR_ratio", "rescaled_3ss_IR_ratio", "3ss_usage", "3ss_coverage", "junction"))
-    if has_ipa:
-        metrics.append(
-            ("junction_IPA_ratio", "rescaled_junction_IPA_ratio", "junction_IPA_count", "5ss_coverage", "junction")
-        )
-    for metric_col, rescaled_col, usage_col, coverage_col, id_col in metrics:
-        if metric_col not in combined_df.columns:
-            continue
-        combined_df = _run_one_metric(
-            combined_df, metric_col, rescaled_col, usage_col, coverage_col,
-            id_col, coverage_threshold, phasing_threshold, PSI_rescale_factor,
-            n_threshold, threads, method,
-        )
-    return combined_df
-
-
-def run_gene_stats_pipeline(
-    gene:                str,
-    combined:            pd.DataFrame,
-    approx_only:         bool,
-    coverage_threshold:  int,
-    phasing_threshold:   float,
-    PSI_rescale_factor:  float,
-    n_threshold:         int,
-    threads:             int,
-    has_ipa:             bool,
-    no_ss_ir:            bool,
-    method:              str,
-) -> pd.DataFrame:
-    print(f"  Gene: {gene}  Fitting + scoring ({method}) ...")
-    t0 = time.time()
-
-    if approx_only:
-        combined = _run_one_metric(
-            combined, "junction_PSI_approx", "rescaled_junction_PSI_approx",
-            "junction_usage", "junction_coverage_approx", "junction",
-            coverage_threshold, phasing_threshold, PSI_rescale_factor, n_threshold,
-            threads, method,
-        )
-    else:
-        combined = run_all_metrics(combined, coverage_threshold, phasing_threshold,
-                                   PSI_rescale_factor, n_threshold, threads, has_ipa,
-                                   method, no_ss_ir)
-
-    fit_prefix  = "alpha_" if method == "beta_binomial" else "median_"
-    test_prefix = "p_value_" if method == "beta_binomial" else "modz_"
-    not_fittable = ("low_n", "error") if method == "beta_binomial" else ("low_n", "no_variance")
-
-    test_cols_present = [c for c in combined.columns if c.startswith(test_prefix)]
-    n_fit = 0; n_tests = 0
-    bulk_combined = combined[combined["phasing"] == "bulk"]
-    for test_col in test_cols_present:
-        mc    = test_col.replace(test_prefix, "")
-        a_col = f"{fit_prefix}{mc}"
-        if a_col not in combined.columns: continue
-        is_ss = any(x in test_col for x in ("5ss_IR_ratio", "3ss_IR_ratio"))
-        if is_ss:
-            ss_col = "5ss" if "5ss" in test_col else "3ss"
-            if ss_col in bulk_combined.columns:
-                n_fit += int(
-                    bulk_combined[bulk_combined[a_col].apply(
-                        lambda x: x not in not_fittable
-                    )][ss_col].nunique()
-                )
-        else:
-            n_fit += int(
-                bulk_combined[bulk_combined[a_col].apply(
-                    lambda x: x not in not_fittable
-                )]["junction"].nunique()
-            )
-        n_tests += int(pd.to_numeric(combined[test_col], errors="coerce").notna().sum())
-    print(f"       → fit {n_fit:,} distributions and scored {n_tests:,} rows "
-          f"({time.time()-t0:.2f}s)")
-    return combined
-
-
-
-def _per_metric_output_cols(metric_col: str) -> List[str]:
-    return [
-        f"n_{metric_col}",
-        f"alpha_{metric_col}", f"beta_{metric_col}", f"expected_{metric_col}",
-        f"p1_{metric_col}", f"p99_{metric_col}",
-        f"delta_{metric_col}", f"p_value_{metric_col}", f"padj_{metric_col}",
-        f"median_{metric_col}", f"mad_{metric_col}", f"modz_{metric_col}",
-    ]
-
-
-_OUTPUT_COLS = [
-    "sample", "gene", "gene_rank", "region", "phasing", "junction", "5ss", "3ss",
-    "junction_type",
-    "junction_usage",
-    "junction_read_diversity",
-    "junction_coverage_approx",
-    "junction_PSI_approx", "rescaled_junction_PSI_approx",
-    *_per_metric_output_cols("junction_PSI_approx"),
-    "junction_coverage",
-    "junction_PSI", "rescaled_junction_PSI",
-    *_per_metric_output_cols("junction_PSI"),
-    "5ss_usage", "5ss_coverage",
-    "5ss_IR_ratio", "rescaled_5ss_IR_ratio",
-    *_per_metric_output_cols("5ss_IR_ratio"),
-    "3ss_usage", "3ss_coverage",
-    "3ss_IR_ratio", "rescaled_3ss_IR_ratio",
-    *_per_metric_output_cols("3ss_IR_ratio"),
-    "junction_full_IR_count",
-    "junction_full_IR_ratio", "rescaled_junction_full_IR_ratio",
-    *_per_metric_output_cols("junction_full_IR_ratio"),
-    "junction_IPA_count",
-    "junction_IPA_ratio", "rescaled_junction_IPA_ratio",
-    *_per_metric_output_cols("junction_IPA_ratio"),
-]
-
-
-def select_output_columns(df: pd.DataFrame, *_) -> pd.DataFrame:
-    present = [c for c in _OUTPUT_COLS if c in df.columns]
-    return df[present]
-
 
 
 def parse_gtf_junctions(
@@ -759,7 +189,6 @@ def assign_junction_types(
 
     df["junction_type"] = jtype
     return df
-
 
 
 def _classify_events_for_metric(
@@ -1012,7 +441,6 @@ def classify_all_events(
     return sig_df
 
 
-
 _QC_FIGURES = [
     ("junction_coverage_approx", "junction_coverage_approx", ["junction_PSI_approx"]),
     ("junction_coverage",        "junction_coverage",        ["junction_PSI", "junction_full_IR_ratio"]),
@@ -1117,7 +545,7 @@ def make_qc_figure(
     ax0 = axes[0]
     feat_word = "splice sites" if cov_col in _SS_COVERAGE_COLS else "junctions"
     im = ax0.imshow(cov_mat_s, aspect="auto", cmap=cmap, vmin=0, vmax=1, interpolation="nearest")
-    ax0.set_title(f"Proportion of {feat_word} with {cov_col} ≥ {coverage_threshold}", fontsize=8, pad=3)
+    ax0.set_title(f"Proportion of {feat_word} with {cov_col} >= {coverage_threshold}", fontsize=8, pad=3)
     ax0.set_xticks([]); ax0.set_yticks(range(n_g))
     ax0.set_yticklabels(ylabels, fontsize=6)
     fig.colorbar(im, ax=ax0, fraction=0.03, pad=0.01)
@@ -1139,8 +567,7 @@ def make_qc_figure(
     with PdfPages(out_pdf) as pdf:
         pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
-    print(f"  QC figure → {out_pdf} ({time.time()-t_qc_fig:.2f}s)")
-
+    print(f"  QC figure -> {out_pdf} ({time.time()-t_qc_fig:.2f}s)")
 
 
 def make_outlier_heatmap(
@@ -1198,7 +625,7 @@ def make_outlier_heatmap(
     with PdfPages(out_pdf) as pdf:
         pdf.savefig(fig, bbox_inches="tight")
     plt.close(fig)
-    print(f"  Outlier heatmap → {out_pdf} ({time.time()-t_heat:.2f}s)")
+    print(f"  Outlier heatmap -> {out_pdf} ({time.time()-t_heat:.2f}s)")
 
 
 def make_hit_boxplots(
@@ -1313,20 +740,59 @@ def make_hit_boxplots(
                         plt.close(fig)
                     except Exception:
                         pass
-    print(f"  Box plots ({metric_col}, {n_written}/{n_hits}) → {out_pdf} ({time.time()-t_box:.2f}s)")
+    print(f"  Box plots ({metric_col}, {n_written}/{n_hits}) -> {out_pdf} ({time.time()-t_box:.2f}s)")
 
+
+def _per_metric_output_cols(metric_col: str) -> List[str]:
+    return [
+        f"n_{metric_col}",
+        f"alpha_{metric_col}", f"beta_{metric_col}", f"expected_{metric_col}",
+        f"p1_{metric_col}", f"p99_{metric_col}",
+        f"delta_{metric_col}", f"p_value_{metric_col}", f"padj_{metric_col}",
+        f"median_{metric_col}", f"mad_{metric_col}", f"modz_{metric_col}",
+    ]
+
+
+_OUTPUT_COLS = [
+    "sample", "gene", "gene_rank", "region", "phasing", "junction", "5ss", "3ss",
+    "junction_type",
+    "junction_usage",
+    "junction_read_diversity",
+    "junction_coverage_approx",
+    "junction_PSI_approx", "rescaled_junction_PSI_approx",
+    *_per_metric_output_cols("junction_PSI_approx"),
+    "junction_coverage",
+    "junction_PSI", "rescaled_junction_PSI",
+    *_per_metric_output_cols("junction_PSI"),
+    "5ss_usage", "5ss_coverage",
+    "5ss_IR_ratio", "rescaled_5ss_IR_ratio",
+    *_per_metric_output_cols("5ss_IR_ratio"),
+    "3ss_usage", "3ss_coverage",
+    "3ss_IR_ratio", "rescaled_3ss_IR_ratio",
+    *_per_metric_output_cols("3ss_IR_ratio"),
+    "junction_full_IR_count",
+    "junction_full_IR_ratio", "rescaled_junction_full_IR_ratio",
+    *_per_metric_output_cols("junction_full_IR_ratio"),
+    "junction_IPA_count",
+    "junction_IPA_ratio", "rescaled_junction_IPA_ratio",
+    *_per_metric_output_cols("junction_IPA_ratio"),
+]
+
+
+def select_output_columns(df: pd.DataFrame, *_) -> pd.DataFrame:
+    present = [c for c in _OUTPUT_COLS if c in df.columns]
+    return df[present]
 
 
 def main() -> None:
     print("\n" + "*"*80)
-    print("  Cohort Junction Outlier Detection")
+    print("  Cohort Junction Outlier Identification")
     print("*"*80 + "\n")
 
-    args        = parse_args()
-    approx_only = args.approx
+    args = parse_args()
 
     if args.bb_thresholds is not None:
-        method = "beta_binomial"
+        expected_method = "beta_binomial"
         threshold_specs: List = []
         for tok in args.bb_thresholds:
             try:
@@ -1335,10 +801,9 @@ def main() -> None:
             except Exception:
                 raise ValueError(f"Invalid threshold format '{tok}'. Expected padj:delta, e.g. 0.01:0.1")
         if not threshold_specs:
-            print("[INFO] --bb-thresholds given with no values; will compute beta-binomial "
-                  "statistics and write per-gene TSVs / QC figures only (no outlier identification).")
+            print("[INFO] --bb-thresholds given with no values; will apply no outlier thresholds.")
     else:
-        method = "modified_zscore"
+        expected_method = "modified_zscore"
         z_vals = args.z_thresholds if args.z_thresholds else ["3.5:0.1"]
         threshold_specs = []
         for tok in z_vals:
@@ -1348,18 +813,97 @@ def main() -> None:
             except Exception:
                 raise ValueError(f"Invalid threshold format '{tok}'. Expected modZ:delta, e.g. 3.5:0.1")
 
-    print(f"Method: {method}")
-
     alias_map     = parse_alias_map(args.alias_map)
     prefix        = args.outprefix.rstrip("/")
     outdir        = os.path.dirname(os.path.abspath(prefix))
     prefix_name   = os.path.basename(prefix)
-    base_results  = os.path.join(outdir, f"{prefix_name}_results_{method}")
-    qc_dir        = os.path.join(outdir, f"{prefix_name}_qc_{method}")
-    tmp_dir       = os.path.join(outdir, f"{prefix_name}_tmp")
+    approx_only   = args.approx
 
-    def _results_dir():
-        os.makedirs(base_results, exist_ok=True); return base_results
+    # Find results directory written by 8B
+    results_dirs = _glob.glob(os.path.join(outdir, f"{prefix_name}_results_*"))
+    if not results_dirs:
+        raise FileNotFoundError(
+            f"No results directory found matching {prefix_name}_results_* under {outdir}. "
+            "Did fit_and_score_cohort_junctions.py (8B) run successfully?"
+        )
+
+    # Read method from file
+    method = None
+    base_results = None
+    for rd in results_dirs:
+        method_file = os.path.join(rd, "method.txt")
+        if os.path.exists(method_file):
+            with open(method_file) as fh:
+                method = fh.read().strip()
+            base_results = rd
+            break
+
+    if method is None:
+        raise FileNotFoundError(
+            f"Could not find method.txt in any results directory under {outdir}. "
+            "Did fit_and_score_cohort_junctions.py (8B) run successfully?"
+        )
+
+    if method != expected_method:
+        raise ValueError(
+            f"Method mismatch: results directory has method='{method}' but "
+            f"CLI flags indicate method='{expected_method}'. "
+            "Use matching --bb-thresholds / --z-thresholds flags."
+        )
+
+    print(f"Method (from scoring run): {method}")
+
+    # Read computed_metrics
+    metrics_file = os.path.join(base_results, "computed_metrics.txt")
+    if os.path.exists(metrics_file):
+        with open(metrics_file) as fh:
+            computed_metrics = [l.strip() for l in fh if l.strip()]
+    else:
+        computed_metrics = []
+
+    # Read all_scored_results.tsv
+    all_scored_path = os.path.join(base_results, "all_scored_results.tsv")
+    if not os.path.exists(all_scored_path):
+        raise FileNotFoundError(
+            f"Combined scored results not found: {all_scored_path}. "
+            "Did fit_and_score_cohort_junctions.py (8B) run successfully?"
+        )
+
+    print(f"Loading scored results from {all_scored_path} ...")
+    t_load = time.time()
+    final_df = pd.read_csv(all_scored_path, sep="\t", dtype=str)
+    for col in final_df.columns:
+        try:
+            final_df[col] = pd.to_numeric(final_df[col])
+        except (ValueError, TypeError):
+            pass
+    print(f"  Loaded {len(final_df):,} rows ({time.time()-t_load:.2f}s)")
+
+    # If computed_metrics is empty, infer from columns
+    if not computed_metrics:
+        test_prefix = "p_value_" if method == "beta_binomial" else "modz_"
+        computed_metrics = [c.replace(test_prefix, "") for c in final_df.columns
+                            if c.startswith(test_prefix)]
+        print(f"  Inferred computed_metrics from columns: {computed_metrics}")
+
+    # Load BED for strand_map
+    gene_info = load_bed(args.bed)
+    strand_map = {g: info[2] for g, info in gene_info.items()}
+
+    # Load GTF if provided
+    gtf_junctions: Optional[Dict[str, Dict]] = None
+    if args.gtf:
+        gene_names = list(final_df["gene"].unique()) if "gene" in final_df.columns else []
+        print(f"\nParsing GTF for annotated junctions ...")
+        t_gtf = time.time()
+        gtf_junctions = parse_gtf_junctions(args.gtf, gene_names)
+        n_matched = sum(1 for g in gene_names if g in gtf_junctions)
+        print(f"  -> matched {n_matched}/{len(gene_names)} genes ({time.time()-t_gtf:.2f}s)")
+    else:
+        print("[INFO] --gtf not provided; junction_type column will not be added.")
+
+    qc_dir  = os.path.join(outdir, f"{prefix_name}_qc_{method}")
+    tmp_dir = os.path.join(outdir, f"{prefix_name}_tmp")
 
     def _threshold_dir(subdir_name: str) -> str:
         d = os.path.join(outdir, f"{prefix_name}_{subdir_name}")
@@ -1373,50 +917,6 @@ def main() -> None:
         z_threshold, effect_threshold = thr
         return f"z{z_threshold}_delta{effect_threshold}"
 
-    gene_info = load_bed(args.bed)
-    manifest  = load_manifest(args.manifest)
-
-    manifest_valid = [(g, p) for g, p in manifest if p is not None]
-    missing_from_bed = set(g for g, _ in manifest_valid) - set(gene_info)
-    if missing_from_bed:
-        print(f"[WARNING] {len(missing_from_bed)} gene(s) in manifest not in BED, skipping: {sorted(missing_from_bed)}")
-    manifest_valid = [(g, p) for g, p in manifest_valid if g in gene_info]
-
-    if args.test_n_genes is not None:
-        manifest_valid = manifest_valid[:args.test_n_genes]
-        print(f"[INFO] --test-n-genes {args.test_n_genes}: processing first {len(manifest_valid)} gene(s) only.")
-
-    strand_map = {g: info[2] for g, info in gene_info.items()}
-
-    gtf_junctions: Optional[Dict[str, Dict]] = None
-    if args.gtf:
-        print(f"\nParsing GTF for annotated junctions (upfront) ...")
-        t_gtf = time.time()
-        gene_names = [g for g, _ in manifest_valid]
-        gtf_junctions = parse_gtf_junctions(args.gtf, gene_names)
-        n_matched = sum(1 for g in gene_names if g in gtf_junctions)
-        print(f"  → matched {n_matched}/{len(gene_names)} genes ({time.time()-t_gtf:.2f}s)")
-    else:
-        print("[INFO] --gtf not provided; junction_type column will be omitted.")
-
-    n_genes = len(manifest_valid)
-    _metrics = ["PSI_approx"]
-    if not approx_only:
-        _metrics += ["PSI", "full_IR_ratio"]
-        if not args.no_ss_IR:
-            _metrics += ["5ss_IR_ratio", "3ss_IR_ratio"]
-        if args.has_ipa:
-            _metrics.append("IPA_ratio")
-    print(f"\nWill process {n_genes} gene(s)")
-    print(f"Metrics: {', '.join(_metrics)}")
-    print(f"Threads per gene: {args.threads}\n")
-
-    if n_genes == 0:
-        print("[WARNING] Manifest has no genes with results -- this group's cohort_junction_analysis "
-              "run either skipped entirely (see that rule's --note output) or every gene failed.")
-
-    def _write_tsv(df, path): df.to_csv(path, sep="\t", index=False)
-
     def _empty_outlier_outputs(reason: str) -> None:
         print(f"\n[WARNING] {reason}")
         empty_cols = _OUTPUT_COLS + ["event_type"]
@@ -1428,133 +928,10 @@ def main() -> None:
             empty_df.to_csv(os.path.join(thr_dir, f"{prefix_name}_outliers_alias.tsv"), sep="\t", index=False)
         print("  Wrote empty outlier file(s) so downstream outputs still exist.")
 
-    if n_genes == 0:
-        _empty_outlier_outputs("No genes to process.")
+    if final_df.empty or not computed_metrics:
+        _empty_outlier_outputs("Scored results are empty or no metrics were computed.")
         print("\nDone (nothing to do).")
         return
-
-    def _finalize_results(
-        all_results: List[pd.DataFrame],
-        computed_metrics: List[str],
-    ) -> Optional[pd.DataFrame]:
-        if not all_results: return None
-
-        total_rows = sum(len(r) for r in all_results)
-        print(f"\n{'=' * 70}")
-        if method == "beta_binomial":
-            print("  Correcting p-values and identifying outliers...")
-        else:
-            print("  Assembling cohort-wide results...")
-        print(f"{'=' * 70}")
-        t_fdr = time.time()
-
-        final_df = pd.concat(all_results, ignore_index=True)
-        final_df = final_df.sort_values(
-            ["gene", "junction", "sample", "phasing"], ignore_index=True
-        )
-
-        if gtf_junctions is not None:
-            final_df = assign_junction_types(final_df, gtf_junctions)
-
-        fmt_df = final_df.copy()
-
-        if method == "beta_binomial":
-            print(f"\n  Applying FDR-BH ({total_rows:,} rows across {len(computed_metrics)} metric(s)) ...")
-            for mc in computed_metrics:
-                p_col    = f"p_value_{mc}"
-                padj_col = f"padj_{mc}"
-                if p_col not in fmt_df.columns: continue
-                p_vals = pd.to_numeric(fmt_df[p_col], errors="coerce")
-                is_ss  = mc in ("5ss_IR_ratio", "3ss_IR_ratio")
-                if is_ss:
-                    ss_pos_col = "5ss" if "5ss" in mc else "3ss"
-                    dedup_key = list(zip(fmt_df["sample"], fmt_df["gene"],
-                                         fmt_df["phasing"], fmt_df[ss_pos_col]))
-                    seen: Dict[tuple, int] = {}
-                    dedup_idx = []
-                    for i, k in enumerate(dedup_key):
-                        if k not in seen:
-                            seen[k] = i; dedup_idx.append(i)
-                    dedup_p = p_vals.iloc[dedup_idx]
-                    valid_mask = dedup_p.notna()
-                    padj_dedup = np.full(len(dedup_p), np.nan)
-                    if valid_mask.sum() > 0:
-                        _, pv, _, _ = multipletests(dedup_p[valid_mask].to_numpy(), method="fdr_bh")
-                        padj_dedup[valid_mask.to_numpy()] = pv
-                    key_to_padj = {k: padj_dedup[j] for j, k in enumerate(
-                        [dedup_key[i] for i in dedup_idx])}
-                    p_str = fmt_df[p_col]
-                    fmt_df[padj_col] = [
-                        key_to_padj.get(k, p_str.iloc[i])
-                        for i, k in enumerate(dedup_key)
-                    ]
-                else:
-                    p_str  = fmt_df[p_col]
-                    valid  = p_vals.notna()
-                    padj_vals = p_str.copy().astype(object)
-                    padj_arr  = np.full(valid.sum(), np.nan)
-                    if valid.sum() > 0:
-                        _, pv, _, _ = multipletests(p_vals[valid].to_numpy(), method="fdr_bh")
-                        padj_arr = pv
-                    padj_vals[valid] = padj_arr
-                    is_sentinel = ~valid & p_str.notna()
-                    padj_vals[is_sentinel] = p_str[is_sentinel]
-                    fmt_df[padj_col] = padj_vals
-
-        fmt_df = select_output_columns(fmt_df)
-        print(f"       Done ({time.time()-t_fdr:.2f}s)")
-        return fmt_df
-
-    results_subdir = _results_dir()
-    all_results: List[pd.DataFrame] = []
-
-    for gene, path in manifest_valid:
-        t_gene = time.time()
-        try:
-            combined = load_gene_raw_metrics(path)
-            res = run_gene_stats_pipeline(
-                gene, combined, approx_only,
-                args.coverage_threshold, args.phasing_threshold,
-                args.PSI_rescale_factor, args.n_threshold,
-                args.threads, args.has_ipa, args.no_ss_IR, method,
-            )
-        except Exception as e:
-            print(f"[ERROR] Gene {gene}: {e}"); traceback.print_exc()
-            res = None
-        if res is not None and len(res):
-            all_results.append(res)
-        print(f"  {gene} complete ({time.time() - t_gene:.0f}s)")
-
-    if not all_results:
-        _empty_outlier_outputs("No gene produced usable results (every gene errored, or "
-                                "produced empty output, during statistical testing).")
-        print("\nDone (nothing to do).")
-        return
-
-    sample_df   = all_results[0]
-    test_prefix = "p_value_" if method == "beta_binomial" else "modz_"
-    computed_metrics = [c.replace(test_prefix, "") for c in sample_df.columns
-                        if c.startswith(test_prefix)]
-
-    final_df = _finalize_results(all_results, computed_metrics)
-    if final_df is None:
-        _empty_outlier_outputs("Result assembly produced no rows.")
-        print("\nDone (nothing to do).")
-        return
-
-    fmt_base = select_output_columns(final_df)
-    n_genes_write = fmt_base["gene"].nunique()
-    print(f"  Writing {n_genes_write} per-gene results files ...")
-    t_w = time.time()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as ex:
-        futs = [
-            ex.submit(_write_tsv, gdf,
-                      os.path.join(results_subdir, f"{g}.tsv"))
-            for g, gdf in fmt_base.groupby("gene")
-        ]
-        for fut in concurrent.futures.as_completed(futs):
-            fut.result()
-    print(f"       File writes done ({time.time()-t_w:.2f}s)")
 
     _IR_IPA_METRICS = frozenset((
         "5ss_IR_ratio", "3ss_IR_ratio", "junction_full_IR_ratio", "junction_IPA_ratio"
@@ -1728,9 +1105,9 @@ def main() -> None:
                     can_ann = sig_df["junction_type"].isin(["canonical", "annotated"])
                     n_can   = int(sig_df[pos_mask & can_ann]["junction"].nunique())
                     ss_can  = f", {int(sig_df[pos_mask & can_ann][ss_col].nunique())} unique {ss_lbl}" if ss_col else ""
-                    print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions{ss_total} → {n_pos} unique junctions{ss_pos} with {stat_label} > 0 → {n_can} unique junctions{ss_can} canonical or annotated)")
+                    print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions{ss_total} -> {n_pos} unique junctions{ss_pos} with {stat_label} > 0 -> {n_can} unique junctions{ss_can} canonical or annotated)")
                 else:
-                    print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions{ss_total} → {n_pos} unique junctions{ss_pos} with {stat_label} > 0)")
+                    print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions{ss_total} -> {n_pos} unique junctions{ss_pos} with {stat_label} > 0)")
             elif ss_col:
                 n_ss = int(sig_df[mask_mc][ss_col].nunique())
                 print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions, {n_ss} unique {ss_lbl})")
@@ -1865,13 +1242,13 @@ def main() -> None:
             t0 = time.time()
             out = os.path.join(thr_dir, f"{prefix_name}_outliers.tsv")
             data.to_csv(out, sep="\t", index=False)
-            print(f"  Outliers → {out} ({time.time()-t0:.2f}s)")
+            print(f"  Outliers -> {out} ({time.time()-t0:.2f}s)")
 
         def _write_outliers_filtered(data=_outliers_filt_data):
             t0 = time.time()
             out_filt = os.path.join(thr_dir, f"{prefix_name}_outliers_filtered.tsv")
             data.to_csv(out_filt, sep="\t", index=False)
-            print(f"  Outliers (filtered) → {out_filt} ({time.time()-t0:.2f}s)")
+            print(f"  Outliers (filtered) -> {out_filt} ({time.time()-t0:.2f}s)")
 
         def _write_outliers_alias(data=_outliers_data):
             t0 = time.time()
@@ -1880,8 +1257,7 @@ def main() -> None:
             if "sample" in alias_data.columns:
                 alias_data["sample"] = alias_data["sample"].apply(lambda s: resolve(s, alias_map))
             alias_data.to_csv(out_alias, sep="\t", index=False)
-            print(f"  Outliers (alias) → {out_alias} ({time.time()-t0:.2f}s)")
-
+            print(f"  Outliers (alias) -> {out_alias} ({time.time()-t0:.2f}s)")
 
         outlier_map: Dict[str, Dict[str, Dict[str, set]]] = {}
         for mc in computed_metrics:
@@ -1985,7 +1361,7 @@ def main() -> None:
                 header = f"  {'Sample':<40}" + "".join(f"{h:>{col_w}}" for h in header_metrics)
                 sep    = f"  {'-'*40}" + ("-"*col_w) * len(header_metrics)
                 print("\n" + "="*len(sep.rstrip()))
-                print(f"  Outlier summary — {thr_desc}")
+                print(f"  Outlier summary -- {thr_desc}")
                 print(f"  (samples ranked by total genes with outlier)")
                 print("="*len(sep.rstrip()))
                 print(header); print(sep)
@@ -2001,9 +1377,8 @@ def main() -> None:
 
         print(f"\n  Finished threshold: {thr_desc} ({time.time()-t_thr:.2f}s)")
 
-
     if args.gtf and gtf_junctions is not None:
-        gene_names = [g for g, _ in manifest_valid]
+        gene_names = list(final_df["gene"].unique()) if "gene" in final_df.columns else []
         print(f"\n{'='*56}")
         print(f"  QC")
         print(f"{'='*56}")
@@ -2018,10 +1393,8 @@ def main() -> None:
             else:
                 print(f"  {g:<20} {'NOT FOUND':>16} {'NOT FOUND':>16}")
 
-        results_subdir = _results_dir()
-
         os.makedirs(qc_dir, exist_ok=True)
-        bulk_df = final_df[final_df["phasing"] == "bulk"]
+        bulk_df = final_df[final_df["phasing"] == "bulk"] if "phasing" in final_df.columns else final_df
 
         fit_prefix   = "alpha_" if method == "beta_binomial" else "median_"
         not_fittable = ("low_n", "error") if method == "beta_binomial" else ("low_n", "no_variance")
@@ -2030,7 +1403,7 @@ def main() -> None:
         for cov_col, file_suffix, bar_metrics in _QC_FIGURES:
             if approx_only and cov_col != "junction_coverage_approx":
                 continue
-            if args.no_ss_IR and cov_col in ("5ss_coverage", "3ss_coverage"):
+            if hasattr(args, 'no_ss_IR') and args.no_ss_IR and cov_col in ("5ss_coverage", "3ss_coverage"):
                 continue
             companions = [m for m in bar_metrics
                           if args.has_ipa or m != "junction_IPA_ratio"]
@@ -2056,12 +1429,12 @@ def main() -> None:
                 qc_jobs.append(_qc_job)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as ex:
-                futs = [ex.submit(fn) for fn in qc_jobs]
-                for fut in concurrent.futures.as_completed(futs):
-                    try:
-                        fut.result()
-                    except Exception as e:
-                        print(f"[WARNING] QC figure failed: {e}"); traceback.print_exc()
+            futs = [ex.submit(fn) for fn in qc_jobs]
+            for fut in concurrent.futures.as_completed(futs):
+                try:
+                    fut.result()
+                except Exception as e:
+                    print(f"[WARNING] QC figure failed: {e}"); traceback.print_exc()
 
         print(f"\n  Finished QC ({time.time()-t_qc:.2f}s)")
 

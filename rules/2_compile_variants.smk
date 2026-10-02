@@ -125,7 +125,7 @@ rule _2B_filter_variants:
         conda_env_compile_variants = config["conda_env_compile_variants"],
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: max(2048, attempt * 4 * 1024),
+        mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
         runtime = config["time"],
     log:
         "{outdir}/../logs/{sample}_filter_variants.log"

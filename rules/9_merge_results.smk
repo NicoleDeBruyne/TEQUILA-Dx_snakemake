@@ -206,7 +206,7 @@ rule _9D1_merge_group_hits_preliminary:
         script       = workflow.basedir + "/scripts/merge_group_hits.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: max(4096, attempt * 4 * 1024),
+        mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_hits_preliminary_{filter_set}.log"
@@ -267,7 +267,7 @@ rule _9D2_merge_group_hits_with_cohort_junctions:
         script       = workflow.basedir + "/scripts/merge_group_hits.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: max(4096, attempt * 4 * 1024),
+        mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_hits_{filter_set}.log"
@@ -309,7 +309,7 @@ rule _9E_plot_group_hits:
         script = workflow.basedir + "/scripts/plot_candidate_hits.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: max(4096, attempt * 4 * 1024),
+        mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
         runtime = 60,
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/plot_group_hits_{filter_set}.log"
@@ -378,7 +378,7 @@ rule _9F_plot_hits_upset:
         script       = workflow.basedir + "/scripts/plot_hits_upset.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: max(4096, attempt * 1024 * 2),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
         runtime = 60,
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_hits_upset_{filter_set}.log"
@@ -666,7 +666,7 @@ rule _9K2_gene_count_zscore_report:
         script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: max(2048, attempt * 2 * 1024),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
         runtime = 30,
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_count_zscore_report.log"
@@ -749,7 +749,7 @@ rule _9L2_gene_coverage_zscore_report:
         script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: max(2048, attempt * 2 * 1024),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
         runtime = 30,
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_coverage_zscore_report.log"
@@ -837,7 +837,7 @@ rule _9M2_gene_assignment_zscore_report:
         script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: max(2048, attempt * 2 * 1024),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
         runtime = 30,
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/gene_assignment_zscore_report.log"
@@ -997,7 +997,7 @@ rule _9N4_amalgam_quantify_transcripts:
         amalgam_dir = config["amalgam_dir"],
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 16,
         runtime = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/{sample}_amalgam_quantify_transcripts.log"
@@ -1118,7 +1118,7 @@ rule _9N7_amalgam_zscore_report:
         script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
     threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: max(2048, attempt * 2 * 1024),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
         runtime = 30,
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/amalgam_zscore_report.log"
@@ -1136,4 +1136,67 @@ rule _9N7_amalgam_zscore_report:
             --title         {params.motr_title:q} \\
             --outprefix     {params.motr_outprefix} \\
         2>&1 | tee -a {log}
+        """
+
+
+# Per-junction metric distribution plots across the cohort.
+# For each (metric × junction) hit in merged_all_hits.tsv, produces one PDF with a boxplot
+# per sample_type. Metric values come from 8A raw TSVs (cohort metrics) and from the per-sample
+# GTEx all_junctions.tsv files (junction_PSI_approx GTEx hits).
+# Runs once per {filter_set} at the bed level.
+def _bed_cohort_manifest_args(cohort_id, bed_id):
+    """Return 'sample_type:manifest_path' pairs for --cohort-manifests."""
+    pairs = []
+    for gid in BED_GROUPS[(cohort_id, bed_id)]:
+        st = GROUP_SAMPLE_TYPE[gid]
+        manifest = (config["output_dir"] + "/" + str(cohort_id) + "/" + str(bed_id)
+                    + "/output/sample_types/" + str(st)
+                    + "/output/cohort_junction_analysis/" + str(bed_id) + "_" + str(st) + "_gene_manifest.tsv")
+        pairs.append(str(st) + ':' + manifest)
+    return pairs
+
+def _bed_cja_manifests(cohort_id, bed_id):
+    """Return manifest file paths for all groups in the bed (input dependency)."""
+    files = []
+    for gid in BED_GROUPS[(cohort_id, bed_id)]:
+        st = GROUP_SAMPLE_TYPE[gid]
+        files.append(config["output_dir"] + "/" + str(cohort_id) + "/" + str(bed_id)
+                     + "/output/sample_types/" + str(st)
+                     + "/output/cohort_junction_analysis/" + str(bed_id) + "_" + str(st) + "_gene_manifest.tsv")
+    return files
+
+
+rule _9O_plot_junction_distributions:
+    input:
+        merged_hits   = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits.tsv",
+        cja_manifests = lambda wc: _bed_cja_manifests(wc.cohort_id, wc.bed_id),
+    output:
+        sentinel = _cohort_outdir + "/{bed_id}/output/{filter_set}/junction_distributions.done",
+    params:
+        outdir           = _cohort_outdir + "/{bed_id}/output/{filter_set}",
+        cohort_manifests = lambda wc: _quoted(_bed_cohort_manifest_args(wc.cohort_id, wc.bed_id)),
+        samples          = lambda wc: bed_samples(wc.cohort_id, wc.bed_id),
+        sample_types     = lambda wc: [SAMPLES[s]["sample_type"] for s in bed_samples(wc.cohort_id, wc.bed_id)],
+        cov_thr          = config["sample_coverage_threshold"],
+        script           = workflow.basedir + "/scripts/plot_junction_distributions.py",
+    threads: lambda wc: _group_threads(str(wc.cohort_id) + "_" + str(wc.bed_id), "plot_junction_distributions", 1)
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(bed_samples(wc.cohort_id, wc.bed_id)) // 4),
+        runtime = config["time"],
+    log:
+        _cohort_outdir + "/{bed_id}/logs/{bed_id}_junction_distributions_{filter_set}.log"
+    shell:
+        """
+        mkdir -p {params.outdir} $(dirname {log})
+
+        python -u {params.script} \\
+            --hits-tsv           {input.merged_hits} \\
+            --outdir             {params.outdir} \\
+            --filter-set         {wildcards.filter_set} \\
+            --cohort-manifests   {params.cohort_manifests} \\
+            --samples            {params.samples} \\
+            --sample-types       {params.sample_types} \\
+            --coverage-threshold {params.cov_thr} \\
+            --sentinel           {output.sentinel} \\
+        2>&1 | tee {log}
         """

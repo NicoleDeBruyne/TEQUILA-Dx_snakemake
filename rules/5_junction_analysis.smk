@@ -164,7 +164,7 @@ rule _5D_identify_junction_outliers:
         script     = workflow.basedir + "/scripts/identify_splice_junction_outliers.py",
     threads: 1
     resources:
-        mem_mb     = lambda wc, attempt: max(4096, attempt * 4 * 1024),
+        mem_mb     = lambda wc, attempt: attempt * 4 * 1024,
         runtime    = config["time"],
     log:
         "{outdir}/../logs/{sample}_{tissue}_jxn_outliers.log"

@@ -15,7 +15,7 @@ rule _4A_detect_ase_outliers:
         script         = workflow.basedir + "/scripts/detect_ase_outliers.py",
     threads: 1
     resources:
-        mem_mb     = lambda wc, attempt: max(4096, attempt * 4 * 1024),
+        mem_mb     = lambda wc, attempt: attempt * 4 * 1024,
         runtime    = config["time"],
     log:
         "{outdir}/../logs/{sample}_ase_outliers.log"
