@@ -492,6 +492,27 @@ def run_pca(ref_psi: dict,
     plt.close(fig)
     print(f"  Saved: {path}")
 
+    # Per-point coordinates table (read by the per-sample final report to redraw this PCA with
+    # one sample highlighted). Reference points carry the GTEx sample ID; query points carry
+    # the cohort sample name.
+    from matplotlib.colors import to_hex
+    n_pc = min(3, coords.shape[1])
+    group_of = np.empty(len(combined.index), dtype=object)
+    kind_of  = np.empty(len(combined.index), dtype=object)
+    color_of = np.empty(len(combined.index), dtype=object)
+    for name, idx in ref_idx.items():
+        group_of[idx], kind_of[idx], color_of[idx] = name, "reference", to_hex(tissue_pal[name])
+    for name, idx in query_idx.items():
+        group_of[idx], kind_of[idx], color_of[idx] = name, "query", to_hex(query_pal[name])
+    coord_df = pd.DataFrame({"sample": combined.index, "group": group_of,
+                             "kind": kind_of, "color": color_of})
+    for i in range(n_pc):
+        coord_df[f"PC{i+1}"] = coords[:, i]
+        coord_df[f"PC{i+1}_var_pct"] = var_exp[i]
+    coord_path = f"{outprefix}_PCA_coords.tsv"
+    coord_df.to_csv(coord_path, sep="\t", index=False)
+    print(f"  Saved: {coord_path}")
+
     return pd.DataFrame(
         coords[:, :min(5, coords.shape[1])],
         index=combined.index,

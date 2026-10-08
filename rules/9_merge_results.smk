@@ -178,6 +178,7 @@ rule _9C2_validate_sample_types:
     output:
         heatmap = _cohort_outdir + "/{bed_id}/output/cohort_qc/validate_sample_types/{bed_id}_distance_heatmap.pdf",
         pca     = _cohort_outdir + "/{bed_id}/output/cohort_qc/validate_sample_types/{bed_id}_PCA.pdf",
+        pca_coords = _cohort_outdir + "/{bed_id}/output/cohort_qc/validate_sample_types/{bed_id}_PCA_coords.tsv",
         heatmap_alias = _cohort_outdir + "/{bed_id}/output/cohort_qc/validate_sample_types/{bed_id}_distance_heatmap_alias.pdf",
     params:
         outprefix    = lambda wc: (str(bed_outdir(wc.cohort_id, wc.bed_id)) + '/cohort_qc/validate_sample_types/' + str(wc.bed_id)),
@@ -1231,14 +1232,20 @@ def _bed_cja_manifests(cohort_id, bed_id):
     return files
 
 
-# One IGV-style PDF per sample for its candidate genes (default hit set only;
-# stringent is a subset): gene body (bulk, hap1, hap2), variant zooms, outlier splicing events
-# with sashimi arcs, and cohort metric distributions.
+# One final-report PDF per sample (default hit set only; stringent is a subset): a QC page
+# (read counts, sample-type PCA, read lengths, full-length ratio and junction testability vs the
+# same sample type and the whole cohort), then IGV-style pages for its candidate genes: gene body
+# (bulk, hap1, hap2), variant zooms, outlier splicing events with sashimi arcs, and cohort metric
+# distributions.
+def _cohort_qc_file(wc, rel):
+    return str(bed_outdir(wc.cohort_id, wc.bed_id)) + "/cohort_qc/" + rel.format(b=wc.bed_id)
+
+
 def _sample_gene_bam_mapping(sample):
     return str(SAMPLES[sample]['outdir']) + '/phased_reads/' + str(sample) + '_gene_bam_mapping_file.tsv'
 
 
-rule _9O_sample_hit_report:
+rule _9O_sample_final_report:
     input:
         merged_hits   = _cohort_outdir + "/{bed_id}/output/default/merged_all_hits.tsv",
         bam           = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -1246,27 +1253,43 @@ rule _9O_sample_hit_report:
         bed           = lambda wc: bed_path(wc.cohort_id, wc.bed_id),
         gtf           = config["annotation"],
         cja_manifests = lambda wc: _bed_cja_manifests(wc.cohort_id, wc.bed_id) if flag("cohort_junction_analysis") else [],
+        # QC page inputs (cohort QC rules _9A, _9B, _9E, _9C2); the page is skipped if qc is off
+        on_target     = lambda wc: (_cohort_qc_file(wc, "on_target_rates/{b}_on_target_rates.tsv") if flag("qc") else []),
+        read_attrs    = lambda wc: (_cohort_qc_file(wc, "read_attributes/{b}_read_attributes.tsv") if flag("qc") else []),
+        flr_matrix    = lambda wc: (_cohort_qc_file(wc, "full_length_ratio/{b}_full_length_ratio_matrix.tsv") if flag("qc") else []),
+        pca_coords    = lambda wc: (_cohort_qc_file(wc, "validate_sample_types/{b}_PCA_coords.tsv") if flag("qc") else []),
+        # AMALGAM transcript counts per sample type, to choose each gene's representative sample
+        amalgam       = lambda wc: [_amalgam_group_dir(wc.cohort_id, wc.bed_id, GROUP_SAMPLE_TYPE[gid]) + "/transcript_amalgam_matrix_raw.tsv"
+                                    for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]] if flag("gene_quantification") else [],
     output:
-        pdf = _cohort_outdir + "/{bed_id}/output/default/hit_reports/{sample}_hit_report.pdf",
+        pdf = _cohort_outdir + "/{bed_id}/output/default/final_reports/{sample}_report.pdf",
     params:
         genome           = config["genome"],
         mapping_arg      = lambda wc, input: ("--gene-bam-mapping " + str(input.mapping)) if input.mapping else "",
+        qc_args          = lambda wc, input: " ".join(
+            f"{opt} {val}" for opt, val in (("--on-target-tsv", input.on_target),
+                                            ("--read-attributes-tsv", input.read_attrs),
+                                            ("--flr-matrix", input.flr_matrix),
+                                            ("--pca-coords", input.pca_coords)) if val),
         cohort_manifests = lambda wc: _quoted(_bed_cohort_manifest_args(wc.cohort_id, wc.bed_id)) if flag("cohort_junction_analysis") else [],
         samples          = lambda wc: bed_samples(wc.cohort_id, wc.bed_id),
         sample_types     = lambda wc: [SAMPLES[s]["sample_type"] for s in bed_samples(wc.cohort_id, wc.bed_id)],
         colors           = lambda wc: _quoted([sample_type_color(SAMPLES[s]["sample_type"]) for s in bed_samples(wc.cohort_id, wc.bed_id)]),
+        sample_bams      = lambda wc: _quoted([SAMPLES[s]["bam"] for s in bed_samples(wc.cohort_id, wc.bed_id)]),
+        amalgam_args     = lambda wc: (("--amalgam-matrices " + " ".join(_quoted(
+            [GROUP_SAMPLE_TYPE[gid] + ":" + _amalgam_group_dir(wc.cohort_id, wc.bed_id, GROUP_SAMPLE_TYPE[gid]) + "/transcript_amalgam_matrix_raw.tsv"
+             for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]]))) if flag("gene_quantification") else ""),
         cov_thr          = config["sample_coverage_threshold"],
         top_n            = config.get("hit_report_top_n", 0),
         max_tier         = config.get("hit_report_max_tier", 5),
         max_reads        = config.get("hit_report_max_reads", 500),
-        alias_args       = lambda wc: _quoted(alias_map_args([wc.sample])),
         script           = workflow.basedir + "/scripts/make_sample_hit_report.py",
     threads: 1
     resources:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
-        _cohort_outdir + "/{bed_id}/logs/hit_reports/{sample}_hit_report.log"
+        _cohort_outdir + "/{bed_id}/logs/final_reports/{sample}_report.log"
     shell:
         """
         mkdir -p $(dirname {output.pdf}) $(dirname {log})
@@ -1275,6 +1298,7 @@ rule _9O_sample_hit_report:
             --hits-tsv           {input.merged_hits} \\
             --bam                {input.bam} \\
             {params.mapping_arg} \\
+            {params.qc_args} \\
             --bed                {input.bed} \\
             --gtf                {input.gtf} \\
             --genome             {params.genome} \\
@@ -1282,11 +1306,12 @@ rule _9O_sample_hit_report:
             --samples            {params.samples} \\
             --sample-types       {params.sample_types} \\
             --colors             {params.colors} \\
+            --sample-bams        {params.sample_bams} \\
+            {params.amalgam_args} \\
             --coverage-threshold {params.cov_thr} \\
             --top-n              {params.top_n} \\
             --max-tier           {params.max_tier} \\
             --max-reads          {params.max_reads} \\
-            --alias-map          {params.alias_args} \\
             --outfile            {output.pdf} \\
         2>&1 | tee {log}
         """

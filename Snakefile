@@ -315,10 +315,10 @@ def all_outputs():
                 outs.append((str(bod) + '/' + str(fs) + '/merged_all_hits_simplified.tsv'))
                 if bed_has_alias(cid, bid):
                     outs.append((str(bod) + '/' + str(fs) + '/merged_all_hits_simplified_alias.tsv'))
-            # Per-sample IGV-style hit reports, default hit set only
+            # Per-sample final reports (QC page + IGV-style hit pages), default hit set only
             if flag("hit_reports"):
                 for s in bed_samples(cid, bid):
-                    outs.append((str(bod) + '/default/hit_reports/' + str(s) + '_hit_report.pdf'))
+                    outs.append((str(bod) + '/default/final_reports/' + str(s) + '_report.pdf'))
         for gid in GROUPS:
             god = group_outdir(gid)
             for fs in _jxn_filter_sets:

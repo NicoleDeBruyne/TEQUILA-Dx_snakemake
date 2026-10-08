@@ -13,7 +13,7 @@ cohort_junction_analysis: true
 merge_results: true
 qc: true
 gene_quantification: true
-hit_reports: true           # per-sample IGV-style PDF of candidate genes (rule _9O)
+hit_reports: true           # per-sample final report PDF: QC page + IGV-style candidate-gene pages (rule _9O)
 
 # Path to envs created by setup.sh
 conda_env: "envs/conda_env"
@@ -187,7 +187,7 @@ omim_file: "resources/omim_data/OMIM.tsv"
 threads: 8    # 8 threads for multi-threaded jobs (some jobs are single-threaded)
 time: 1440    # 24 hours
 
-# --- Per-sample hit reports (_9O_sample_hit_report) ---
+# --- Per-sample final reports (_9O_sample_final_report) ---
 hit_report_top_n: 0          # top-ranked hit genes per sample; 0 = every hit
 hit_report_max_tier: 5       # leave out genes with a higher (weaker) tier
 hit_report_max_reads: 500    # reads drawn per alignment track (coverage always uses all reads)
