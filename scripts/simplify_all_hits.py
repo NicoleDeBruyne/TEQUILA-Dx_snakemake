@@ -3,6 +3,7 @@ import re
 
 import pandas as pd
 
+from hits_io import read_hit_rows
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve
 
 _KEPT_COLUMNS = [
@@ -40,9 +41,12 @@ def _split_jxns(cell):
 
 def main():
     args = parse_args()
-    df = pd.read_csv(args.infile, sep='\t', dtype=str)
+    # Hits only: rows with hit == FALSE (genes tested but with no hit) stay in merged_all_hits.tsv
+    df = read_hit_rows(args.infile, sep='\t', dtype=str)
 
-    jxn_cols = [c for c in df.columns if c.endswith('_jxns')]
+    # Junction-ID columns only ({,cohort_}{bulk,hap1,hap2}_jxns) -- not the n_canonical_jxns*
+    # count columns, which also end in '_jxns'
+    jxn_cols = [c for c in df.columns if c.endswith('_jxns') and not c.startswith('n_')]
     if not jxn_cols:
         raise ValueError(f"No *_jxns columns found in {args.infile} -- can't build a merged jxns column.")
     print(f"Merging and deduplicating {len(jxn_cols)} junction column(s): {', '.join(jxn_cols)}")

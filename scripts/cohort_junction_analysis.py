@@ -133,13 +133,39 @@ def collect_read_data(
     strand: str = "+",
     genome_seq: Optional[str] = None,
     gene_region_start: int = 0,
+    keep_reads: bool = True,
 ) -> Tuple[Dict[Tuple[int, int], int], int,
            List[Tuple[List[Tuple[int, int]], List[int], Optional[Tuple]]],
            ]:
+    """One pass over the gene region. Returns junction read counts, the number of counted reads
+    and, if keep_reads, every read as (blocks, junctions, soft-clip info). With keep_reads=False
+    the reads are not stored (the counts are identical), which is all junction discovery and
+    PSI_approx need."""
+    reads: List = []
+    counts: Dict[str, object] = {}
+    for read in iter_read_data(bam_path, region, include_monoexonic, collect_softclips, strand,
+                               genome_seq, gene_region_start, counts):
+        if keep_reads:
+            reads.append(read)
+    return counts["jxn_raw"], counts["gene_cov"], reads
+
+
+def iter_read_data(
+    bam_path: str,
+    region: str,
+    include_monoexonic: bool = False,
+    collect_softclips: bool = False,
+    strand: str = "+",
+    genome_seq: Optional[str] = None,
+    gene_region_start: int = 0,
+    counts: Optional[Dict[str, object]] = None,
+):
+    """Yield (blocks, junctions, soft-clip info) for every counted read of the region, in fetch
+    order. Once exhausted, `counts` holds "jxn_raw" (junction read counts) and "gene_cov"."""
+    counts = {} if counts is None else counts
     chrom_r, region_start, region_end = _parse_region(region)
     jxn_raw:  Dict[Tuple[int, int], int] = defaultdict(int)
     gene_cov  = 0
-    reads:    List = []
 
     with pysam.AlignmentFile(bam_path, "rb") as bam:
         for aln in bam.fetch(region=region):
@@ -179,7 +205,7 @@ def collect_read_data(
                 if not include_monoexonic:
                     gene_cov -= 1
                     continue
-                reads.append((blocks, [], None))
+                yield (blocks, [], None)
                 continue
 
             sc_tuple = None
@@ -204,9 +230,143 @@ def collect_read_data(
                         lead = True
                     sc_tuple = (sc, g, pos3, lead)
 
-            reads.append((blocks, read_jxns, sc_tuple))
+            yield (blocks, read_jxns, sc_tuple)
 
-    return jxn_raw, gene_cov, reads
+    counts["jxn_raw"] = jxn_raw
+    counts["gene_cov"] = gene_cov
+
+
+class CoverageAccumulator:
+    """Per-junction splice-site coverage, IR and IPA counts, accumulated in batches of reads so the
+    reads never all have to be held in memory. Gives exactly the counts the earlier all-reads
+    version gave: for every block only the junctions whose splice sites can satisfy that block's
+    conditions are looked up (binary search on sorted ss1 / ss2) instead of testing every junction
+    of the gene, the (read, junction) hits are de-duplicated so each junction is counted at most
+    once per read, and the whole batch is processed with numpy at once."""
+
+    BATCH = 4096
+
+    def __init__(self, jxn_coords_for_cov, strand, alu, chrom):
+        self.jxn_coords = list(jxn_coords_for_cov)
+        n = self.n = len(self.jxn_coords)
+        self.strand, self.alu, self.chrom = strand, alu, chrom
+        self.ss1 = np.array([a for a, b in self.jxn_coords], dtype=np.int64)
+        self.ss2 = np.array([b for a, b in self.jxn_coords], dtype=np.int64)
+        self.o1 = np.argsort(self.ss1, kind="stable"); self.s1 = self.ss1[self.o1]
+        self.o2 = np.argsort(self.ss2, kind="stable"); self.s2 = self.ss2[self.o2]
+        self.five_ss_arr = self.ss1 if strand == "+" else self.ss2
+        z = lambda: np.zeros(n, dtype=np.int64)
+        self.ss1_cov, self.ss2_cov, self.jxn_cov = z(), z(), z()
+        self.ss1_ir, self.ss2_ir, self.full_ir, self.ipa = z(), z(), z(), z()
+        self._buf: List = []
+
+    def add(self, blocks, splice_jxns, sc_tuple):
+        if self.n == 0 or not blocks:
+            return
+        self._buf.append((blocks, splice_jxns, sc_tuple))
+        if len(self._buf) >= self.BATCH:
+            self._flush()
+
+    @staticmethod
+    def _pairs(order, sorted_vals, lo_vals, hi_vals):
+        """For each query i, every junction index j with lo_i <= value_j <= hi_i, as (i, j) arrays."""
+        lo = np.searchsorted(sorted_vals, lo_vals, side="left")
+        hi = np.searchsorted(sorted_vals, hi_vals, side="right")
+        cnt = np.maximum(hi - lo, 0)
+        total = int(cnt.sum())
+        if total == 0:
+            return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+        qi = np.repeat(np.arange(len(lo)), cnt)
+        offs = np.arange(total) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+        return qi, order[np.repeat(lo, cnt) + offs]
+
+    def _count(self, read_idx, jidx, target):
+        """Add 1 per distinct (read, junction) pair; returns the distinct keys."""
+        if len(jidx) == 0:
+            return np.empty(0, dtype=np.int64)
+        keys = np.unique(read_idx * self.n + jidx)
+        target += np.bincount(keys % self.n, minlength=self.n)
+        return keys
+
+    def _flush(self):
+        buf, self._buf = self._buf, []
+        if not buf:
+            return
+        n = self.n
+        nb = np.fromiter((len(b[0]) for b in buf), dtype=np.int64, count=len(buf))
+        block_read = np.repeat(np.arange(len(buf)), nb)
+        flat = [blk for b in buf for blk in b[0]]
+        bs = np.fromiter((x[0] for x in flat), dtype=np.int64, count=len(flat))
+        be = np.fromiter((x[1] for x in flat), dtype=np.int64, count=len(flat))
+        r_start = np.fromiter((b[0][0][0] for b in buf), dtype=np.int64, count=len(buf))
+        r_end = np.fromiter((b[0][-1][1] for b in buf), dtype=np.int64, count=len(buf))
+        ss1, ss2 = self.ss1, self.ss2
+
+        # ss1 exon side: bs <= ss1-4 and be > ss1-2, and the read extends past ss1+1
+        qi, j = self._pairs(self.o1, self.s1, bs + 4, be + 1)
+        r = block_read[qi]; keep = r_end[r] > ss1[j] + 1
+        k1 = self._count(r[keep], j[keep], self.ss1_cov)
+        # ss2 exon side: bs <= ss2 and be > ss2+2, and the read starts at or before ss2-3
+        qi, j = self._pairs(self.o2, self.s2, bs, be - 3)
+        r = block_read[qi]; keep = r_start[r] <= ss2[j] - 3
+        k2 = self._count(r[keep], j[keep], self.ss2_cov)
+        # junction coverage: ss1 side or ss2 side, once per read
+        if len(k1) or len(k2):
+            kk = np.union1d(k1, k2)
+            self.jxn_cov += np.bincount(kk % n, minlength=n)
+        # intron retention across ss1 / ss2
+        qi, j = self._pairs(self.o1, self.s1, bs + 4, be - 2)
+        self._count(block_read[qi], j, self.ss1_ir)
+        qi, j = self._pairs(self.o2, self.s2, bs + 3, be - 3)
+        self._count(block_read[qi], j, self.ss2_ir)
+        # full IR: a single block with bs <= ss1-4 and be > ss2+2
+        qi, j = self._pairs(self.o1, self.s1, bs + 4, be - 3)
+        keep = ss2[j] <= be[qi] - 3
+        self._count(block_read[qi][keep], j[keep], self.full_ir)
+
+        # IPA: only reads with a qualifying poly(A) soft clip can count, so test that first
+        five_keys = k1 if self.strand == "+" else k2
+        if not len(five_keys):
+            return
+        five_read = five_keys // n
+        five_j = five_keys % n
+        for ri, (blocks, splice_jxns, sc_tuple) in enumerate(buf):
+            if sc_tuple is None:
+                continue
+            sc, g, pos3, leading = sc_tuple
+            is_polya = _is_oligo_dt_priming(sc, g, leading)
+            if not is_polya and self.alu is not None:
+                frag = sc[-10:] if leading else sc[:10]
+                if len(frag) == 10 and (frag.count("A")/10 >= 0.8 or frag.count("T")/10 >= 0.8):
+                    if _in_alu(self.chrom, pos3, self.alu):
+                        is_polya = True
+            if not is_polya:
+                continue
+            a = np.searchsorted(five_read, ri, side="left")
+            b = np.searchsorted(five_read, ri, side="right")
+            if a == b:
+                continue
+            five = five_j[a:b]
+            ref_end = blocks[-1][1]
+            cand = five[(ss1[five] <= ref_end) & (ref_end <= ss2[five])]
+            if not len(cand):
+                continue
+            splice_set = set(jj[0] if self.strand == "+" else jj[1] for jj in splice_jxns)
+            for ji in np.sort(cand):
+                five_ss = int(self.five_ss_arr[ji])
+                if not any(s >= five_ss for s in splice_set):
+                    self.ipa[ji] += 1
+
+    def result(self) -> Dict[Tuple[int, int], List[int]]:
+        self._flush()
+        out = {}
+        for i, jc in enumerate(self.jxn_coords):
+            out[jc] = [
+                int(self.ss1_cov[i]), int(self.ss2_cov[i]), int(self.jxn_cov[i]),
+                int(self.ss1_ir[i]),  int(self.ss2_ir[i]),  int(self.full_ir[i]),
+                int(self.ipa[i]),
+            ]
+        return out
 
 
 def compute_coverage_metrics(
@@ -218,97 +378,12 @@ def compute_coverage_metrics(
     alu:                Optional[dict],
     chrom:              str,
 ) -> Dict[Tuple[int, int], List[int]]:
-    n_jxns = len(jxn_coords_for_cov)
-    if n_jxns == 0:
+    if not jxn_coords_for_cov:
         return {}
-
-    ss1_cov  = np.zeros(n_jxns, dtype=np.int32)
-    ss2_cov  = np.zeros(n_jxns, dtype=np.int32)
-    jxn_cov  = np.zeros(n_jxns, dtype=np.int32)
-    ss1_ir   = np.zeros(n_jxns, dtype=np.int32)
-    ss2_ir   = np.zeros(n_jxns, dtype=np.int32)
-    full_ir  = np.zeros(n_jxns, dtype=np.int32)
-    ipa_arr  = np.zeros(n_jxns, dtype=np.int32)
-
-    ss1_arr  = np.array([ss1     for ss1, ss2 in jxn_coords_for_cov], dtype=np.int64)
-    ss2_arr  = np.array([ss2     for ss1, ss2 in jxn_coords_for_cov], dtype=np.int64)
-    ss1_exon_lo = ss1_arr - 4
-    ss1_exon_hi = ss1_arr - 2
-    ss1_intr_hi = ss1_arr + 1
-    ss2_exon_lo = ss2_arr
-    ss2_exon_hi = ss2_arr + 2
-    ss2_intr_lo = ss2_arr - 3
-    ss1_ir_lo = ss1_arr - 4
-    ss1_ir_hi = ss1_arr + 1
-    ss2_ir_lo = ss2_arr - 3
-    ss2_ir_hi = ss2_arr + 2
-    fir_lo = ss1_arr - 4
-    fir_hi = ss2_arr + 2
-
-    five_ss_arr = ss1_arr if strand == "+" else ss2_arr
-
+    acc = CoverageAccumulator(jxn_coords_for_cov, strand, alu, chrom)
     for blocks, splice_jxns, sc_tuple in reads:
-        if not blocks:
-            continue
-        ref_start = blocks[0][0]
-        ref_end   = blocks[-1][1]
-
-        h1 = np.zeros(n_jxns, dtype=bool)
-        h2 = np.zeros(n_jxns, dtype=bool)
-        h1_ir_mask = np.zeros(n_jxns, dtype=bool)
-        h2_ir_mask = np.zeros(n_jxns, dtype=bool)
-        fir_mask   = np.zeros(n_jxns, dtype=bool)
-
-        for block_start, block_end in blocks:
-            bs = np.int64(block_start)
-            be = np.int64(block_end)
-            mask1 = (bs <= ss1_exon_lo) & (be > ss1_exon_hi) & (ref_end > ss1_intr_hi)
-            h1   |= mask1
-            mask2 = (bs <= ss2_exon_lo) & (be > ss2_exon_hi) & (ref_start <= ss2_intr_lo)
-            h2   |= mask2
-            h1_ir_mask |= (bs <= ss1_ir_lo) & (be > ss1_ir_hi)
-            h2_ir_mask |= (bs <= ss2_ir_lo) & (be > ss2_ir_hi)
-            fir_mask   |= (bs <= fir_lo)    & (be > fir_hi)
-
-        ss1_cov  += h1.astype(np.int32)
-        ss2_cov  += h2.astype(np.int32)
-        jxn_cov  += (h1 | h2).astype(np.int32)
-        ss1_ir   += h1_ir_mask.astype(np.int32)
-        ss2_ir   += h2_ir_mask.astype(np.int32)
-        full_ir  += fir_mask.astype(np.int32)
-
-        if sc_tuple is None:
-            continue
-        five_ss_cov = h1 if strand == "+" else h2
-        if not five_ss_cov.any():
-            continue
-        within_intron = (ss1_arr <= ref_end) & (ref_end <= ss2_arr)
-        cand_ipa = five_ss_cov & within_intron
-        if not cand_ipa.any():
-            continue
-        splice_set = set(j[0] if strand == "+" else j[1] for j in splice_jxns)
-        sc, g, pos3, leading = sc_tuple
-        is_polya = _is_oligo_dt_priming(sc, g, leading)
-        if not is_polya and alu is not None:
-            frag = sc[-10:] if leading else sc[:10]
-            if len(frag) == 10 and (frag.count("A")/10 >= 0.8 or frag.count("T")/10 >= 0.8):
-                if _in_alu(chrom, pos3, alu):
-                    is_polya = True
-        if not is_polya:
-            continue
-        for ji in np.where(cand_ipa)[0]:
-            five_ss = int(five_ss_arr[ji])
-            if not any(s >= five_ss for s in splice_set):
-                ipa_arr[ji] += 1
-
-    result = {}
-    for i, jc in enumerate(jxn_coords_for_cov):
-        result[jc] = [
-            int(ss1_cov[i]), int(ss2_cov[i]), int(jxn_cov[i]),
-            int(ss1_ir[i]),  int(ss2_ir[i]),  int(full_ir[i]),
-            int(ipa_arr[i]),
-        ]
-    return result
+        acc.add(blocks, splice_jxns, sc_tuple)
+    return acc.result()
 
 
 def _is_oligo_dt_priming(sc: str, g: str, leading: bool) -> bool:
@@ -423,7 +498,7 @@ def process_sample(
         for label, bam in (("bulk", bulk_bam), ("hap1", hap1_bam), ("hap2", hap2_bam)):
             if not bam or not isinstance(bam, str): continue
             jxn_counts, gene_cov, _ = collect_read_data(
-                bam, region, include_monoexonic)
+                bam, region, include_monoexonic, keep_reads=False)
             if gene_cov == 0: continue
             raw.append((label, gene_cov, jxn_counts))
         if not raw: return empty, time.time() - t0
@@ -485,40 +560,28 @@ def process_sample(
         parts = jxn.split("_")
         jxn_coords_for_cov.append((int(parts[-2]), int(parts[-1])))
 
-    raw_step1: List = []
+    # One streaming pass per BAM: coverage/IR/IPA counts and read fingerprints are accumulated
+    # read by read, so no BAM's reads are ever held in memory.
+    import math
+    chunks_wide: List = []
     for label, bam in (("bulk", bulk_bam), ("hap1", hap1_bam), ("hap2", hap2_bam)):
         if not bam or not isinstance(bam, str): continue
-        if label == "bulk" and jxn_raw_bulk is not None:
-            jxn_raw_lbl = jxn_raw_bulk
-            _, gene_cov, reads = collect_read_data(
-                bam, region, include_monoexonic,
-                collect_softclips=do_ipa,
-                strand=strand,
-                genome_seq=genome_seq,
-                gene_region_start=gene_start,
-            )
-        else:
-            jxn_raw_lbl, gene_cov, reads = collect_read_data(
-                bam, region, include_monoexonic,
-                collect_softclips=do_ipa,
-                strand=strand,
-                genome_seq=genome_seq,
-                gene_region_start=gene_start,
-            )
-        if gene_cov == 0: continue
-        raw_step1.append((label, gene_cov, jxn_raw_lbl, reads))
-    if not raw_step1: return empty, time.time() - t0
-
-    chunks_wide: List = []
-    for label, gene_cov, jxn_raw_lbl, reads in raw_step1:
+        acc = CoverageAccumulator(jxn_coords_for_cov, strand, alu, chrom)
         jxn_fingerprints: Dict[Tuple[int, int], Dict] = defaultdict(lambda: defaultdict(int))
-        for blocks, splice_jxns, sc_tuple in reads:
+        counts: Dict[str, object] = {}
+        for blocks, splice_jxns, sc_tuple in iter_read_data(
+                bam, region, include_monoexonic,
+                collect_softclips=do_ipa, strand=strand,
+                genome_seq=genome_seq, gene_region_start=gene_start, counts=counts):
+            acc.add(blocks, splice_jxns, sc_tuple)
             if splice_jxns:
                 fp = (blocks[0][0], blocks[-1][1], tuple(splice_jxns))
                 for jc in splice_jxns:
                     jxn_fingerprints[jc][fp] += 1
+        gene_cov = counts["gene_cov"]
+        if gene_cov == 0: continue
+        jxn_raw_lbl = jxn_raw_bulk if (label == "bulk" and jxn_raw_bulk is not None) else counts["jxn_raw"]
 
-        import math
         jxn_diversity: Dict[Tuple[int, int], float] = {}
         for jc, fp_counts in jxn_fingerprints.items():
             total = sum(fp_counts.values())
@@ -527,11 +590,9 @@ def process_sample(
             else:
                 h = -sum((c/total)*math.log(c/total) for c in fp_counts.values())
                 jxn_diversity[jc] = round(math.exp(h), 2)
+        del jxn_fingerprints
 
-        cov_metrics = compute_coverage_metrics(
-            reads, jxn_coords_for_cov, strand,
-            genome_seq, gene_start, alu, chrom,
-        )
+        cov_metrics = acc.result() if jxn_coords_for_cov else {}
 
         ss1_usage_agg: Dict[int, int] = defaultdict(int)
         ss2_usage_agg: Dict[int, int] = defaultdict(int)
@@ -563,6 +624,7 @@ def process_sample(
         jxn_raw_str = {f"{chrom}_{s}_{e}": c for (s, e), c in jxn_raw_lbl.items()}
         approx_cov  = compute_junction_coverage_approx(jxn_raw_str, all_jxns)
         chunks_wide.append((label, cov_result, jxn_raw_str, approx_cov))
+    if not chunks_wide: return empty, time.time() - t0
 
 
     def _arr(label, cov_key):
@@ -674,7 +736,7 @@ def _discover_junctions_worker(
     if not os.path.exists(bulk_bam):
         print(f"[WARNING] Bulk BAM not found for sample '{sample_name}': {bulk_bam}. Skipping.")
         return sample_name, {}, 0
-    jxn_raw, gene_cov, _ = collect_read_data(bulk_bam, region, include_monoexonic)
+    jxn_raw, gene_cov, _ = collect_read_data(bulk_bam, region, include_monoexonic, keep_reads=False)
     return sample_name, jxn_raw, gene_cov
 
 
@@ -691,150 +753,161 @@ def _row_bam_size(row: pd.Series) -> int:
     return total
 
 
-def compute_gene_junction_metrics(
-    gene: str,
-    region: str,
-    region_df: pd.DataFrame,
-    approx_only: bool,
-    PSI_rescale_factor: float,
-    threads: int,
-    strand: str = "+",
-    include_monoexonic: bool = False,
-    min_jxn_reads: int = 20,
-    genome_path: Optional[str] = None,
-    alu: Optional[dict] = None,
-) -> Optional[pd.DataFrame]:
-    print(f"\n{'='*70}")
-    print(f"  Gene: {gene}   Region: {region}")
-    print(f"{'='*70}")
+def _sample_args(row: pd.Series):
+    bulk = row["bulk"] if pd.notna(row.get("bulk", "")) else None
+    hap1 = row["hap1"] if pd.notna(row.get("hap1", "")) else None
+    hap2 = row["hap2"] if pd.notna(row.get("hap2", "")) else None
+    return row["sample"], bulk, hap1, hap2
 
-    bulk_rows = region_df[region_df["bulk"].notna()]
+
+def _rows_by_bam_size(region_df: pd.DataFrame) -> List[pd.Series]:
+    rows = [pd.Series(r._asdict()) for r in region_df.itertuples(index=False)]
+    return sorted(rows, key=_row_bam_size, reverse=True)
+
+
+class _GeneJob:
+    """State of one gene moving through the shared worker pool: (full mode) junction discovery
+    over the bulk BAMs, then per-sample metrics; (--approx) per-sample PSI_approx only."""
+
+    def __init__(self, gene, region, strand, region_df):
+        self.gene, self.region, self.strand, self.region_df = gene, region, strand, region_df
+        self.t0 = time.time()
+        self.stage = None
+        self.pending: set = set()
+        self.failed = False
+        self.sample_jxn_raw: Dict[str, Dict[Tuple[int, int], int]] = {}
+        self.jxn_count_union: Dict[Tuple[int, int], int] = defaultdict(int)
+        self.all_jxns: List[str] = []
+        self.sample_dfs: List[pd.DataFrame] = []
+        self.lines: List[str] = []
+
+
+def run_all_genes(gene_groups, approx_only, PSI_rescale_factor, threads, include_monoexonic,
+                  min_jxn_reads, genome_path, alu, on_gene_done) -> None:
+    """Run every gene through ONE process pool. Genes are pipelined: while one gene waits for its
+    slowest sample, workers already start the next gene's tasks. Each gene's result is exactly what
+    the earlier one-gene-at-a-time loop produced. At most max(2, threads) genes are in flight, to
+    bound how many genes' per-sample tables the parent holds at once."""
+    max_inflight = max(2, threads)
+    queue = list(gene_groups)
+    owner: Dict[concurrent.futures.Future, Tuple[_GeneJob, str]] = {}
+    active: List[_GeneJob] = []
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=threads) as pool:
 
-        if approx_only:
-            print(f"  [1/2] PSI_approx + junction discovery ({len(region_df)} samples) ...")
-            t0 = time.time()
-            sample_dfs = []
-            all_jxns_set: set = set()
-            futures = {}
-            sorted_rows = sorted(region_df.itertuples(index=False),
-                                 key=lambda r: _row_bam_size(pd.Series(r._asdict())),
-                                 reverse=True)
-            for row in sorted_rows:
-                row = pd.Series(row._asdict())
-                sname = row["sample"]
-                bulk  = row["bulk"] if pd.notna(row.get("bulk","")) else None
-                hap1  = row["hap1"] if pd.notna(row.get("hap1","")) else None
-                hap2  = row["hap2"] if pd.notna(row.get("hap2","")) else None
-                futures[pool.submit(
-                    process_sample, sname, bulk, hap1, hap2,
-                    region, gene, [], True, PSI_rescale_factor, strand,
-                    include_monoexonic,
-                )] = sname
-            _lines: List[str] = []
-            for fut in concurrent.futures.as_completed(futures):
-                sname = futures[fut]
+        def submit_psi(job: _GeneJob):
+            job.stage = "psi"
+            for row in _rows_by_bam_size(job.region_df):
+                sname, bulk, hap1, hap2 = _sample_args(row)
+                if approx_only:
+                    fut = pool.submit(process_sample, sname, bulk, hap1, hap2, job.region, job.gene,
+                                      [], True, PSI_rescale_factor, job.strand, include_monoexonic)
+                else:
+                    fut = pool.submit(process_sample, sname, bulk, hap1, hap2, job.region, job.gene,
+                                      job.all_jxns, approx_only, PSI_rescale_factor, job.strand,
+                                      include_monoexonic, genome_path, alu,
+                                      job.sample_jxn_raw.get(sname))
+                owner[fut] = (job, sname); job.pending.add(fut)
+
+        def start(job: _GeneJob):
+            print(f"\n{'='*70}\n  Gene: {job.gene}   Region: {job.region}   (started)\n{'='*70}")
+            if approx_only:
+                submit_psi(job)
+                if not job.pending:
+                    stage_complete(job)
+                return
+            job.stage = "discovery"
+            bulk_rows = job.region_df[job.region_df["bulk"].notna()]
+            for _, row in bulk_rows.iterrows():
+                fut = pool.submit(_discover_junctions_worker, row["sample"], row["bulk"],
+                                  job.region, include_monoexonic)
+                owner[fut] = (job, row["sample"]); job.pending.add(fut)
+            if not job.pending:
+                finish(job, None)
+
+        def finish(job: _GeneJob, combined: Optional[pd.DataFrame]):
+            for f in list(job.pending):
+                f.cancel(); owner.pop(f, None)
+            job.pending.clear()
+            if job in active:
+                active.remove(job)
+            if combined is not None:
+                combined = combined.sort_values(["junction", "sample", "phasing"], ignore_index=True)
+            on_gene_done(job.gene, combined, time.time() - job.t0, job.lines)
+
+        def stage_complete(job: _GeneJob):
+            if job.stage == "discovery":
+                chrom = job.region.split(":")[0]
+                job.all_jxns = sorted(f"{chrom}_{s}_{e}" for (s, e), cnt in job.jxn_count_union.items()
+                                      if cnt >= min_jxn_reads)
+                job.lines.append(f"       {job.gene}: {len(job.jxn_count_union)} junctions found, "
+                                 f"{len(job.all_jxns)} kept (with >={min_jxn_reads} reads in >=1 sample)")
+                if not job.all_jxns:
+                    job.lines.append("  No junctions passed filter. Skipping.")
+                    finish(job, None); return
+                submit_psi(job)
+                if not job.pending:
+                    finish(job, None)
+                return
+            # psi stage done
+            if not job.sample_dfs:
+                job.lines.append("  No data. Skipping."); finish(job, None); return
+            combined = pd.concat(sorted(job.sample_dfs, key=lambda d: d["sample"].iloc[0]), ignore_index=True)
+            if approx_only:
+                all_jxns_set = set()
+                bulk_max: Dict[str, int] = defaultdict(int)
+                for sdf in job.sample_dfs:
+                    all_jxns_set.update(sdf["junction"].unique())
+                    b = sdf[sdf["phasing"] == "bulk"]
+                    for jxn, u in zip(b["junction"], b["junction_usage"]):
+                        u = int(u)
+                        if u > bulk_max[jxn]: bulk_max[jxn] = u
+                kept = {j for j in all_jxns_set if bulk_max.get(j, 0) >= min_jxn_reads}
+                if len(all_jxns_set) - len(kept) > 0:
+                    combined = combined[combined["junction"].isin(kept)]
+                job.lines.append(f"       {job.gene}: {len(all_jxns_set)} junctions found, {len(kept)} kept "
+                                 f"(>={min_jxn_reads}), {len(combined)} rows")
+            finish(job, combined)
+
+        while queue or active:
+            while queue and len(active) < max_inflight:
+                gene, region, strand, region_df = queue.pop(0)
+                job = _GeneJob(gene, region, strand, region_df)
+                active.append(job)
+                start(job)
+            live = [f for f in owner]
+            if not live:
+                continue
+            done, _ = concurrent.futures.wait(live, return_when=concurrent.futures.FIRST_COMPLETED)
+            for fut in done:
+                if fut not in owner:
+                    continue
+                job, sname = owner.pop(fut)
+                job.pending.discard(fut)
+                if job.failed or job not in active:
+                    continue
                 try:
-                    sdf, elapsed = fut.result()
-                    _lines.append(f"       {sname}: {elapsed:.2f}s")
-                    if len(sdf):
-                        sample_dfs.append(sdf)
-                        all_jxns_set.update(sdf["junction"].unique())
+                    if job.stage == "discovery":
+                        sname, jxn_raw, _ = fut.result()
+                        job.sample_jxn_raw[sname] = jxn_raw
+                        for coord, cnt in jxn_raw.items():
+                            job.jxn_count_union[coord] = max(job.jxn_count_union[coord], cnt)
+                    else:
+                        sdf, elapsed = fut.result()
+                        job.lines.append(f"       {sname}: {elapsed:.2f}s")
+                        if len(sdf): job.sample_dfs.append(sdf)
                 except Exception as e:
-                    print(f"  [ERROR] {sname}: {e}"); traceback.print_exc()
-                    print(f"  [WARNING] Skipping {gene}."); return None
-            if not sample_dfs:
-                print("  No data. Skipping."); return None
-            for _line in sorted(_lines): print(_line)
-            combined = pd.concat(sorted(sample_dfs, key=lambda d: d["sample"].iloc[0]), ignore_index=True)
-            bulk_max: Dict[str, int] = defaultdict(int)
-            for sdf_b in sample_dfs:
-                for _, r in sdf_b[sdf_b["phasing"]=="bulk"].iterrows():
-                    jxn = r["junction"]; u = int(r["junction_usage"])
-                    if u > bulk_max[jxn]: bulk_max[jxn] = u
-            kept_jxns = {j for j in all_jxns_set if bulk_max.get(j, 0) >= min_jxn_reads}
-            n_dropped = len(all_jxns_set) - len(kept_jxns)
-            if n_dropped > 0:
-                combined = combined[combined["junction"].isin(kept_jxns)]
-            print(f"       → {len(all_jxns_set)} junctions found, {len(kept_jxns)} kept "
-                  f"(≥{min_jxn_reads}), {n_dropped} dropped, "
-                  f"{len(combined)} rows ({time.time()-t0:.2f}s)")
-
-        else:
-            print(f"  [1/2] Junction discovery (bulk BAMs, {len(bulk_rows)} samples) ...")
-            t0 = time.time()
-            jxn_count_union: Dict[Tuple[int,int], int] = defaultdict(int)
-            sample_jxn_raw: Dict[str, Dict[Tuple[int,int], int]] = {}
-            disc_futures = {
-                pool.submit(_discover_junctions_worker,
-                            row["sample"], row["bulk"], region, include_monoexonic): row["sample"]
-                for _, row in bulk_rows.iterrows()
-            }
-            for fut in concurrent.futures.as_completed(disc_futures):
-                try:
-                    sname, jxn_raw, _ = fut.result()
-                    sample_jxn_raw[sname] = jxn_raw
-                    for coord, cnt in jxn_raw.items():
-                        jxn_count_union[coord] = max(jxn_count_union[coord], cnt)
-                except Exception as e:
-                    print(f"  [ERROR] Discovery: {e}"); traceback.print_exc()
-
-            chrom = region.split(":")[0]
-            all_jxns = sorted(f"{chrom}_{s}_{e}"
-                               for (s,e), cnt in jxn_count_union.items()
-                               if cnt >= min_jxn_reads)
-            n_tot = len(jxn_count_union); n_kept = len(all_jxns)
-            print(f"       → {n_tot} found, {n_kept} kept "
-                  f"(with ≥{min_jxn_reads} reads in ≥1 sample) "
-                  f"({time.time()-t0:.2f}s)")
-            if not all_jxns:
-                print("  No junctions passed filter. Skipping."); return None
-
-            print(f"  [2/2] Calculating junction usage ({len(region_df)} samples) ...")
-            t0 = time.time()
-            sample_dfs = []
-            psi_futures = {}
-            sorted_rows_psi = sorted(region_df.itertuples(index=False),
-                                     key=lambda r: _row_bam_size(pd.Series(r._asdict())),
-                                     reverse=True)
-            for row in sorted_rows_psi:
-                row = pd.Series(row._asdict())
-                sname = row["sample"]
-                bulk  = row["bulk"] if pd.notna(row.get("bulk","")) else None
-                hap1  = row["hap1"] if pd.notna(row.get("hap1","")) else None
-                hap2  = row["hap2"] if pd.notna(row.get("hap2","")) else None
-                bulk_jxn_raw = sample_jxn_raw.get(sname)
-                psi_futures[pool.submit(
-                    process_sample, sname, bulk, hap1, hap2,
-                    region, gene, all_jxns, approx_only, PSI_rescale_factor, strand,
-                    include_monoexonic, genome_path, alu,
-                    bulk_jxn_raw,
-                )] = sname
-            _psi_lines: List[str] = []
-            _psi_t0 = time.time()
-            for fut in concurrent.futures.as_completed(psi_futures):
-                sname = psi_futures[fut]
-                try:
-                    sdf, elapsed = fut.result()
-                    _psi_lines.append(f"       {sname}: {elapsed:.2f}s")
-                    if len(sdf): sample_dfs.append(sdf)
-                except Exception as e:
-                    print(f"  [ERROR] {sname}: {e}"); traceback.print_exc()
-                    print(f"  [WARNING] Skipping {gene}."); return None
-            if not sample_dfs:
-                print("  No data. Skipping."); return None
-            combined = pd.concat(sorted(sample_dfs, key=lambda d: d["sample"].iloc[0]), ignore_index=True)
-            _psi_wall = time.time() - _psi_t0
-            for _line in sorted(_psi_lines): print(_line)
-            print(f"       → {len(combined):,} rows (junctions × samples × phasings) "
-                  f"({_psi_wall:.2f}s)")
-
-    combined = combined.sort_values(
-        ["junction", "sample", "phasing"], ignore_index=True
-    )
-    return combined
-
+                    if job.stage == "discovery":
+                        # as before: a failed discovery task is reported and the gene carries on
+                        print(f"  [ERROR] Discovery ({job.gene}, {sname}): {e}"); traceback.print_exc()
+                    else:
+                        print(f"  [ERROR] {job.gene} / {sname}: {e}"); traceback.print_exc()
+                        print(f"  [WARNING] Skipping {job.gene}.")
+                        job.failed = True
+                        finish(job, None)
+                        continue
+                if not job.pending:
+                    stage_complete(job)
 
 
 def _write_manifest(gene_info: Dict[str, Tuple[str, str, str]],
@@ -897,26 +970,12 @@ def main() -> None:
 
     n_genes = len(gene_groups)
     print(f"\nWill process {n_genes} gene(s)")
-    print(f"Threads per gene: {args.threads}\n")
+    print(f"Worker processes (shared across genes): {args.threads}\n")
 
     result_paths: Dict[str, Optional[str]] = {}
 
-    for gene, region, strand, region_df in gene_groups:
-        t_gene = time.time()
-        try:
-            combined = compute_gene_junction_metrics(
-                gene=gene, region=region, region_df=region_df,
-                approx_only=approx_only,
-                PSI_rescale_factor=args.PSI_rescale_factor,
-                threads=args.threads, strand=strand,
-                include_monoexonic=args.include_monoexonic,
-                min_jxn_reads=args.min_jxn_reads,
-                genome_path=genome_path, alu=alu,
-            )
-        except Exception as e:
-            print(f"[ERROR] Gene {gene}: {e}"); traceback.print_exc()
-            combined = None
-
+    def on_gene_done(gene, combined, elapsed, lines):
+        for line in sorted(lines): print(line)
         if combined is not None and len(combined):
             out_path = os.path.join(args.outdir, f"{gene}.tsv")
             combined.to_csv(out_path, sep="\t", index=False)
@@ -925,7 +984,10 @@ def main() -> None:
         else:
             result_paths[gene] = None
             print(f"  {gene}: no output")
-        print(f"  {gene} complete ({time.time() - t_gene:.0f}s)")
+        print(f"  {gene} complete ({elapsed:.0f}s)")
+
+    run_all_genes(gene_groups, approx_only, args.PSI_rescale_factor, args.threads,
+                  args.include_monoexonic, args.min_jxn_reads, genome_path, alu, on_gene_done)
 
     _write_manifest(gene_info, result_paths, args.manifest)
     n_with_data = sum(1 for p in result_paths.values() if p)

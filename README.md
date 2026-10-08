@@ -13,7 +13,7 @@ For each sample (a long-read RNA-seq BAM file), the pipeline:
 3. **Phases reads** (`phase_reads`) — Produces one BAM file per haplotype (where possible) and a table mapping each gene to its phased BAM files, used in later steps.
 4. **Finds ASE outliers** (`ase_analysis`) — runs a binomial test per gene on the phased haplotype read counts to detect allele-specific expression.
 5. **Finds splice-junction outliers vs. GTEx** (`junction_analysis`) — compares each sample's junction usage to **GTEx reference tissue** data, using a beta-binomial test.
-6. **Computes per-sample QC** (`sample_qc`) — mapping/on-target read counts, a read-length five-number summary, and a per-gene "full-length ratio", all computed directly from that sample's own BAM (no cohort dependency).
+6. **Computes per-sample QC** (`sample_qc`) — mapping/on-target read counts, a read-length five-number summary, a per-gene "full-length ratio", and per-gene read depth over each gene's canonical transcript (median/average/std across its exonic bases, counting only non-N CIGAR operations), all computed directly from that sample's own BAM (no cohort dependency).
 7. **Quantifies gene expression per sample** (`sample_gene_quantification`) — approximate per-sample relative gene expression by read count, by peak coverage, and by splice-site-sharing assignment, plus a per-sample StringTie assembly for isoform-aware quantification (AMALGAM) later.
 8. **Finds splice-junction outliers vs. cohort** (`cohort_junction_analysis`) — compares each sample's junction usage to **the rest of the cohort's own samples**, instead of GTEx.
 9. **Merges results across samples** (`merge_hits` / `cohort_qc` / `quantify_genes`) — combines every sample's step 1-7 results (plus step 8's cohort-junction results) into cohort-level outputs: a ranked `merged_all_hits.tsv` candidate-hit list per BED panel, cohort-wide QC matrices/plots, and gene-expression matrices (by count, coverage, assignment, and AMALGAM). This is the only stage that reads results from more than one sample at once, which is what keeps rerunning it (e.g. after adding a sample, or configuring a sample alias) cheap -- it never touches a BAM directly.
@@ -40,7 +40,7 @@ TEQUILA-Dx_snakemake/
 │   ├── 3_phase_reads.smk
 │   ├── 4_ase_analysis.smk
 │   ├── 5_junction_analysis.smk
-│   ├── 6_sample_qc.smk                 # Per-sample: on-target rate, read-length summary, full-length ratio
+│   ├── 6_sample_qc.smk                 # Per-sample: on-target rate, read-length summary, full-length ratio, canonical-transcript coverage
 │   ├── 7_sample_gene_quantification.smk # Per-sample: gene expression by count, coverage, assignment; StringTie assembly
 │   ├── 8_cohort_junction_analysis.smk  # Splice-junction outliers vs. the rest of the cohort
 │   └── 9_merge_results.smk             # Merges everything above into cohort-wide hit rankings, QC, and gene-expression matrices
@@ -147,7 +147,8 @@ Everything is written under the single `output_dir` set in the run config:
   samples/{sample}/output/...       -- each sample's own results:
                                         variant_calling, phased_reads, ase_analysis, junction_analysis,
                                         qc/                          -- per-sample QC (on-target rate, read-length
-                                                                        summary, full-length ratio)
+                                                                        summary, full-length ratio, canonical-transcript
+                                                                        coverage)
                                         gene_quantification/         -- per-sample gene expression (count, coverage,
                                                                         assignment) + StringTie assembly for AMALGAM
   samples/{sample}/logs/...         -- each sample's own logs
@@ -155,9 +156,15 @@ Everything is written under the single `output_dir` set in the run config:
     output/
       validate_sample_types/        -- sample-identity check plots (covers all sample types on this panel)
       cohort_qc/                    -- cohort-wide QC plots merged from every sample's own qc/ TSVs above
-                                        (on-target rate, read lengths, full-length ratio; covers all sample
+                                        (on-target rate, read lengths, canonical-transcript coverage
+                                        heatmaps, full-length ratio; covers all sample
                                         types on this panel)
-      merged_all_hits.tsv           -- the final diagnostic result for this BED panel
+      merged_all_hits.tsv           -- the final diagnostic result for this BED panel: every panel
+                                        gene x sample, with hit=TRUE/FALSE ('.' in the hit columns when
+                                        FALSE) plus average_coverage, breadth_coverage (fraction of
+                                        canonical exonic bases at depth >= merge_min_dp_snv),
+                                        n_canonical_jxns and n_canonical_jxns_tested (GTEx or cohort)
+      merged_all_hits_simplified.tsv -- hits only, one deduplicated jxns column
       sample_types/{sample_type}/
         output/...                  -- results for this group of samples: merged_variant_calling,
                                         merged_ase_analysis, merged_junction_analysis, merged_hits,

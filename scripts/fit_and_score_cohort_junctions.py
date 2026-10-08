@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import concurrent.futures
 from scipy.stats import betabinom, beta
+from scipy.special import digamma, polygamma
 from statsmodels.stats.multitest import multipletests
 from pandas.errors import PerformanceWarning
 
@@ -122,24 +123,86 @@ def _fit_beta_rows(args):
             for i in range(len(mat_block))]
 
 
+def _beta_mle_vectorized(rows: List[np.ndarray]):
+    """Maximum-likelihood beta(a, b) on [0, 1] for many samples at once: Newton's method on the
+    MLE equations psi(a) - psi(a+b) = mean(log x), psi(b) - psi(a+b) = mean(log(1-x)), started
+    from the method-of-moments estimate. These are the equations scipy's beta.fit(floc=0,
+    fscale=1) solves one sample at a time (with fsolve). Returns a, b and a converged mask."""
+    k = len(rows)
+    n = np.array([len(r) for r in rows], dtype=np.float64)
+    xbar = np.array([r.mean() for r in rows], dtype=np.float64)
+    var = np.array([r.var() for r in rows], dtype=np.float64)
+    s1 = np.array([np.log(r).sum() for r in rows], dtype=np.float64) / n
+    s2 = np.array([np.log1p(-r).sum() for r in rows], dtype=np.float64) / n
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fac = xbar * (1 - xbar) / var - 1
+    a = xbar * fac
+    b = (1 - xbar) * fac
+    bad0 = ~(np.isfinite(a) & np.isfinite(b) & (a > 0) & (b > 0))
+    a[bad0] = 1.0; b[bad0] = 1.0
+    converged = np.zeros(k, dtype=bool)
+    for _ in range(200):
+        ab = a + b
+        f1 = digamma(a) - digamma(ab) - s1
+        f2 = digamma(b) - digamma(ab) - s2
+        t_ab = polygamma(1, ab)
+        j11 = polygamma(1, a) - t_ab
+        j22 = polygamma(1, b) - t_ab
+        j12 = -t_ab
+        det = j11 * j22 - j12 * j12
+        da = (j22 * f1 - j12 * f2) / det
+        db = (j11 * f2 - j12 * f1) / det
+        step = np.ones(k)
+        # keep both parameters positive
+        for _h in range(60):
+            ok = (a - step * da > 0) & (b - step * db > 0)
+            if ok.all():
+                break
+            step = np.where(ok, step, step / 2)
+        a_new = a - step * da
+        b_new = b - step * db
+        done = (np.abs(a_new - a) <= 1e-12 * np.abs(a_new)) & (np.abs(b_new - b) <= 1e-12 * np.abs(b_new))
+        a, b = np.where(converged, a, a_new), np.where(converged, b, b_new)
+        converged |= done
+        if converged.all():
+            break
+    ok = converged & np.isfinite(a) & np.isfinite(b) & (a > 0) & (b > 0)
+    return a, b, ok
+
+
 def fit_beta_dist_chunk(mat, feat_names, tol, n_threshold, threads: int = 1):
+    """Same outputs as fitting each row with _fit_one_beta, but the maximum-likelihood fits are
+    solved for all rows together (_beta_mle_vectorized). Rows the vectorised solver cannot handle
+    (data outside (0, 1), non-convergence) fall back to scipy's beta.fit, as before."""
     n = len(mat)
     if n == 0:
         return pd.DataFrame(columns=["n", "alpha", "beta_param", "expected"])
 
-    n_workers = min(threads, n)
-    if n_workers <= 1:
-        results = [_fit_one_beta(mat[i], tol, n_threshold) for i in range(n)]
-    else:
-        chunk_size = max(1, (n + n_workers - 1) // n_workers)
-        chunks = [
-            (mat[i : i + chunk_size], tol, n_threshold)
-            for i in range(0, n, chunk_size)
-        ]
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
-            results = []
-            for block in ex.map(_fit_beta_rows, chunks):
-                results.extend(block)
+    results: List = [None] * n
+    mle_rows, mle_idx = [], []
+    for i in range(n):
+        x = mat[i]
+        x = x[np.isfinite(x)]
+        k = len(x)
+        if k < n_threshold:
+            results[i] = (k, "low_n", "low_n", "low_n"); continue
+        v = float(np.var(x))
+        if v < tol:
+            m = float(np.clip(np.median(x), tol, 1.0 - tol))
+            kk = max(m * (1.0 - m) / tol - 1.0, tol)
+            results[i] = (k, float(m * kk), float((1.0 - m) * kk), float(m)); continue
+        x64 = x.astype(np.float64)
+        if np.any(x64 <= 0) or np.any(x64 >= 1):
+            results[i] = _fit_one_beta(mat[i], tol, n_threshold); continue
+        mle_rows.append(x64); mle_idx.append(i)
+
+    if mle_rows:
+        a, b, ok = _beta_mle_vectorized(mle_rows)
+        for r, i in enumerate(mle_idx):
+            if ok[r]:
+                results[i] = (len(mle_rows[r]), float(a[r]), float(b[r]), float(a[r] / (a[r] + b[r])))
+            else:
+                results[i] = _fit_one_beta(mat[i], tol, n_threshold)
 
     return pd.DataFrame(results, index=feat_names,
                         columns=["n", "alpha", "beta_param", "expected"])
@@ -176,28 +239,8 @@ def beta_binomial_test_chunk(
     beta_v   = pd.to_numeric(df[f"beta_{metric_col}"],  errors="coerce").to_numpy()
     val      = df[metric_col].to_numpy(dtype=float)
 
-    n = len(df)
-    n_workers = min(threads, n)
-
-    if n_workers <= 1:
-        p = _betabinom_test_rows(
-            (usage, coverage, alpha_v, beta_v, val, coverage_threshold)
-        )
-    else:
-        chunk_size = max(1, (n + n_workers - 1) // n_workers)
-        chunks = [
-            (
-                usage   [i : i + chunk_size],
-                coverage[i : i + chunk_size],
-                alpha_v [i : i + chunk_size],
-                beta_v  [i : i + chunk_size],
-                val     [i : i + chunk_size],
-                coverage_threshold,
-            )
-            for i in range(0, n, chunk_size)
-        ]
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
-            p = np.concatenate(list(ex.map(_betabinom_test_rows, chunks)))
+    # already vectorised; a process pool here cost more than the test itself
+    p = _betabinom_test_rows((usage, coverage, alpha_v, beta_v, val, coverage_threshold))
 
     df[p_col] = p
     return df
@@ -233,19 +276,8 @@ def fit_modz_dist_chunk(mat, feat_names, tol, n_threshold, threads: int = 1):
     if n == 0:
         return pd.DataFrame(columns=["n", "median", "mad"])
 
-    n_workers = min(threads, n)
-    if n_workers <= 1:
-        results = [_fit_one_modz(mat[i], tol, n_threshold) for i in range(n)]
-    else:
-        chunk_size = max(1, (n + n_workers - 1) // n_workers)
-        chunks = [
-            (mat[i : i + chunk_size], tol, n_threshold)
-            for i in range(0, n, chunk_size)
-        ]
-        with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as ex:
-            results = []
-            for block in ex.map(_fit_modz_rows, chunks):
-                results.extend(block)
+    # in-process: a new process pool per gene and metric cost more than these median fits
+    results = [_fit_one_modz(mat[i], tol, n_threshold) for i in range(n)]
 
     return pd.DataFrame(results, index=feat_names, columns=["n", "median", "mad"])
 
@@ -561,15 +593,11 @@ def run_gene_stats_pipeline(
             ss_col = "5ss" if "5ss" in test_col else "3ss"
             if ss_col in bulk_combined.columns:
                 n_fit += int(
-                    bulk_combined[bulk_combined[a_col].apply(
-                        lambda x: x not in not_fittable
-                    )][ss_col].nunique()
+                    bulk_combined[~bulk_combined[a_col].isin(not_fittable)][ss_col].nunique()
                 )
         else:
             n_fit += int(
-                bulk_combined[bulk_combined[a_col].apply(
-                    lambda x: x not in not_fittable
-                )]["junction"].nunique()
+                bulk_combined[~bulk_combined[a_col].isin(not_fittable)]["junction"].nunique()
             )
         n_tests += int(pd.to_numeric(combined[test_col], errors="coerce").notna().sum())
     print(f"       → fit {n_fit:,} distributions and scored {n_tests:,} rows "
@@ -715,6 +743,28 @@ def assign_junction_types(
     return df
 
 
+def _score_one_gene(task):
+    """Load one gene's raw metrics and fit + score them (runs in a worker process). Returns the
+    scored table (None on error) and the gene's log lines."""
+    import io, contextlib
+    (gene, path, approx_only, coverage_threshold, phasing_threshold, PSI_rescale_factor,
+     n_threshold, has_ipa, no_ss_ir, method) = task
+    buf = io.StringIO()
+    t_gene = time.time()
+    with contextlib.redirect_stdout(buf):
+        try:
+            combined = load_gene_raw_metrics(path)
+            res = run_gene_stats_pipeline(
+                gene, combined, approx_only, coverage_threshold, phasing_threshold,
+                PSI_rescale_factor, n_threshold, 1, has_ipa, no_ss_ir, method,
+            )
+        except Exception as e:
+            print(f"[ERROR] Gene {gene}: {e}"); traceback.print_exc(file=buf)
+            res = None
+        print(f"  {gene} complete ({time.time() - t_gene:.0f}s)")
+    return res, buf.getvalue()
+
+
 def main() -> None:
     print("\n" + "*"*80)
     print("  Cohort Junction Fitting & Scoring")
@@ -769,7 +819,7 @@ def main() -> None:
             _metrics.append("IPA_ratio")
     print(f"\nWill process {n_genes} gene(s)")
     print(f"Metrics: {', '.join(_metrics)}")
-    print(f"Threads per gene: {args.threads}\n")
+    print(f"Worker processes (genes scored in parallel): {args.threads}\n")
 
     if n_genes == 0:
         print("[WARNING] Manifest has no genes with results -- this group's cohort_junction_analysis "
@@ -822,26 +872,20 @@ def main() -> None:
                 is_ss  = mc in ("5ss_IR_ratio", "3ss_IR_ratio")
                 if is_ss:
                     ss_pos_col = "5ss" if "5ss" in mc else "3ss"
-                    dedup_key = list(zip(fmt_df["sample"], fmt_df["gene"],
-                                         fmt_df["phasing"], fmt_df[ss_pos_col]))
-                    seen: Dict[tuple, int] = {}
-                    dedup_idx = []
-                    for i, k in enumerate(dedup_key):
-                        if k not in seen:
-                            seen[k] = i; dedup_idx.append(i)
-                    dedup_p = p_vals.iloc[dedup_idx]
-                    valid_mask = dedup_p.notna()
+                    # one test per (sample, gene, phasing, splice site): correct the first row of
+                    # each such key and give every row of the key that value
+                    key_cols = ["sample", "gene", "phasing", ss_pos_col]
+                    if fmt_df[key_cols].isna().any().any():
+                        raise ValueError(f"missing values in {key_cols}; cannot group {mc} tests")
+                    grp = fmt_df.groupby(key_cols, sort=False, dropna=False).ngroup().to_numpy()
+                    first = ~fmt_df.duplicated(subset=key_cols, keep="first").to_numpy()
+                    dedup_p = p_vals[first]
+                    valid_mask = dedup_p.notna().to_numpy()
                     padj_dedup = np.full(len(dedup_p), np.nan)
                     if valid_mask.sum() > 0:
-                        _, pv, _, _ = multipletests(dedup_p[valid_mask].to_numpy(), method="fdr_bh")
-                        padj_dedup[valid_mask.to_numpy()] = pv
-                    key_to_padj = {k: padj_dedup[j] for j, k in enumerate(
-                        [dedup_key[i] for i in dedup_idx])}
-                    p_str = fmt_df[p_col]
-                    fmt_df[padj_col] = [
-                        key_to_padj.get(k, p_str.iloc[i])
-                        for i, k in enumerate(dedup_key)
-                    ]
+                        _, pv, _, _ = multipletests(dedup_p.to_numpy()[valid_mask], method="fdr_bh")
+                        padj_dedup[valid_mask] = pv
+                    fmt_df[padj_col] = list(padj_dedup[grp])
                 else:
                     p_str  = fmt_df[p_col]
                     valid  = p_vals.notna()
@@ -859,24 +903,22 @@ def main() -> None:
         print(f"       Done ({time.time()-t_fdr:.2f}s)")
         return fmt_df
 
-    all_results: List[pd.DataFrame] = []
-
-    for gene, path in manifest_valid:
-        t_gene = time.time()
-        try:
-            combined = load_gene_raw_metrics(path)
-            res = run_gene_stats_pipeline(
-                gene, combined, approx_only,
-                args.coverage_threshold, args.phasing_threshold,
-                args.PSI_rescale_factor, args.n_threshold,
-                args.threads, args.has_ipa, args.no_ss_IR, method,
-            )
-        except Exception as e:
-            print(f"[ERROR] Gene {gene}: {e}"); traceback.print_exc()
-            res = None
-        if res is not None and len(res):
-            all_results.append(res)
-        print(f"  {gene} complete ({time.time() - t_gene:.0f}s)")
+    # Genes are independent until the cohort-wide FDR step, so they are fitted and scored in
+    # parallel in ONE process pool; results are kept in manifest order, as before.
+    gene_args = [
+        (gene, path, approx_only, args.coverage_threshold, args.phasing_threshold,
+         args.PSI_rescale_factor, args.n_threshold, args.has_ipa, args.no_ss_IR, method)
+        for gene, path in manifest_valid
+    ]
+    ordered: List[Optional[pd.DataFrame]] = [None] * len(gene_args)
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max(1, args.threads)) as pool:
+        futs = {pool.submit(_score_one_gene, ga): i for i, ga in enumerate(gene_args)}
+        for fut in concurrent.futures.as_completed(futs):
+            i = futs[fut]
+            res, log_text = fut.result()
+            print(log_text, end="")
+            ordered[i] = res
+    all_results: List[pd.DataFrame] = [r for r in ordered if r is not None and len(r)]
 
     if not all_results:
         print("[WARNING] No gene produced usable results (every gene errored, or "

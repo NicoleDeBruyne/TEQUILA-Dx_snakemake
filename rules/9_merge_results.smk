@@ -3,7 +3,7 @@
 from math import ceil
 
 _cohort_outdir  = config["output_dir"] + "/{cohort_id}"
-# All three analyses (_9A variants, _9B ASE, _9C+ junctions) run in two filter sets:
+# All three analyses (_9J variants, _9K ASE, _9L+ junctions) run in two filter sets:
 # "default" (5% sample fraction) and "stringent" (1% sample fraction).
 # Each produces output under a {filter_set}/ subdirectory.
 _JXN_FILTER_SETS = ["default", "stringent"]
@@ -58,343 +58,6 @@ def _group_junction_source_glob(group_id, tissue, filter_set):
     return (str(base) + '*_' + str(n) + 'samples.tsv')
 
 
-
-# Pool each group's per-sample filtered variants and keep those recurring across enough callers/samples.
-# Runs once per {filter_set} ("default" / "stringent"), which differ only in sample_fraction.
-rule _9A_merge_group_variants:
-    input:
-        variant_files = lambda wc: _group_variant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-    output:
-        tsv = _variant_tsv,
-    params:
-        group_id     = lambda wc: _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type),
-        n            = lambda wc: ceil(len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])
-                                        * _variant_sample_fraction(wc.filter_set)),
-        outprefix    = lambda wc, output: output.tsv[:-len(".tsv")],
-        num_callers_snv   = config["merge_num_callers_threshold_snv"],
-        num_callers_indel = config["merge_num_callers_threshold_indel"],
-        min_dp_snv        = config["merge_min_dp_snv"],
-        min_dp_indel      = config["merge_min_dp_indel"],
-        script       = workflow.basedir + "/scripts/merge_and_filter_variants.py",
-    threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "merge_group_variants", 1)
-    resources:
-        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)]) // 8),
-        runtime = config["time"],
-    log:
-        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_variants_{filter_set}.log"
-    shell:
-        """
-        mkdir -p $(dirname {output.tsv}) $(dirname {log})
-        python -u {params.script} \\
-            --infiles {input.variant_files} \\
-            --outprefix {params.outprefix} \\
-            --num-callers-threshold-SNV {params.num_callers_snv} \\
-            --num-callers-threshold-indel {params.num_callers_indel} \\
-            --min-DP-SNV {params.min_dp_snv} \\
-            --min-DP-indel {params.min_dp_indel} \\
-            --sample-number-threshold {params.n} \\
-            --plot \\
-            --plot-variant-type SNV indel \\
-            --title "{params.group_id} ({wildcards.filter_set}) Variant Counts" \\
-        2>&1 | tee {log}
-        """
-
-
-# Pool each group's per-sample ASE results and keep the ones that clear the group-level thresholds.
-# Runs once per {filter_set} ("default" / "stringent"), which differ only in sample_fraction.
-rule _9B_merge_group_ase:
-    input:
-        ase_files = lambda wc: _group_ase_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-    output:
-        tsv = _ase_tsv,
-    params:
-        group_id     = lambda wc: _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type),
-        n            = lambda wc: ceil(len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])
-                                        * _ase_sample_fraction(wc.filter_set)),
-        outprefix    = lambda wc, output: output.tsv[:-len(".tsv")],
-        min_hap_ratio       = config["merge_min_haplotype_ratio"],
-        minor_hap_freq_thr  = config["merge_minor_haplotype_frequency_threshold"],
-        ase_padj_thr        = config["merge_ase_padj_threshold"],
-        script       = workflow.basedir + "/scripts/merge_and_filter_ase_results.py",
-    threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "merge_group_ase", 1)
-    resources:
-        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)]) // 8),
-        runtime = config["time"],
-    log:
-        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_ase_{filter_set}.log"
-    shell:
-        """
-        mkdir -p $(dirname {output.tsv}) $(dirname {log})
-        python -u {params.script} \\
-            --infiles {input.ase_files} \\
-            --outprefix {params.outprefix} \\
-            --min-haplotype-ratio {params.min_hap_ratio} \\
-            --minor-haplotype-frequency-threshold {params.minor_hap_freq_thr} \\
-            --padj-threshold {params.ase_padj_thr} \\
-            --plot \\
-            --title "{params.group_id} ({wildcards.filter_set}): Number of Genes with Allele-specific Expression by Sample" \\
-            --sample-number-threshold {params.n} \\
-        2>&1 | tee {log}
-        """
-
-
-# Pool each group's per-sample GTEx junction outliers (per tissue) into one group-level table.
-# Runs once per {filter_set} ("default" / "stringent"), which differ only in sample_fraction.
-rule _9C_merge_group_junctions:
-    input:
-        junction_files = lambda wc: _group_tissue_junction_files(
-            _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue),
-    output:
-        tsv = _junction_final,
-    params:
-        group_id  = lambda wc: _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type),
-        n         = lambda wc: ceil(len(_group_tissue_samples(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue))
-                                     * _jxn_sample_fraction(wc.filter_set)),
-        outprefix = lambda wc: _group_junction_outprefix(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue, wc.filter_set),
-        source_glob = lambda wc: _group_junction_source_glob(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue, wc.filter_set),
-        jxn_cov_thr   = config["merge_jxn_coverage_threshold"],
-        jxn_padj_thr  = config["merge_jxn_padj_threshold"],
-        delta_psi_thr = config["merge_delta_psi_threshold"],
-        script    = workflow.basedir + "/scripts/merge_and_filter_junction_results.py",
-    threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "merge_group_junctions", 1)
-    resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(_group_tissue_samples(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue)) // 8),
-        runtime = config["time"],
-    log:
-        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_junctions_{filter_set}_{tissue}.log"
-    shell:
-        """
-        mkdir -p $(dirname {output.tsv}) $(dirname {log})
-        python -u {params.script} \\
-            --infiles {input.junction_files} \\
-            --outprefix {params.outprefix} \\
-            --jxn-coverage-threshold {params.jxn_cov_thr} \\
-            --padj-threshold {params.jxn_padj_thr} \\
-            --delta-PSI-threshold {params.delta_psi_thr} \\
-            --event-types exon_skipping exon_inclusion alt_ss1 alt_ss2 \\
-            --sample-number-threshold {params.n} \\
-            --plot \\
-            --title "{params.group_id} ({wildcards.filter_set}): Number of Genes with Outlier Junctions by Sample" \\
-        2>&1 | tee {log}
-        SRC=$(ls {params.source_glob} 2>/dev/null | head -1)
-        if [ -z "$SRC" ]; then
-            echo "WARNING: no output file matched glob {params.source_glob}" | tee -a {log} >&2
-            exit 1
-        fi
-        cp "$SRC" {output.tsv}
-        echo "Copied $SRC -> {output.tsv}" >> {log}
-        """
-
-
-# Build each sample's ranked hit table (variant/ASE/junction evidence), without cohort junction or expression data yet.
-# Runs once per {filter_set} ("default" / "stringent").
-rule _9D1_merge_group_hits_preliminary:
-    input:
-        variant_tsv    = _variant_tsv,
-        ase_tsv        = _ase_tsv,
-        junction_files = lambda wc: [
-            _group_junction_final_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), t, wc.filter_set)
-            for t in group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))
-        ],
-    output:
-        all_hits = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/all_hits_preliminary.tsv",
-    params:
-        samples      = lambda wc: GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)],
-        tissues      = lambda wc: group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-        cohort_junction_tsv = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-        omim_flag    = ("--omim " + config["omim_file"]) if config.get("omim_file") else "",
-        script       = workflow.basedir + "/scripts/merge_group_hits.py",
-    threads: 1
-    resources:
-        mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
-        runtime = config["time"],
-    log:
-        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_hits_preliminary_{filter_set}.log"
-    shell:
-        """
-        mkdir -p $(dirname {output.all_hits}) $(dirname {log})
-        python -u {params.script} \\
-            --outfile     {output.all_hits} \\
-            --variant-tsv {input.variant_tsv} \\
-            --ase-tsv     {input.ase_tsv} \\
-            --tissues     {params.tissues} \\
-            --junction-files {input.junction_files} \\
-            --cohort-junction-tsv {params.cohort_junction_tsv} \\
-            --samples     {params.samples} \\
-            {params.omim_flag} \\
-        2>&1 | tee {log}
-        """
-
-
-# Same as _9D1, but also folds in cohort junction outliers and MOTR expression z-scores (the real all_hits.tsv).
-# Runs once per {filter_set} ("default" / "stringent").
-rule _9D2_merge_group_hits_with_cohort_junctions:
-    input:
-        variant_tsv    = _variant_tsv,
-        ase_tsv        = _ase_tsv,
-        junction_files = lambda wc: [
-            _group_junction_final_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), t, wc.filter_set)
-            for t in group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))
-        ],
-        cohort_junction_tsv = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-        gene_expression_matrix = lambda wc: (
-            config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
-            + "/output/gene_quantification/by_assignment/gene_assignment_matrix_cptm.tsv"
-        ) if config.get("gene_quantification") else [],
-        gene_expression_matrix_motr = lambda wc: (
-            config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
-            + "/output/gene_quantification/by_assignment/gene_assignment_matrix_motr.tsv"
-        ) if config.get("gene_quantification") else [],
-        gene_expression_zscores = lambda wc: (
-            config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
-            + "/output/gene_quantification/by_assignment/gene_assignment_zscores_motr.tsv"
-        ) if config.get("gene_quantification") else [],
-    output:
-        all_hits = _all_hits_tsv,
-    params:
-        samples      = lambda wc: GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)],
-        tissues      = lambda wc: group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-        omim_flag    = ("--omim " + config["omim_file"]) if config.get("omim_file") else "",
-        gene_expression_flag = lambda wc, input: (
-            "--gene-expression-matrix " + str(input.gene_expression_matrix)
-        ) if config.get("gene_quantification") else "",
-        gene_expression_motr_flag = lambda wc, input: (
-            "--gene-expression-matrix-motr " + str(input.gene_expression_matrix_motr)
-        ) if config.get("gene_quantification") else "",
-        gene_expression_zscore_flag = lambda wc, input: (
-            "--gene-expression-zscores " + str(input.gene_expression_zscores)
-        ) if config.get("gene_quantification") else "",
-        script       = workflow.basedir + "/scripts/merge_group_hits.py",
-    threads: 1
-    resources:
-        mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
-        runtime = config["time"],
-    log:
-        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_hits_{filter_set}.log"
-    shell:
-        """
-        mkdir -p $(dirname {output.all_hits}) $(dirname {log})
-        python -u {params.script} \\
-            --outfile     {output.all_hits} \\
-            --variant-tsv {input.variant_tsv} \\
-            --ase-tsv     {input.ase_tsv} \\
-            --tissues     {params.tissues} \\
-            --junction-files {input.junction_files} \\
-            --cohort-junction-tsv {input.cohort_junction_tsv} \\
-            --samples     {params.samples} \\
-            {params.omim_flag} \\
-            {params.gene_expression_flag} \\
-            {params.gene_expression_motr_flag} \\
-            {params.gene_expression_zscore_flag} \\
-        2>&1 | tee {log}
-        """
-
-
-# Bar/box plots of genes with each hit category (pathogenic variant, ASE, junction, dysregulation).
-# Runs once per {filter_set} ("default" / "stringent").
-rule _9E_plot_group_hits:
-    input:
-        all_hits = lambda wc: _group_all_hits_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.filter_set),
-    output:
-        pathogenic_bar  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_pathogenic_variant_barplot.pdf",
-        pathogenic_box  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_pathogenic_variant_boxplot.pdf",
-        ase_bar         = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_ASE_barplot.pdf",
-        ase_box         = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_ASE_boxplot.pdf",
-        junction_bar    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_outlier_junction_barplot.pdf",
-        junction_box    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_outlier_junction_boxplot.pdf",
-        dysreg_bar      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_RNA_dysregulation_barplot.pdf",
-        dysreg_box      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_RNA_dysregulation_boxplot.pdf",
-    params:
-        outdir = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}",
-        script = workflow.basedir + "/scripts/plot_candidate_hits.py",
-    threads: 1
-    resources:
-        mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
-        runtime = 60,
-    log:
-        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/plot_group_hits_{filter_set}.log"
-    shell:
-        """
-        python -u {params.script} \\
-            --infile {input.all_hits} \\
-            --outdir {params.outdir} \\
-        2>&1 | tee {log}
-        """
-
-
-def _group_all_hits_path(group_id, filter_set):
-    fname = "all_hits.tsv" if config.get("merge_results_include_cohort_junctions", True) else "all_hits_preliminary.tsv"
-    return str(group_outdir(group_id)) + "/merged_hits/" + str(filter_set) + "/" + fname
-
-
-# Concatenate every group's hit table into one bed-level table, plus a simplified summary version.
-# Runs once per {filter_set} ("default" / "stringent").
-rule _9F_final_merge:
-    input:
-        all_hits = lambda wc: [_group_all_hits_path(gid, wc.filter_set) for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]],
-    output:
-        merged          = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits.tsv",
-        simplified      = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits_simplified.tsv",
-        simplified_alias = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits_simplified_alias.tsv",
-    params:
-        script     = workflow.basedir + "/scripts/simplify_all_hits.py",
-        alias_args = lambda wc: _quoted(alias_map_args(bed_samples(wc.cohort_id, wc.bed_id))),
-    threads: lambda wc: _group_threads(str(wc.cohort_id) + "_" + str(wc.bed_id), "final_merge", 1)
-    resources:
-        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(bed_samples(wc.cohort_id, wc.bed_id)) // 8),
-        runtime = 60,
-    log:
-        _cohort_outdir + "/{bed_id}/logs/{bed_id}_final_merge_{filter_set}.log"
-    shell:
-        """
-        mkdir -p $(dirname {output.merged}) $(dirname {log})
-        awk 'FNR==1 && NR!=1 {{next}} {{print}}' {input.all_hits} > {output.merged} 2> {log}
-        echo "Finished final merge to {output.merged}." >> {log}
-
-        python -u {params.script} \\
-            --infile  {output.merged} \\
-            --outfile {output.simplified} \\
-            --alias-outfile {output.simplified_alias} \\
-            --alias-map {params.alias_args} \\
-        2>&1 | tee -a {log}
-        """
-
-
-# Upset plot of overlapping hit categories per sample.
-# Runs once per {filter_set} ("default" / "stringent").
-rule _9F_plot_hits_upset:
-    input:
-        all_hits = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits.tsv",
-    output:
-        pdf_density      = _cohort_outdir + "/{bed_id}/output/{filter_set}/hits_upset_density.pdf",
-        tsv              = _cohort_outdir + "/{bed_id}/output/{filter_set}/hits_upset_counts.tsv",
-        tier_pdf_density = _cohort_outdir + "/{bed_id}/output/{filter_set}/tier_gene_counts_density.pdf",
-        tier_tsv         = _cohort_outdir + "/{bed_id}/output/{filter_set}/tier_gene_counts.tsv",
-    params:
-        samples      = lambda wc: bed_samples(wc.cohort_id, wc.bed_id),
-        sample_types = lambda wc: [SAMPLES[s]["sample_type"] for s in bed_samples(wc.cohort_id, wc.bed_id)],
-        outdir       = _cohort_outdir + "/{bed_id}/output/{filter_set}",
-        title        = lambda wc: f"{wc.bed_id} ({wc.filter_set}): Candidate Gene Hit Categories by Sample",
-        script       = workflow.basedir + "/scripts/plot_hits_upset.py",
-    threads: 1
-    resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
-        runtime = 60,
-    log:
-        _cohort_outdir + "/{bed_id}/logs/{bed_id}_hits_upset_{filter_set}.log"
-    shell:
-        """
-        mkdir -p {params.outdir} $(dirname {log})
-        python -u {params.script} \\
-            --infile      {input.all_hits} \\
-            --samples     {params.samples} \\
-            --sample-types {params.sample_types} \\
-            --outdir      {params.outdir} \\
-            --title       "{params.title}" \\
-        2>&1 | tee {log}
-        """
-
-
 # Cohort-level QC: merge each sample's per-sample QC metric into a bed-level table + plots
 def _sample_qc_file(sample, name):
     return str(SAMPLES[sample]['outdir']) + '/qc/' + str(sample) + '_' + str(name) + '.tsv'
@@ -404,7 +67,7 @@ def _bed_qc_files(cohort_id, bed_id, name):
 
 
 # Merge on-target rates across the bed's samples, colored/grouped by sample_type
-rule _9G_merge_on_target_rates:
+rule _9A_merge_on_target_rates:
     input:
         infiles = lambda wc: _bed_qc_files(wc.cohort_id, wc.bed_id, "on_target"),
     output:
@@ -438,7 +101,7 @@ rule _9G_merge_on_target_rates:
 
 
 # Merge read length/quality attributes across the bed's samples
-rule _9H_merge_read_attributes:
+rule _9B_merge_read_attributes:
     input:
         infiles = lambda wc: _bed_qc_files(wc.cohort_id, wc.bed_id, "read_attributes"),
     output:
@@ -475,9 +138,10 @@ def _group_junction_matrix_inputs(group_id):
 
 
 # Combine each group's per-sample junction-count matrices into one group-level matrix
-rule _9I1_build_group_junction_matrix:
+rule _9C1_build_group_junction_matrix:
     input:
         matrices = lambda wc: _group_junction_matrix_inputs(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
+        bed      = lambda wc: bed_path(wc.cohort_id, wc.bed_id),
     output:
         matrix = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_junction_analysis/junction_count_matrix.tsv",
     params:
@@ -496,13 +160,14 @@ rule _9I1_build_group_junction_matrix:
             --infiles      {input.matrices} \\
             --sample-names {params.samples} \\
             --outfile      {output.matrix} \\
+            --bed          {input.bed} \\
             --threads      {threads} \\
         2>&1 | tee {log}
         """
 
 
 # Compare each group's junction usage against GTEx reference tissues (distance heatmap + PCA) as a sample-type QC check
-rule _9I2_validate_sample_types:
+rule _9C2_validate_sample_types:
     input:
         query_matrices = lambda wc: [
             (str(group_outdir(gid)) + '/merged_junction_analysis/junction_count_matrix.tsv')
@@ -524,7 +189,7 @@ rule _9I2_validate_sample_types:
         script       = workflow.basedir + "/scripts/validate_sample_type.py",
     threads: lambda wc: _group_threads(str(wc.cohort_id) + "_" + str(wc.bed_id), "validate_sample_types", 1)
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * max(256, len(bed_samples(wc.cohort_id, wc.bed_id))),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(32, len(bed_samples(wc.cohort_id, wc.bed_id))),
         runtime = 1440,
     log:
         _cohort_outdir + "/{bed_id}/logs/{bed_id}_validate_sample_types.log"
@@ -545,8 +210,63 @@ rule _9I2_validate_sample_types:
         """
 
 
+# Merge per-gene canonical-transcript coverage across the bed's samples into gene x sample matrices
+# and red/white/blue heatmaps (one set each for average coverage, median coverage and breadth of
+# coverage, i.e. fraction of bases at depth >= merge_min_dp_snv), each with a
+# per-sample on-target read count bar chart (from _6A) underneath
+_AVG_COV_DIR = _cohort_outdir + "/{bed_id}/output/cohort_qc/avg_coverage/{bed_id}"
+
+rule _9D_merge_avg_coverage:
+    input:
+        infiles         = lambda wc: _bed_qc_files(wc.cohort_id, wc.bed_id, "avg_coverage"),
+        on_target_files = lambda wc: _bed_qc_files(wc.cohort_id, wc.bed_id, "on_target"),
+    output:
+        avg_matrix          = _AVG_COV_DIR + "_avg_coverage_matrix.tsv",
+        avg_matrix_alias    = _AVG_COV_DIR + "_avg_coverage_matrix_alias.tsv",
+        avg_heatmap         = _AVG_COV_DIR + "_avg_coverage_heatmap.pdf",
+        avg_heatmap_alias   = _AVG_COV_DIR + "_avg_coverage_heatmap_alias.pdf",
+        median_matrix        = _AVG_COV_DIR + "_median_coverage_matrix.tsv",
+        median_matrix_alias  = _AVG_COV_DIR + "_median_coverage_matrix_alias.tsv",
+        median_heatmap       = _AVG_COV_DIR + "_median_coverage_heatmap.pdf",
+        median_heatmap_alias = _AVG_COV_DIR + "_median_coverage_heatmap_alias.pdf",
+        breadth_matrix        = _AVG_COV_DIR + "_breadth_coverage_matrix.tsv",
+        breadth_matrix_alias  = _AVG_COV_DIR + "_breadth_coverage_matrix_alias.tsv",
+        breadth_heatmap       = _AVG_COV_DIR + "_breadth_coverage_heatmap.pdf",
+        breadth_heatmap_alias = _AVG_COV_DIR + "_breadth_coverage_heatmap_alias.pdf",
+    params:
+        samples      = lambda wc: _quoted(bed_samples(wc.cohort_id, wc.bed_id)),
+        sample_types = lambda wc: _quoted([SAMPLES[s]["sample_type"] for s in bed_samples(wc.cohort_id, wc.bed_id)]),
+        colors       = lambda wc: _quoted([sample_type_color(SAMPLES[s]["sample_type"]) for s in bed_samples(wc.cohort_id, wc.bed_id)]),
+        outprefix    = lambda wc: (str(bed_outdir(wc.cohort_id, wc.bed_id)) + '/cohort_qc/avg_coverage/' + str(wc.bed_id)),
+        title        = lambda wc: config.get("cohort_qc_title", (str(wc.cohort_id) + ' ' + str(wc.bed_id) + ' canonical transcript coverage')),
+        center       = config.get("coverage_heatmap_center", 50),
+        alias_args   = lambda wc: _quoted(alias_map_args(bed_samples(wc.cohort_id, wc.bed_id))),
+        script       = workflow.basedir + "/scripts/merge_avg_coverage.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(4, len(bed_samples(wc.cohort_id, wc.bed_id)) // 8),
+        runtime = 60,
+    log:
+        _cohort_outdir + "/{bed_id}/logs/{bed_id}_avg_coverage.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.avg_matrix}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles         {input.infiles} \\
+            --on-target-files {input.on_target_files} \\
+            --samples         {params.samples} \\
+            --sample-types    {params.sample_types} \\
+            --colors          {params.colors} \\
+            --outprefix       {params.outprefix} \\
+            --title           {params.title:q} \\
+            --center          {params.center} \\
+            --alias-map       {params.alias_args} \\
+        2>&1 | tee {log}
+        """
+
+
 # Merge full-length-read ratios across the bed's samples, colored/grouped by sample_type
-rule _9J_merge_full_length_ratio:
+rule _9E_merge_full_length_ratio:
     input:
         infiles = lambda wc: _bed_qc_files(wc.cohort_id, wc.bed_id, "full_length_ratio"),
     output:
@@ -605,7 +325,7 @@ def _quoted_outlier_args(cid=None):
 
 
 # Read-count-based expression matrix
-rule _9K_merge_gene_count:
+rule _9F1_merge_gene_count:
     input:
         infiles = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "gene_count"),
     output:
@@ -644,10 +364,10 @@ rule _9K_merge_gene_count:
 
 
 # Outlier report/boxplots for the by-count z-scores (both CPTM and MOTR)
-rule _9K2_gene_count_zscore_report:
+rule _9F2_gene_count_zscore_report:
     input:
-        zscores_cptm = rules._9K_merge_gene_count.output.zscores_cptm,
-        zscores_motr = rules._9K_merge_gene_count.output.zscores_motr,
+        zscores_cptm = rules._9F1_merge_gene_count.output.zscores_cptm,
+        zscores_motr = rules._9F1_merge_gene_count.output.zscores_motr,
     output:
         cptm_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_cptm_outliers_by_sample.tsv",
         cptm_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_count/gene_count_zscores_cptm_outliers_by_gene.tsv",
@@ -688,7 +408,7 @@ rule _9K2_gene_count_zscore_report:
 
 
 # Coverage-based expression matrix
-rule _9L_merge_gene_coverage:
+rule _9G1_merge_gene_coverage:
     input:
         infiles = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "gene_coverage"),
     output:
@@ -727,10 +447,10 @@ rule _9L_merge_gene_coverage:
 
 
 # Outlier report/boxplots for the by-coverage z-scores (both CPTM and MOTR)
-rule _9L2_gene_coverage_zscore_report:
+rule _9G2_gene_coverage_zscore_report:
     input:
-        zscores_cptm = rules._9L_merge_gene_coverage.output.zscores_cptm,
-        zscores_motr = rules._9L_merge_gene_coverage.output.zscores_motr,
+        zscores_cptm = rules._9G1_merge_gene_coverage.output.zscores_cptm,
+        zscores_motr = rules._9G1_merge_gene_coverage.output.zscores_motr,
     output:
         cptm_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_cptm_outliers_by_sample.tsv",
         cptm_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_coverage/gene_coverage_zscores_cptm_outliers_by_gene.tsv",
@@ -771,7 +491,7 @@ rule _9L2_gene_coverage_zscore_report:
 
 
 # Splice-site-assignment-based expression matrix (source of the MOTR z-scores used in merged hits)
-rule _9M_merge_gene_by_assignment:
+rule _9H1_merge_gene_by_assignment:
     input:
         infiles       = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "gene_assignment"),
         stats_infiles = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "read_outcomes"),
@@ -815,10 +535,10 @@ rule _9M_merge_gene_by_assignment:
 
 # Outlier report/boxplots for the by-assignment z-scores (both CPTM and MOTR) -- MOTR is the
 # metric that actually feeds the RNA_dysregulation call in merge_hits.py
-rule _9M2_gene_assignment_zscore_report:
+rule _9H2_gene_assignment_zscore_report:
     input:
-        zscores_cptm = rules._9M_merge_gene_by_assignment.output.zscores_cptm,
-        zscores_motr = rules._9M_merge_gene_by_assignment.output.zscores_motr,
+        zscores_cptm = rules._9H1_merge_gene_by_assignment.output.zscores_cptm,
+        zscores_motr = rules._9H1_merge_gene_by_assignment.output.zscores_motr,
     output:
         cptm_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_cptm_outliers_by_sample.tsv",
         cptm_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_cptm_outliers_by_gene.tsv",
@@ -873,7 +593,7 @@ def _amalgam_quantification_tsv(cohort_id, bed_id, sample_type, sample):
 
 
 # Merge each group's per-sample StringTie assemblies into one combined transcript GTF
-rule _9N1_amalgam_merge_gtfs:
+rule _9I1_amalgam_merge_gtfs:
     input:
         annotation  = config["annotation"],
         sample_gtfs = lambda wc: [
@@ -907,7 +627,7 @@ rule _9N1_amalgam_merge_gtfs:
 
 
 # Filter/refine the merged transcript set into this group's AMALGAM transcriptome
-rule _9N2_amalgam_build_transcriptome:
+rule _9I2_amalgam_build_transcriptome:
     input:
         combined_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/merged.combined.gtf",
         tracking      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/merged.tracking",
@@ -949,7 +669,7 @@ rule _9N2_amalgam_build_transcriptome:
 
 
 # Annotate the group transcriptome's ORFs
-rule _9N3_amalgam_annotate_orf:
+rule _9I3_amalgam_annotate_orf:
     input:
         filtered_gtf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/filtered.gtf",
         annotation   = config["annotation"],
@@ -985,7 +705,7 @@ rule _9N3_amalgam_annotate_orf:
 
 
 # Quantify each sample's reads against the group's AMALGAM transcriptome
-rule _9N4_amalgam_quantify_transcripts:
+rule _9I4_amalgam_quantify_transcripts:
     input:
         bam    = lambda wc: SAMPLES[wc.sample]["bam"],
         gtf_gz = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/annotation/filtered.gtf.gz",
@@ -1020,7 +740,7 @@ rule _9N4_amalgam_quantify_transcripts:
 #   gene_amalgam_matrix_raw.tsv                -- BED-panel genes only
 #   transcript_amalgam_matrix_raw_all_genes.tsv -- genome-wide transcript counts
 #   transcript_amalgam_matrix_raw.tsv           -- BED-panel genes only
-rule _9N5_amalgam_aggregate_matrices:
+rule _9I5_amalgam_aggregate_matrices:
     input:
         tsvs = lambda wc: [
             _amalgam_quantification_tsv(wc.cohort_id, wc.bed_id, wc.sample_type, s)
@@ -1059,10 +779,10 @@ rule _9N5_amalgam_aggregate_matrices:
 
 
 # CPTM/MOTR-normalize the AMALGAM gene matrix and compute outlier z-scores, same as the other metrics.
-# Input is the BED-panel-filtered, symbol-keyed raw matrix produced by _9N5.
-rule _9N6_amalgam_normalize_matrix:
+# Input is the BED-panel-filtered, symbol-keyed raw matrix produced by _9I5.
+rule _9I6_amalgam_normalize_matrix:
     input:
-        gene_matrix_raw = rules._9N5_amalgam_aggregate_matrices.output.gene_matrix_raw,
+        gene_matrix_raw = rules._9I5_amalgam_aggregate_matrices.output.gene_matrix_raw,
     output:
         matrix_cptm = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_matrix_cptm.tsv",
         matrix_motr = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_matrix_motr.tsv",
@@ -1096,10 +816,10 @@ rule _9N6_amalgam_normalize_matrix:
 
 
 # Outlier report/boxplots for the AMALGAM z-scores (both CPTM and MOTR)
-rule _9N7_amalgam_zscore_report:
+rule _9I7_amalgam_zscore_report:
     input:
-        zscores_cptm = rules._9N6_amalgam_normalize_matrix.output.zscores_cptm,
-        zscores_motr = rules._9N6_amalgam_normalize_matrix.output.zscores_motr,
+        zscores_cptm = rules._9I6_amalgam_normalize_matrix.output.zscores_cptm,
+        zscores_motr = rules._9I6_amalgam_normalize_matrix.output.zscores_motr,
     output:
         cptm_by_sample = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_cptm_outliers_by_sample.tsv",
         cptm_by_gene   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_amalgam/gene_amalgam_zscores_cptm_outliers_by_gene.tsv",
@@ -1139,11 +859,356 @@ rule _9N7_amalgam_zscore_report:
         """
 
 
-# Per-junction metric distribution plots across the cohort.
-# For each (metric × junction) hit in merged_all_hits.tsv, produces one PDF with a boxplot
-# per sample_type. Metric values come from 8A raw TSVs (cohort metrics) and from the per-sample
-# GTEx all_junctions.tsv files (junction_PSI_approx GTEx hits).
-# Runs once per {filter_set} at the bed level.
+# Pool each group's per-sample filtered variants and keep those recurring across enough callers/samples.
+# Runs once per {filter_set} ("default" / "stringent"), which differ only in sample_fraction.
+rule _9J_merge_group_variants:
+    input:
+        variant_files = lambda wc: _group_variant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
+    output:
+        tsv = _variant_tsv,
+    params:
+        group_id     = lambda wc: _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type),
+        n            = lambda wc: ceil(len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])
+                                        * _variant_sample_fraction(wc.filter_set)),
+        outprefix    = lambda wc, output: output.tsv[:-len(".tsv")],
+        num_callers_snv   = config["merge_num_callers_threshold_snv"],
+        num_callers_indel = config["merge_num_callers_threshold_indel"],
+        min_dp_snv        = config["merge_min_dp_snv"],
+        min_dp_indel      = config["merge_min_dp_indel"],
+        script       = workflow.basedir + "/scripts/merge_and_filter_variants.py",
+    threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "merge_group_variants", 1)
+    resources:
+        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)]) // 8),
+        runtime = config["time"],
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_variants_{filter_set}.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles {input.variant_files} \\
+            --outprefix {params.outprefix} \\
+            --num-callers-threshold-SNV {params.num_callers_snv} \\
+            --num-callers-threshold-indel {params.num_callers_indel} \\
+            --min-DP-SNV {params.min_dp_snv} \\
+            --min-DP-indel {params.min_dp_indel} \\
+            --sample-number-threshold {params.n} \\
+            --plot \\
+            --plot-variant-type SNV indel \\
+            --title "{params.group_id} ({wildcards.filter_set}) Variant Counts" \\
+        2>&1 | tee {log}
+        """
+
+
+# Pool each group's per-sample ASE results and keep the ones that clear the group-level thresholds.
+# Runs once per {filter_set} ("default" / "stringent"), which differ only in sample_fraction.
+rule _9K_merge_group_ase:
+    input:
+        ase_files = lambda wc: _group_ase_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
+    output:
+        tsv = _ase_tsv,
+    params:
+        group_id     = lambda wc: _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type),
+        n            = lambda wc: ceil(len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])
+                                        * _ase_sample_fraction(wc.filter_set)),
+        outprefix    = lambda wc, output: output.tsv[:-len(".tsv")],
+        min_hap_ratio       = config["merge_min_haplotype_ratio"],
+        minor_hap_freq_thr  = config["merge_minor_haplotype_frequency_threshold"],
+        ase_padj_thr        = config["merge_ase_padj_threshold"],
+        script       = workflow.basedir + "/scripts/merge_and_filter_ase_results.py",
+    threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "merge_group_ase", 1)
+    resources:
+        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)]) // 8),
+        runtime = config["time"],
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_ase_{filter_set}.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles {input.ase_files} \\
+            --outprefix {params.outprefix} \\
+            --min-haplotype-ratio {params.min_hap_ratio} \\
+            --minor-haplotype-frequency-threshold {params.minor_hap_freq_thr} \\
+            --padj-threshold {params.ase_padj_thr} \\
+            --plot \\
+            --title "{params.group_id} ({wildcards.filter_set}): Number of Genes with Allele-specific Expression by Sample" \\
+            --sample-number-threshold {params.n} \\
+        2>&1 | tee {log}
+        """
+
+
+# Pool each group's per-sample GTEx junction outliers (per tissue) into one group-level table.
+# Runs once per {filter_set} ("default" / "stringent"), which differ only in sample_fraction.
+rule _9L_merge_group_junctions:
+    input:
+        junction_files = lambda wc: _group_tissue_junction_files(
+            _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue),
+        bed            = lambda wc: bed_path(wc.cohort_id, wc.bed_id),
+        gtf            = config["annotation"],
+    output:
+        tsv = _junction_final,
+    params:
+        group_id  = lambda wc: _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type),
+        n         = lambda wc: ceil(len(_group_tissue_samples(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue))
+                                     * _jxn_sample_fraction(wc.filter_set)),
+        outprefix = lambda wc: _group_junction_outprefix(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue, wc.filter_set),
+        source_glob = lambda wc: _group_junction_source_glob(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue, wc.filter_set),
+        jxn_cov_thr   = config["merge_jxn_coverage_threshold"],
+        jxn_padj_thr  = config["merge_jxn_padj_threshold"],
+        delta_psi_thr = config["merge_delta_psi_threshold"],
+        script    = workflow.basedir + "/scripts/merge_and_filter_junction_results.py",
+    threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "merge_group_junctions", 1)
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(_group_tissue_samples(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue)) // 8),
+        runtime = config["time"],
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_junctions_{filter_set}_{tissue}.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --infiles {input.junction_files} \\
+            --outprefix {params.outprefix} \\
+            --jxn-coverage-threshold {params.jxn_cov_thr} \\
+            --padj-threshold {params.jxn_padj_thr} \\
+            --delta-PSI-threshold {params.delta_psi_thr} \\
+            --bed {input.bed} \\
+            --gtf {input.gtf} \\
+            --event-types exon_skipping_approx exon_inclusion_approx alt_5ss_approx alt_3ss_approx complex_approx \\
+            --sample-number-threshold {params.n} \\
+            --plot \\
+            --title "{params.group_id} ({wildcards.filter_set}): Number of Genes with Outlier Junctions by Sample" \\
+        2>&1 | tee {log}
+        SRC=$(ls {params.source_glob} 2>/dev/null | head -1)
+        if [ -z "$SRC" ]; then
+            echo "WARNING: no output file matched glob {params.source_glob}" | tee -a {log} >&2
+            exit 1
+        fi
+        cp "$SRC" {output.tsv}
+        echo "Copied $SRC -> {output.tsv}" >> {log}
+        """
+
+
+def _group_all_hits_path(group_id, filter_set):
+    return str(group_outdir(group_id)) + "/merged_hits/" + str(filter_set) + "/all_hits.tsv"
+
+
+# Build each group's ranked hit table from its variant/ASE/GTEx-junction evidence, plus the
+# cohort junction outliers (if cohort_junction_analysis is on) and the splice-site-assignment
+# expression matrices/z-scores (if gene_quantification is on). Every panel gene x sample gets a
+# row: hit=TRUE rows are the ranked hits, hit=FALSE rows have '.' in every hit column. All rows
+# carry average/breadth coverage (_6D) and how many canonical junctions were tested (GTEx or cohort).
+# Runs once per {filter_set} ("default" / "stringent").
+# Inputs for the gene x sample testability columns (average/breadth coverage, canonical junctions tested)
+def _group_avg_coverage_files(group_id):
+    return [_sample_qc_file(s, "avg_coverage") for s in GROUPS[group_id]]
+
+def _group_gtex_all_junction_files(group_id):
+    return [(str(SAMPLES[s]['outdir']) + '/junction_analysis/gtex_' + str(t) + '/' + str(s)
+             + '_gtex_' + str(t) + '_all_junctions.tsv')
+            for s in GROUPS[group_id] for t in sample_tissues(s)]
+
+def _group_cohort_results_dir(group_id):
+    return (str(group_outdir(group_id)) + '/cohort_junction_analysis/' + str(group_id)
+            + '_results_' + _cja_method_for_group(group_id))
+
+def _group_cohort_scoring_sentinel(cohort_id, bed_id, sample_type):
+    return _cja_scoring_sentinel.format(cohort_id=cohort_id, bed_id=bed_id, sample_type=sample_type)
+
+rule _9M1_merge_group_hits:
+    input:
+        bed            = lambda wc: bed_path(wc.cohort_id, wc.bed_id),
+        gtf            = config["annotation"],
+        avg_coverage_files = lambda wc: (
+            _group_avg_coverage_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))
+        ) if flag("qc") else [],
+        gtex_all_junction_files = lambda wc: (
+            _group_gtex_all_junction_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))
+        ) if flag("junction_analysis") else [],
+        cohort_scoring_sentinel = lambda wc: (
+            _group_cohort_scoring_sentinel(wc.cohort_id, wc.bed_id, wc.sample_type)
+        ) if flag("cohort_junction_analysis") else [],
+        variant_tsv    = _variant_tsv,
+        ase_tsv        = _ase_tsv,
+        junction_files = lambda wc: [
+            _group_junction_final_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), t, wc.filter_set)
+            for t in group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))
+        ],
+        cohort_junction_tsv = lambda wc: (
+            _cja_outliers_filtered_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))
+        ) if flag("cohort_junction_analysis") else [],
+        gene_expression_matrix = lambda wc: (
+            config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
+            + "/output/gene_quantification/by_assignment/gene_assignment_matrix_cptm.tsv"
+        ) if config.get("gene_quantification") else [],
+        gene_expression_matrix_motr = lambda wc: (
+            config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
+            + "/output/gene_quantification/by_assignment/gene_assignment_matrix_motr.tsv"
+        ) if config.get("gene_quantification") else [],
+        gene_expression_zscores = lambda wc: (
+            config["output_dir"] + "/" + str(wc.cohort_id) + "/" + str(wc.bed_id) + "/output/sample_types/" + str(wc.sample_type)
+            + "/output/gene_quantification/by_assignment/gene_assignment_zscores_motr.tsv"
+        ) if config.get("gene_quantification") else [],
+    output:
+        all_hits = _all_hits_tsv,
+    params:
+        samples      = lambda wc: GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)],
+        tissues      = lambda wc: group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
+        omim_flag    = ("--omim " + config["omim_file"]) if config.get("omim_file") else "",
+        cohort_junction_flag = lambda wc, input: (
+            "--cohort-junction-tsv " + str(input.cohort_junction_tsv)
+        ) if flag("cohort_junction_analysis") else "",
+        gene_expression_flag = lambda wc, input: (
+            "--gene-expression-matrix " + str(input.gene_expression_matrix)
+        ) if config.get("gene_quantification") else "",
+        gene_expression_motr_flag = lambda wc, input: (
+            "--gene-expression-matrix-motr " + str(input.gene_expression_matrix_motr)
+        ) if config.get("gene_quantification") else "",
+        gene_expression_zscore_flag = lambda wc, input: (
+            "--gene-expression-zscores " + str(input.gene_expression_zscores)
+        ) if config.get("gene_quantification") else "",
+        avg_coverage_flag = lambda wc, input: (
+            "--avg-coverage-files " + " ".join(input.avg_coverage_files)
+        ) if flag("qc") else "",
+        gtex_all_junctions_flag = lambda wc, input: (
+            "--gtex-all-junction-files " + " ".join(input.gtex_all_junction_files)
+        ) if flag("junction_analysis") else "",
+        cohort_results_flag = lambda wc: (
+            "--cohort-results-dir " + _group_cohort_results_dir(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))
+        ) if flag("cohort_junction_analysis") else "",
+        script       = workflow.basedir + "/scripts/merge_group_hits.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
+        runtime = config["time"],
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/merge_group_hits_{filter_set}.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.all_hits}) $(dirname {log})
+        python -u {params.script} \\
+            --outfile     {output.all_hits} \\
+            --variant-tsv {input.variant_tsv} \\
+            --ase-tsv     {input.ase_tsv} \\
+            --tissues     {params.tissues} \\
+            --junction-files {input.junction_files} \\
+            --samples     {params.samples} \\
+            {params.omim_flag} \\
+            {params.cohort_junction_flag} \\
+            {params.gene_expression_flag} \\
+            {params.gene_expression_motr_flag} \\
+            {params.gene_expression_zscore_flag} \\
+            --bed         {input.bed} \\
+            --gtf         {input.gtf} \\
+            {params.avg_coverage_flag} \\
+            {params.gtex_all_junctions_flag} \\
+            {params.cohort_results_flag} \\
+        2>&1 | tee {log}
+        """
+
+
+# Bar/box plots of genes with each hit category (pathogenic variant, ASE, junction, dysregulation).
+# Runs once per {filter_set} ("default" / "stringent").
+rule _9M2_plot_group_hits:
+    input:
+        all_hits = lambda wc: _group_all_hits_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.filter_set),
+    output:
+        pathogenic_bar  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_pathogenic_variant_barplot.pdf",
+        pathogenic_box  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_pathogenic_variant_boxplot.pdf",
+        ase_bar         = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_ASE_barplot.pdf",
+        ase_box         = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_ASE_boxplot.pdf",
+        junction_bar    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_outlier_junction_barplot.pdf",
+        junction_box    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_outlier_junction_boxplot.pdf",
+        dysreg_bar      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_RNA_dysregulation_barplot.pdf",
+        dysreg_box      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_RNA_dysregulation_boxplot.pdf",
+    params:
+        outdir = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}",
+        script = workflow.basedir + "/scripts/plot_candidate_hits.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
+        runtime = 60,
+    log:
+        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/plot_group_hits_{filter_set}.log"
+    shell:
+        """
+        python -u {params.script} \\
+            --infile {input.all_hits} \\
+            --outdir {params.outdir} \\
+        2>&1 | tee {log}
+        """
+
+
+# Concatenate every group's hit table into one bed-level table, plus a simplified summary version.
+# Runs once per {filter_set} ("default" / "stringent").
+rule _9N1_final_merge:
+    input:
+        all_hits = lambda wc: [_group_all_hits_path(gid, wc.filter_set) for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]],
+    output:
+        merged          = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits.tsv",
+        simplified      = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits_simplified.tsv",
+        simplified_alias = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits_simplified_alias.tsv",
+    params:
+        script     = workflow.basedir + "/scripts/simplify_all_hits.py",
+        alias_args = lambda wc: _quoted(alias_map_args(bed_samples(wc.cohort_id, wc.bed_id))),
+    threads: lambda wc: _group_threads(str(wc.cohort_id) + "_" + str(wc.bed_id), "final_merge", 1)
+    resources:
+        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(bed_samples(wc.cohort_id, wc.bed_id)) // 8),
+        runtime = 60,
+    log:
+        _cohort_outdir + "/{bed_id}/logs/{bed_id}_final_merge_{filter_set}.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.merged}) $(dirname {log})
+        awk 'FNR==1 && NR!=1 {{next}} {{print}}' {input.all_hits} > {output.merged} 2> {log}
+        echo "Finished final merge to {output.merged}." >> {log}
+
+        python -u {params.script} \\
+            --infile  {output.merged} \\
+            --outfile {output.simplified} \\
+            --alias-outfile {output.simplified_alias} \\
+            --alias-map {params.alias_args} \\
+        2>&1 | tee -a {log}
+        """
+
+
+# Upset plot of overlapping hit categories per sample.
+# Runs once per {filter_set} ("default" / "stringent").
+rule _9N2_plot_hits_upset:
+    input:
+        all_hits = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits.tsv",
+    output:
+        pdf_density      = _cohort_outdir + "/{bed_id}/output/{filter_set}/hits_upset_density.pdf",
+        tsv              = _cohort_outdir + "/{bed_id}/output/{filter_set}/hits_upset_counts.tsv",
+        tier_pdf_density = _cohort_outdir + "/{bed_id}/output/{filter_set}/tier_gene_counts_density.pdf",
+        tier_tsv         = _cohort_outdir + "/{bed_id}/output/{filter_set}/tier_gene_counts.tsv",
+    params:
+        samples      = lambda wc: bed_samples(wc.cohort_id, wc.bed_id),
+        sample_types = lambda wc: [SAMPLES[s]["sample_type"] for s in bed_samples(wc.cohort_id, wc.bed_id)],
+        outdir       = _cohort_outdir + "/{bed_id}/output/{filter_set}",
+        title        = lambda wc: f"{wc.bed_id} ({wc.filter_set}): Candidate Gene Hit Categories by Sample",
+        script       = workflow.basedir + "/scripts/plot_hits_upset.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
+        runtime = 60,
+    log:
+        _cohort_outdir + "/{bed_id}/logs/{bed_id}_hits_upset_{filter_set}.log"
+    shell:
+        """
+        mkdir -p {params.outdir} $(dirname {log})
+        python -u {params.script} \\
+            --infile      {input.all_hits} \\
+            --samples     {params.samples} \\
+            --sample-types {params.sample_types} \\
+            --outdir      {params.outdir} \\
+            --title       "{params.title}" \\
+        2>&1 | tee {log}
+        """
+
+
+# 8A gene manifests of every group on a panel (for the hit reports' metric distribution panels).
 def _bed_cohort_manifest_args(cohort_id, bed_id):
     """Return 'sample_type:manifest_path' pairs for --cohort-manifests."""
     pairs = []
@@ -1166,37 +1231,62 @@ def _bed_cja_manifests(cohort_id, bed_id):
     return files
 
 
-rule _9O_plot_junction_distributions:
+# One IGV-style PDF per sample for its candidate genes (default hit set only;
+# stringent is a subset): gene body (bulk, hap1, hap2), variant zooms, outlier splicing events
+# with sashimi arcs, and cohort metric distributions.
+def _sample_gene_bam_mapping(sample):
+    return str(SAMPLES[sample]['outdir']) + '/phased_reads/' + str(sample) + '_gene_bam_mapping_file.tsv'
+
+
+rule _9O_sample_hit_report:
     input:
-        merged_hits   = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits.tsv",
-        cja_manifests = lambda wc: _bed_cja_manifests(wc.cohort_id, wc.bed_id),
+        merged_hits   = _cohort_outdir + "/{bed_id}/output/default/merged_all_hits.tsv",
+        bam           = lambda wc: SAMPLES[wc.sample]["bam"],
+        mapping       = lambda wc: _sample_gene_bam_mapping(wc.sample) if flag("phase_reads") else [],
+        bed           = lambda wc: bed_path(wc.cohort_id, wc.bed_id),
+        gtf           = config["annotation"],
+        cja_manifests = lambda wc: _bed_cja_manifests(wc.cohort_id, wc.bed_id) if flag("cohort_junction_analysis") else [],
     output:
-        sentinel = _cohort_outdir + "/{bed_id}/output/{filter_set}/junction_distributions.done",
+        pdf = _cohort_outdir + "/{bed_id}/output/default/hit_reports/{sample}_hit_report.pdf",
     params:
-        outdir           = _cohort_outdir + "/{bed_id}/output/{filter_set}",
-        cohort_manifests = lambda wc: _quoted(_bed_cohort_manifest_args(wc.cohort_id, wc.bed_id)),
+        genome           = config["genome"],
+        mapping_arg      = lambda wc, input: ("--gene-bam-mapping " + str(input.mapping)) if input.mapping else "",
+        cohort_manifests = lambda wc: _quoted(_bed_cohort_manifest_args(wc.cohort_id, wc.bed_id)) if flag("cohort_junction_analysis") else [],
         samples          = lambda wc: bed_samples(wc.cohort_id, wc.bed_id),
         sample_types     = lambda wc: [SAMPLES[s]["sample_type"] for s in bed_samples(wc.cohort_id, wc.bed_id)],
+        colors           = lambda wc: _quoted([sample_type_color(SAMPLES[s]["sample_type"]) for s in bed_samples(wc.cohort_id, wc.bed_id)]),
         cov_thr          = config["sample_coverage_threshold"],
-        script           = workflow.basedir + "/scripts/plot_junction_distributions.py",
-    threads: lambda wc: _group_threads(str(wc.cohort_id) + "_" + str(wc.bed_id), "plot_junction_distributions", 1)
+        top_n            = config.get("hit_report_top_n", 0),
+        max_tier         = config.get("hit_report_max_tier", 5),
+        max_reads        = config.get("hit_report_max_reads", 500),
+        alias_args       = lambda wc: _quoted(alias_map_args([wc.sample])),
+        script           = workflow.basedir + "/scripts/make_sample_hit_report.py",
+    threads: 1
     resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(bed_samples(wc.cohort_id, wc.bed_id)) // 4),
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
-        _cohort_outdir + "/{bed_id}/logs/{bed_id}_junction_distributions_{filter_set}.log"
+        _cohort_outdir + "/{bed_id}/logs/hit_reports/{sample}_hit_report.log"
     shell:
         """
-        mkdir -p {params.outdir} $(dirname {log})
-
+        mkdir -p $(dirname {output.pdf}) $(dirname {log})
         python -u {params.script} \\
+            --sample             {wildcards.sample} \\
             --hits-tsv           {input.merged_hits} \\
-            --outdir             {params.outdir} \\
-            --filter-set         {wildcards.filter_set} \\
+            --bam                {input.bam} \\
+            {params.mapping_arg} \\
+            --bed                {input.bed} \\
+            --gtf                {input.gtf} \\
+            --genome             {params.genome} \\
             --cohort-manifests   {params.cohort_manifests} \\
             --samples            {params.samples} \\
             --sample-types       {params.sample_types} \\
+            --colors             {params.colors} \\
             --coverage-threshold {params.cov_thr} \\
-            --sentinel           {output.sentinel} \\
+            --top-n              {params.top_n} \\
+            --max-tier           {params.max_tier} \\
+            --max-reads          {params.max_reads} \\
+            --alias-map          {params.alias_args} \\
+            --outfile            {output.pdf} \\
         2>&1 | tee {log}
         """

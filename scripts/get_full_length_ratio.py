@@ -24,7 +24,7 @@ def parse_args():
         help="Optional per-sample sample_type label (same order as --infiles), for boxplot/bar coloring")
     parser.add_argument("--colors", nargs="*", default=[],
         help="Optional per-sample pre-resolved hex color (same order/length as --sample-types -- same "
-             "colors _9I2_validate_sample_types uses, resolved by the calling rule via the Snakefile's "
+             "colors _9C2_validate_sample_types uses, resolved by the calling rule via the Snakefile's "
              "sample_type_color(), not recomputed here)")
     parser.add_argument("--outprefix", required=True, help="Prefix for all output files.")
     parser.add_argument("--title", default="Full-length transcript coverage ratio (FLR)", help="Plot title prefix.")

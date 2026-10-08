@@ -31,6 +31,8 @@ from typing import Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 
+from hits_io import read_hit_rows
+
 
 # ---------------------------------------------------------------------------
 # Column names used in merged_all_hits.tsv
@@ -101,7 +103,7 @@ def parse_args() -> argparse.Namespace:
         description="Plot cohort junction metric distributions for hit junctions."
     )
     p.add_argument("--hits-tsv",         required=True,
-                   help="merged_all_hits.tsv produced by rule _9F_final_merge.")
+                   help="merged_all_hits.tsv produced by rule _9N1_final_merge.")
     p.add_argument("--outdir",           required=True,
                    help="Base output directory ({cohort_outdir}/{bed_id}/output/{filter_set}).")
     p.add_argument("--filter-set",       required=True,
@@ -373,7 +375,7 @@ def main() -> None:
         open(args.sentinel, "w").close()
         return
 
-    hits_df = pd.read_csv(args.hits_tsv, sep="\t", dtype=str)
+    hits_df = read_hit_rows(args.hits_tsv, sep="\t", dtype=str)
     if hits_df.empty:
         print("\n[INFO] No hits in hits TSV. Nothing to plot.")
         os.makedirs(os.path.dirname(args.sentinel), exist_ok=True)

@@ -81,3 +81,34 @@ rule _6C_get_full_length_ratio:
             --outfile {output.tsv} \\
         2>&1 | tee {log}
         """
+
+
+# Per-gene read depth over each gene's canonical transcript (median / mean / std across its exonic bases)
+rule _6D_get_avg_coverage:
+    input:
+        bam = lambda wc: SAMPLES[wc.sample]["bam"],
+        bed = lambda wc: SAMPLES[wc.sample]["bed"],
+        gtf = config["annotation"],
+    output:
+        tsv = "{outdir}/qc/{sample}_avg_coverage.tsv",
+    params:
+        script = workflow.basedir + "/scripts/get_avg_coverage_sample.py",
+        min_depth = config["merge_min_dp_snv"],
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
+        runtime = config["time"],
+    log:
+        "{outdir}/../logs/{sample}_avg_coverage.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.tsv}) $(dirname {log})
+        python -u {params.script} \\
+            --sample  {wildcards.sample} \\
+            --bam     {input.bam} \\
+            --bed     {input.bed} \\
+            --gtf     {input.gtf} \\
+            --min-depth {params.min_depth} \\
+            --outfile {output.tsv} \\
+        2>&1 | tee {log}
+        """

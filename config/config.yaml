@@ -11,9 +11,9 @@ ase_analysis: true
 junction_analysis: true
 cohort_junction_analysis: true
 merge_results: true
-merge_results_include_cohort_junctions: true
 qc: true
 gene_quantification: true
+hit_reports: true           # per-sample IGV-style PDF of candidate genes (rule _9O)
 
 # Path to envs created by setup.sh
 conda_env: "envs/conda_env"
@@ -172,6 +172,7 @@ sample_type_colors: # plot color per sample_type; any sample_type not listed her
   PBMCs: "#9D4588"
   wholeblood: "#C23637"
 cohort_qc_title: "Cohort QC"    # title prefix used on cohort QC plots
+coverage_heatmap_center: 50    # canonical-transcript coverage heatmaps: depth drawn white (red below -> 0, blue above -> max)
 gene_quant_title: null    # title override for gene-quantification plots; defaults to an auto-generated title if null
 
 # Gene-level expression analysis
@@ -185,3 +186,8 @@ omim_file: "resources/omim_data/OMIM.tsv"
 # Default cluster resources per job
 threads: 8    # 8 threads for multi-threaded jobs (some jobs are single-threaded)
 time: 1440    # 24 hours
+
+# --- Per-sample hit reports (_9O_sample_hit_report) ---
+hit_report_top_n: 0          # top-ranked hit genes per sample; 0 = every hit
+hit_report_max_tier: 5       # leave out genes with a higher (weaker) tier
+hit_report_max_reads: 500    # reads drawn per alignment track (coverage always uses all reads)

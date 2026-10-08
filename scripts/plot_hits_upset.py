@@ -11,6 +11,8 @@ from matplotlib.colors import to_rgb
 from matplotlib.patches import Rectangle
 from scipy.stats import gaussian_kde
 
+from hits_io import read_hit_rows
+
 rcParams['pdf.fonttype'] = 42
 rcParams['font.size'] = 13
 rcParams['axes.titlesize'] = 15
@@ -328,7 +330,7 @@ def main():
 
     sample_type_by_sample = dict(zip(args.samples, args.sample_types))
 
-    df = pd.read_csv(args.infile, sep='\t', keep_default_na=False)
+    df = read_hit_rows(args.infile, sep='\t', keep_default_na=False)
     df = df.astype(object)
     df.fillna('.', inplace=True)
 

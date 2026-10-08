@@ -885,6 +885,7 @@ def evaluate_snv(
             min_base_quality=0,
             flag_filter=0,
             ignore_overlaps=False,
+            max_depth=100_000_000,   # pysam's default (8000) silently drops reads beyond that depth
         ):
 
             for pread in pileupcolumn.pileups:

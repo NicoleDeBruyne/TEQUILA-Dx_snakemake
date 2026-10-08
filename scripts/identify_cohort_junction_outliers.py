@@ -26,8 +26,8 @@ warnings.filterwarnings("ignore", message=".*Adding colorbar to a different Figu
 
 
 _METRIC_EVENTS: Dict[str, List[str]] = {
-    "junction_PSI_approx":    ["alt_5ss_approx", "alt_3ss_approx", "exon_skipping_approx", "exon_inclusion_approx"],
-    "junction_PSI":           ["alt_5ss", "alt_3ss", "exon_skipping", "exon_inclusion"],
+    "junction_PSI_approx":    ["alt_5ss_approx", "alt_3ss_approx", "exon_skipping_approx", "exon_inclusion_approx", "complex_approx"],
+    "junction_PSI":           ["alt_5ss", "alt_3ss", "exon_skipping", "exon_inclusion", "complex"],
     "5ss_IR_ratio":           ["5ss_IR"],
     "3ss_IR_ratio":           ["3ss_IR"],
     "junction_full_IR_ratio": ["full_IR"],
@@ -200,10 +200,18 @@ def _classify_events_for_metric(
     delta_threshold:    float,
     positive_delta_set: set,
     delta_map:          Dict[Tuple, float],
+    canonical_set:      Optional[set] = None,
 ) -> Dict[Tuple, List[str]]:
+    """canonical_set: (gene, junction) pairs that are canonical. A skipping/inclusion or
+    alt-splice-site group is only labelled if at least one of its junctions is in it. None
+    disables the requirement (no GTF given)."""
     allowed_events = _METRIC_EVENTS.get(metric_col, [])
     if not allowed_events:
-        return {}
+        return {}, []
+    groups: List[Tuple] = []      # junction keys called together (one splicing group each)
+
+    def _has_canonical(gene, *jxns):
+        return canonical_set is None or any((gene, j) in canonical_set for j in jxns)
 
     outlier_by_grp: Dict[Tuple, set] = defaultdict(set)
     for key in outlier_set:
@@ -261,15 +269,20 @@ def _classify_events_for_metric(
                     s_partner = _sign(d_partner)
                     opposite = (s_jxn != 0 and s_partner != 0 and s_jxn != s_partner)
 
+                    if not _has_canonical(gene, jxn, partner_jxn):
+                        continue
+
                     if alt_3ss_label:
                         if p_five == five_ss and p_three != three_ss and opposite:
                             _add(sample, gene, phasing, jxn,         alt_3ss_label)
                             _add(sample, gene, phasing, partner_jxn, alt_3ss_label)
+                            groups.append(((sample, gene, phasing, jxn), (sample, gene, phasing, partner_jxn)))
 
                     if alt_5ss_label:
                         if p_three == three_ss and p_five != five_ss and opposite:
                             _add(sample, gene, phasing, jxn,         alt_5ss_label)
                             _add(sample, gene, phasing, partner_jxn, alt_5ss_label)
+                            groups.append(((sample, gene, phasing, jxn), (sample, gene, phasing, partner_jxn)))
 
             skip_label    = next((e for e in allowed_events if e.startswith("exon_skipping")),  None)
             incl_label    = next((e for e in allowed_events if e.startswith("exon_inclusion")), None)
@@ -298,14 +311,35 @@ def _classify_events_for_metric(
                             continue
                         if s_left == s_long or s_right == s_long:
                             continue
+                        if not _has_canonical(gene, jxn, jl, jr):
+                            continue
                         if skip_label and s_long > 0:
                             for j in (jxn, jl, jr):
                                 _add(sample, gene, phasing, j, skip_label)
+                            groups.append(tuple((sample, gene, phasing, j) for j in (jxn, jl, jr)))
                         if incl_label and s_long < 0:
                             for j in (jxn, jl, jr):
                                 _add(sample, gene, phasing, j, incl_label)
+                            groups.append(tuple((sample, gene, phasing, j) for j in (jxn, jl, jr)))
 
-    return dict(event_map)
+    return dict(event_map), groups
+
+
+def _resolve_psi_events(events: set) -> set:
+    """At most one PSI label and one PSI_approx label per junction, by priority:
+    exon_skipping/exon_inclusion > alt_5ss/alt_3ss. A tie at the winning level (skipping AND
+    inclusion, or alt_5ss AND alt_3ss) becomes "complex" ("complex_approx" for PSI_approx).
+    Labels from other metrics (5ss_IR, 3ss_IR, full_IR, IPA) are left as they are."""
+    out = set(events)
+    for sfx in ("", "_approx"):
+        skip_incl = out & {f"exon_skipping{sfx}", f"exon_inclusion{sfx}"}
+        alt       = out & {f"alt_5ss{sfx}", f"alt_3ss{sfx}"}
+        top = skip_incl or alt
+        if not top:
+            continue
+        out -= skip_incl | alt
+        out.add(f"complex{sfx}" if len(top) > 1 else next(iter(top)))
+    return out
 
 
 def classify_all_events(
@@ -334,17 +368,6 @@ def classify_all_events(
     gene_batches = [all_genes[i:i + batch_size]
                     for i in range(0, n_genes, batch_size)]
 
-    grp_coords_by_gene: Dict[str, Dict] = {}
-    for g in all_genes:
-        grp_coords_by_gene[g] = {}
-    for _, row in final_df[["sample", "gene", "phasing", "junction"]].iterrows():
-        g   = row["gene"]
-        key = (row["sample"], g, row["phasing"])
-        jxn = row["junction"]
-        parts = jxn.split("_")
-        grp_coords_by_gene[g][key] = grp_coords_by_gene[g].get(key, {})
-        grp_coords_by_gene[g][key][jxn] = (int(parts[-2]), int(parts[-1]))
-
     metric_outlier_sets:   Dict[str, set] = {}
     metric_pos_delta_sets: Dict[str, set] = {}
     metric_delta_maps:     Dict[str, Dict[Tuple, float]] = {}
@@ -368,7 +391,7 @@ def classify_all_events(
                     dv   = pd.to_numeric(sig_df[delta_c], errors="coerce")
                     mask = mask & dv.ge(effect_threshold)
                 if _has_jxn_type:
-                    mask = mask & sig_df["junction_type"].isin(["canonical", "annotated"])
+                    mask = mask & sig_df["junction_type"].eq("canonical")
 
             metric_outlier_sets[mc] = set(zip(
                 sig_df.loc[mask, "sample"], sig_df.loc[mask, "gene"],
@@ -383,16 +406,42 @@ def classify_all_events(
                 sig_df.loc[pos_mask, "sample"], sig_df.loc[pos_mask, "gene"],
                 sig_df.loc[pos_mask, "phasing"], sig_df.loc[pos_mask, "junction"],
             ))
-        if delta_c not in final_df.columns:
+        # Deltas are only ever looked up for this metric's outlier keys (the junction itself and
+        # its partner junctions, which are drawn from the same outlier set), so only those rows
+        # of the full scored table are needed -- same result as mapping every row, far less work.
+        out_keys = metric_outlier_sets.get(mc, set())
+        if delta_c not in final_df.columns or not out_keys:
             metric_delta_maps[mc] = {}
         else:
-            dv    = pd.to_numeric(final_df[delta_c], errors="coerce")
+            sub   = final_df[final_df["junction"].isin({k[3] for k in out_keys})]
+            dv    = pd.to_numeric(sub[delta_c], errors="coerce")
             valid = dv.notna()
-            metric_delta_maps[mc] = dict(zip(
-                zip(final_df.loc[valid, "sample"], final_df.loc[valid, "gene"],
-                    final_df.loc[valid, "phasing"], final_df.loc[valid, "junction"]),
-                dv[valid],
-            ))
+            metric_delta_maps[mc] = {
+                k: v for k, v in zip(
+                    zip(sub.loc[valid, "sample"], sub.loc[valid, "gene"],
+                        sub.loc[valid, "phasing"], sub.loc[valid, "junction"]),
+                    dv[valid],
+                ) if k in out_keys
+            }
+
+    # Splice-site coordinates, likewise only for outlier keys: classification only looks up the
+    # coordinates of outlier junctions (coords[jxn] / "j in outlier_jxns"). Parsed from the
+    # junction ID ("chr_ss1_ss2"), exactly as the per-row loop over final_df used to.
+    grp_coords_by_gene: Dict[str, Dict] = {g: {} for g in all_genes}
+    for sample, g, phasing, jxn in set().union(*metric_outlier_sets.values()):
+        parts = jxn.split("_")
+        grp_coords_by_gene.setdefault(g, {}).setdefault((sample, g, phasing), {})[jxn] = (
+            int(parts[-2]), int(parts[-1]))
+
+    # (gene, junction) pairs that are canonical -- every junction in a skipping/inclusion or
+    # alt-splice-site group must come from the outlier sets, so the outlier rows are enough.
+    if _has_jxn_type:
+        is_can = sig_df["junction_type"].eq("canonical")
+        canonical_pairs: Optional[set] = set(zip(sig_df.loc[is_can, "gene"], sig_df.loc[is_can, "junction"]))
+    else:
+        canonical_pairs = None
+        print("[WARNING] No junction_type column (no --gtf): splicing events are not required "
+              "to include a canonical junction.")
 
     def _slice_batch(gene_batch, mc):
         gene_set = set(gene_batch)
@@ -402,25 +451,29 @@ def classify_all_events(
         os_ = {k for k in metric_outlier_sets.get(mc, set())   if k[1] in gene_set}
         ps_ = {k for k in metric_pos_delta_sets.get(mc, set()) if k[1] in gene_set}
         dm_ = {k: v for k, v in metric_delta_maps.get(mc, {}).items() if k[1] in gene_set}
-        return gc, os_, ps_, dm_
+        cs_ = None if canonical_pairs is None else {k for k in canonical_pairs if k[0] in gene_set}
+        return gc, os_, ps_, dm_, cs_
 
     all_event_maps: List[Dict[Tuple, List[str]]] = []
+    all_groups: List[Tuple] = []
     with concurrent.futures.ProcessPoolExecutor(max_workers=threads) as ex:
         futs = {}
         for mc in active_metrics:
             for batch in gene_batches:
-                gc, os_, ps_, dm_ = _slice_batch(batch, mc)
+                gc, os_, ps_, dm_, cs_ = _slice_batch(batch, mc)
                 if not os_:
                     continue
                 fut = ex.submit(
                     _classify_events_for_metric, mc,
-                    os_, gc, strand_map, effect_threshold, effect_threshold, ps_, dm_,
+                    os_, gc, strand_map, effect_threshold, effect_threshold, ps_, dm_, cs_,
                 )
                 futs[fut] = (mc, batch[0])
         for fut in concurrent.futures.as_completed(futs):
             mc, g0 = futs[fut]
             try:
-                all_event_maps.append(fut.result())
+                emap, grps = fut.result()
+                all_event_maps.append(emap)
+                all_groups.extend(grps)
             except Exception as e:
                 print(f"[WARNING] Classification error for {mc} (batch @{g0}): {e}")
                 traceback.print_exc()
@@ -430,317 +483,49 @@ def classify_all_events(
         for key, events in event_map.items():
             merged[key].update(events)
 
+    # Event IDs: junctions linked by any splicing group (any metric, before labels are resolved) in
+    # the same sample, gene and phasing form one event; a junction with only an IR/IPA label is an
+    # event on its own. Numbered E1, E2, ... per sample and gene (bulk, hap1, hap2, then position).
+    parent: Dict[Tuple, Tuple] = {}
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for grp in all_groups:
+        for k in grp:
+            parent.setdefault(k, k)
+        for k in grp[1:]:
+            parent[_find(k)] = _find(grp[0])
+    for key, evs in merged.items():
+        if evs:
+            parent.setdefault(key, key)
+    members: Dict[Tuple, List[Tuple]] = defaultdict(list)
+    for k in parent:
+        members[_find(k)].append(k)
+    _phase_rank = {"bulk": 0, "hap1": 1, "hap2": 2}
+    comps = sorted(members.values(), key=lambda m: (
+        str(m[0][0]), str(m[0][1]), _phase_rank.get(m[0][2], 3),
+        min(int(k[3].split("_")[-2]) for k in m)))
+    event_id: Dict[Tuple, str] = {}
+    counter: Dict[Tuple, int] = defaultdict(int)
+    for m in comps:
+        counter[(m[0][0], m[0][1])] += 1
+        for k in m:
+            event_id[k] = f"E{counter[(m[0][0], m[0][1])]}"
+
     sig_df = sig_df.copy()
     sig_records = sig_df[["sample", "gene", "phasing", "junction"]].to_dict("records")
-    event_strs = []
+    event_strs, event_ids = [], []
     for rec in sig_records:
         key = (rec["sample"], rec["gene"], rec["phasing"], rec["junction"])
-        evs = merged.get(key, set())
+        evs = _resolve_psi_events(merged.get(key, set()))
         event_strs.append(",".join(sorted(evs)) if evs else "none")
+        event_ids.append(event_id.get(key, ".") if evs else ".")
     sig_df["event_type"] = event_strs
+    sig_df["event_id"] = event_ids
     return sig_df
-
-
-_QC_FIGURES = [
-    ("junction_coverage_approx", "junction_coverage_approx", ["junction_PSI_approx"]),
-    ("junction_coverage",        "junction_coverage",        ["junction_PSI", "junction_full_IR_ratio"]),
-    ("5ss_coverage",             "5ss_coverage",             ["5ss_IR_ratio", "junction_IPA_ratio"]),
-    ("3ss_coverage",             "3ss_coverage",             ["3ss_IR_ratio"]),
-]
-_SS_COVERAGE_COLS = frozenset(("5ss_coverage", "3ss_coverage"))
-
-
-def make_qc_figure(
-    final_df: pd.DataFrame,
-    gtf_junctions: Dict[str, Dict],
-    cov_col: str,
-    companions: List[str],
-    file_suffix: str,
-    jxn_subset: str,
-    coverage_threshold: int,
-    out_pdf: str,
-    has_ipa: bool,
-    fit_prefix: str = "alpha_",
-    not_fittable: Tuple[str, ...] = ("low_n", "error"),
-) -> None:
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import matplotlib.colors as mcolors
-        from matplotlib.backends.backend_pdf import PdfPages
-    except ImportError:
-        print("[WARNING] matplotlib not available; skipping QC figures.")
-        return
-
-    color = "#d95d5b" if jxn_subset == "canonical" else "#4c8fca"
-    cmap  = mcolors.LinearSegmentedColormap.from_list("c", ["white", color])
-
-    companions = [m for m in companions
-                  if has_ipa or m != "junction_IPA_ratio"]
-
-    df = final_df
-    genes = [g for g in gtf_junctions if g in df["gene"].unique()]
-    if not genes:
-        print(f"[WARNING] No overlapping genes for {file_suffix} ({jxn_subset}). Skipping.")
-        return
-    samples = sorted(df["sample"].unique())
-    jxn_key = "canonical_junctions" if jxn_subset == "canonical" else "all_junctions"
-    genes = [g for g in genes if len(gtf_junctions[g][jxn_key]) > 0]
-    if not genes:
-        print(f"[WARNING] No genes with {jxn_subset} junctions for {file_suffix}. Skipping.")
-        return
-
-    n_g = len(genes); n_s = len(samples)
-    cov_mat = np.full((n_g, n_s), np.nan)
-    cnt_mat = np.full((n_g, n_s), np.nan)
-    fit_mat = np.full((n_g, len(companions)), np.nan)
-    jxn_n   = []
-    sample_idx = {s: i for i, s in enumerate(samples)}
-    gene_idx   = {g: i for i, g in enumerate(genes)}
-
-    for gene in genes:
-        gi      = gene_idx[gene]
-        jxn_set = gtf_junctions[gene][jxn_key]
-        jxn_n.append(len(jxn_set))
-        gdf     = df[df["gene"] == gene]
-        for ci, cm in enumerate(companions):
-            acol = f"{fit_prefix}{cm}"
-            if acol not in gdf.columns:
-                fit_mat[gi, ci] = 0; continue
-            sub = gdf[gdf["junction"].isin(jxn_set)].drop_duplicates("junction")
-            if sub.empty:
-                fit_mat[gi, ci] = 0
-            else:
-                n_fitted = sub[acol].apply(lambda x: x not in not_fittable and x is not None).sum()
-                fit_mat[gi, ci] = float(n_fitted) / len(jxn_set) if jxn_set else np.nan
-        for sample in samples:
-            si = sample_idx[sample]
-            sub = gdf[(gdf["sample"] == sample) & gdf["junction"].isin(jxn_set)]
-            if not jxn_set or sub.empty:
-                cov_mat[gi, si] = 0.0; cnt_mat[gi, si] = 0.0; continue
-            cov = pd.to_numeric(sub[cov_col], errors="coerce")
-            n   = int((cov >= coverage_threshold).sum())
-            cov_mat[gi, si] = float(n) / len(jxn_set)
-            cnt_mat[gi, si] = float(n)
-
-    gene_order   = np.lexsort((-np.nanmean(cnt_mat, axis=1),  -np.nanmean(cov_mat, axis=1)))
-    sample_order = np.lexsort((-np.nanmean(cnt_mat, axis=0),  -np.nanmean(cov_mat, axis=0)))
-    cov_mat_s = cov_mat[np.ix_(gene_order, sample_order)]
-    fit_mat_s = fit_mat[gene_order]
-    genes_s   = [genes[i]  for i in gene_order]
-    jxn_n_s   = [jxn_n[i]  for i in gene_order]
-    ylabels   = [f"{g}  (n={n})" for g, n in zip(genes_s, jxn_n_s)]
-
-    heat_w = min(max(2.0, n_s * 0.05), 10.0)
-    bar_w  = 1.5
-    n_bars = len(companions)
-    fig_w  = heat_w + bar_w * n_bars + 0.8
-    fig_h  = max(2.0, n_g * 0.18 + 1.2)
-    width_ratios = [heat_w] + [bar_w] * n_bars
-    fig, axes = plt.subplots(1, 1 + n_bars, figsize=(fig_w, fig_h),
-                              gridspec_kw={"width_ratios": width_ratios, "wspace": 0.05})
-    if 1 + n_bars == 1: axes = [axes]
-
-    ax0 = axes[0]
-    feat_word = "splice sites" if cov_col in _SS_COVERAGE_COLS else "junctions"
-    im = ax0.imshow(cov_mat_s, aspect="auto", cmap=cmap, vmin=0, vmax=1, interpolation="nearest")
-    ax0.set_title(f"Proportion of {feat_word} with {cov_col} >= {coverage_threshold}", fontsize=8, pad=3)
-    ax0.set_xticks([]); ax0.set_yticks(range(n_g))
-    ax0.set_yticklabels(ylabels, fontsize=6)
-    fig.colorbar(im, ax=ax0, fraction=0.03, pad=0.01)
-
-    y_pos = np.arange(n_g)
-    for ci, cm in enumerate(companions):
-        ax = axes[ci + 1]
-        ax.barh(y_pos, fit_mat_s[:, ci], 0.6, color=color, alpha=0.85)
-        ax.set_xlim(0, 1)
-        ax.set_title(f"Proportion of {feat_word} with\n{cm} modeled", fontsize=7, pad=3)
-        ax.set_yticks(y_pos); ax.set_yticklabels([])
-        ax.tick_params(left=False); ax.spines["left"].set_visible(False)
-        ax.invert_yaxis()
-    for ax in axes:
-        ax.set_ylim(n_g - 0.5, -0.5)
-
-    fig.suptitle(f"{cov_col} — {jxn_subset.capitalize()} junctions", fontsize=9, y=1.01)
-    t_qc_fig = time.time()
-    with PdfPages(out_pdf) as pdf:
-        pdf.savefig(fig, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  QC figure -> {out_pdf} ({time.time()-t_qc_fig:.2f}s)")
-
-
-def make_outlier_heatmap(
-    sig_df: pd.DataFrame,
-    metric_col: str,
-    effect_col: str,
-    stat_label: str,
-    threshold_desc: str,
-    out_pdf: str,
-) -> None:
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import matplotlib.colors as mcolors
-        from matplotlib.backends.backend_pdf import PdfPages
-    except ImportError:
-        return
-
-    effect_v = pd.to_numeric(sig_df[effect_col], errors="coerce")
-    df = sig_df.copy()
-    df["_abs_delta"] = effect_v.abs()
-    if df.empty: return
-
-    agg = (df.groupby(["gene", "sample"])["_abs_delta"]
-             .max().reset_index().rename(columns={"_abs_delta": "max_delta"}))
-    genes   = sorted(agg["gene"].unique())
-    samples = sorted(agg["sample"].unique())
-    mat = np.full((len(genes), len(samples)), np.nan)
-    g_idx = {g: i for i, g in enumerate(genes)}
-    s_idx = {s: i for i, s in enumerate(samples)}
-    for _, row in agg.iterrows():
-        mat[g_idx[row["gene"]], s_idx[row["sample"]]] = row["max_delta"]
-
-    gene_order   = np.lexsort((-np.nanmean(mat, axis=1), -(~np.isnan(mat)).sum(axis=1)))
-    sample_order = np.lexsort((-np.nanmean(mat, axis=0), -(~np.isnan(mat)).sum(axis=0)))
-    mat_s   = mat[np.ix_(gene_order, sample_order)]
-    genes_s = [genes[i] for i in gene_order]
-    n_g = len(genes_s); n_s = len(samples)
-
-    cmap = mcolors.LinearSegmentedColormap.from_list("wd", ["#ffffff", "#912321"])
-    cmap.set_bad(color="#f2f3f4")
-    heat_w = min(max(2.0, n_s * 0.05), 12.0)
-    fig_h  = max(2.0, n_g * 0.18 + 1.2)
-    fig, ax = plt.subplots(figsize=(heat_w, fig_h))
-    im = ax.imshow(mat_s, aspect="auto", cmap=cmap,
-                   vmin=0, vmax=np.nanmax(mat_s), interpolation="nearest")
-    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.01, label=f"|{stat_label} {metric_col}|")
-    ax.set_yticks(range(n_g)); ax.set_yticklabels(genes_s, fontsize=6)
-    ax.set_xticks([])
-    ax.set_title(f"Outlier heatmap: {metric_col}  ({threshold_desc})",
-                 fontsize=9)
-    fig.tight_layout()
-    t_heat = time.time()
-    with PdfPages(out_pdf) as pdf:
-        pdf.savefig(fig, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Outlier heatmap -> {out_pdf} ({time.time()-t_heat:.2f}s)")
-
-
-def make_hit_boxplots(
-    fmt_updated: pd.DataFrame,
-    outlier_map: dict,
-    metric_col: str,
-    rescaled_col: str,
-    outdir: str,
-    prefix_name: str,
-    tmp_dir: str,
-    threshold_desc: str,
-    stat_label: str,
-    effect_threshold: float,
-    is_ir_ipa: bool = False,
-    has_jxn_type_filter: bool = False,
-) -> None:
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_pdf import PdfPages
-    except ImportError:
-        return
-
-    gene_jxn_map = outlier_map.get(metric_col, {})
-    if not gene_jxn_map: return
-
-    ind_dir = os.path.join(tmp_dir, metric_col)
-    os.makedirs(ind_dir, exist_ok=True)
-    out_pdf = os.path.join(outdir, f"{prefix_name}_boxplots_{metric_col}.pdf")
-    n_hits = sum(len(jxns) for jxns in gene_jxn_map.values())
-    n_written = 0
-
-    t_box = time.time()
-    with PdfPages(out_pdf) as pdf:
-        fig_t, ax_t = plt.subplots(figsize=(4.5, 4.0))
-        ax_t.axis("off")
-        if is_ir_ipa:
-            effect_str = f">= {effect_threshold}"
-        else:
-            effect_str = f"|{effect_threshold}|"
-        jt_line = "\njunction_type: canonical, annotated" if has_jxn_type_filter else ""
-        title_text = (
-            f"Metric: {metric_col}\n"
-            f"{threshold_desc}\n"
-            f"{stat_label} threshold: {effect_str}"
-            f"{jt_line}"
-        )
-        ax_t.text(0.5, 0.5, title_text, transform=ax_t.transAxes,
-                  fontsize=12, va="center", ha="center",
-                  bbox=dict(boxstyle="round,pad=0.6", facecolor="#ffffff", edgecolor="#0068a9"))
-        fig_t.tight_layout()
-        pdf.savefig(fig_t, bbox_inches="tight")
-        plt.close(fig_t)
-
-        for gene, jxn_map in sorted(gene_jxn_map.items()):
-            for jxn, hit_sample_phasings in sorted(jxn_map.items()):
-                try:
-                    sub = fmt_updated[(fmt_updated["gene"] == gene) & (fmt_updated["junction"] == jxn)]
-                    if sub.empty: continue
-                    vals = pd.to_numeric(sub[rescaled_col], errors="coerce")
-                    sub = sub.assign(_val=vals).dropna(subset=["_val"])
-                    if sub.empty: continue
-
-                    hit_samples = set(hit_sample_phasings.keys())
-                    samples_needing_haps = {s for s, phases in hit_sample_phasings.items()
-                                             if phases & {"hap1", "hap2"}}
-
-                    bulk_sub = sub[sub["phasing"] == "bulk"]
-                    if bulk_sub.empty: continue
-                    phased_hits = sub[sub["phasing"].isin(("hap1", "hap2")) &
-                                      sub["sample"].isin(samples_needing_haps)]
-                    overlay = pd.concat([bulk_sub, phased_hits], ignore_index=True)
-
-                    fig, ax = plt.subplots(figsize=(4.0, 3.2))
-                    _black = dict(color="black")
-                    bp = ax.boxplot([bulk_sub["_val"].to_numpy()], showfliers=False, widths=0.5,
-                                    boxprops=_black, whiskerprops=_black, capprops=_black,
-                                    medianprops=_black)
-                    ax.set_xticks([])
-
-                    is_hit = overlay["sample"].isin(hit_samples)
-
-                    def _point_color(phasing, hit):
-                        if phasing == "bulk":
-                            return "#c0392b" if hit else "#2c7fb8"
-                        return "#f1948a"
-
-                    x_jitter    = np.random.normal(1, 0.04, size=len(overlay))
-                    fill_colors = [_point_color(p, h) for p, h in zip(overlay["phasing"], is_hit)]
-                    edge_colors = ["black" if h else "none" for h in is_hit]
-                    edge_widths = [1.0 if h else 0.0 for h in is_hit]
-                    ax.scatter(x_jitter, overlay["_val"], c=fill_colors, s=16, alpha=0.85,
-                              zorder=3, edgecolors=edge_colors, linewidths=edge_widths)
-
-                    for x, y, samp, hit in zip(x_jitter, overlay["_val"], overlay["sample"], is_hit):
-                        if hit:
-                            ax.annotate(samp, (x, y), fontsize=6, xytext=(4, 0),
-                                       textcoords="offset points", va="center")
-
-                    ax.set_title(f"{gene}: {jxn}", fontsize=9)
-                    ax.set_ylabel(rescaled_col, fontsize=8)
-                    ax.set_ylim(0, 1)
-                    fig.tight_layout()
-                    pdf.savefig(fig, bbox_inches="tight")
-                    plt.close(fig)
-                    n_written += 1
-                except Exception as e:
-                    print(f"[WARNING] Box plot failed for {gene}: {jxn} ({metric_col}): {e}")
-                    traceback.print_exc()
-                    try:
-                        plt.close(fig)
-                    except Exception:
-                        pass
-    print(f"  Box plots ({metric_col}, {n_written}/{n_hits}) -> {out_pdf} ({time.time()-t_box:.2f}s)")
 
 
 def _per_metric_output_cols(metric_col: str) -> List[str]:
@@ -902,7 +687,6 @@ def main() -> None:
     else:
         print("[INFO] --gtf not provided; junction_type column will not be added.")
 
-    qc_dir  = os.path.join(outdir, f"{prefix_name}_qc_{method}")
     tmp_dir = os.path.join(outdir, f"{prefix_name}_tmp")
 
     def _threshold_dir(subdir_name: str) -> str:
@@ -1012,13 +796,20 @@ def main() -> None:
         if not sig_df.empty:
             key_col = list(zip(sig_df["sample"], sig_df["junction"]))
             sig_df["_key"] = key_col
+            # Only (sample, junction) keys that have an outlier row are ever looked up below, so
+            # the bulk/hap1/hap2 pivot is built for those keys only (same values, far fewer rows).
+            _sig_keys = pd.MultiIndex.from_tuples(sorted(set(key_col)), names=["sample", "junction"])
+            _phase_base = final_df[
+                final_df["phasing"].isin(["bulk", "hap1", "hap2"]).to_numpy()
+                & pd.MultiIndex.from_arrays([final_df["sample"], final_df["junction"]]).isin(_sig_keys)
+            ]
 
             for mc in computed_metrics:
                 rescaled_c = f"rescaled_{mc}"
                 if rescaled_c not in final_df.columns:
                     unreliable_hap_outliers[mc] = set()
                     continue
-                phasing_df = final_df[final_df["phasing"].isin(["bulk", "hap1", "hap2"])][
+                phasing_df = _phase_base[
                     ["sample", "junction", "phasing", rescaled_c]
                 ].copy()
                 phasing_df[rescaled_c] = pd.to_numeric(phasing_df[rescaled_c], errors="coerce")
@@ -1102,10 +893,10 @@ def main() -> None:
                 ss_total = f", {int(sig_df[mask_mc][ss_col].nunique())} unique {ss_lbl}" if ss_col else ""
                 ss_pos   = f", {int(sig_df[pos_mask][ss_col].nunique())} unique {ss_lbl}" if ss_col else ""
                 if _has_jxn_type:
-                    can_ann = sig_df["junction_type"].isin(["canonical", "annotated"])
+                    can_ann = sig_df["junction_type"].isin(["canonical"])
                     n_can   = int(sig_df[pos_mask & can_ann]["junction"].nunique())
                     ss_can  = f", {int(sig_df[pos_mask & can_ann][ss_col].nunique())} unique {ss_lbl}" if ss_col else ""
-                    print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions{ss_total} -> {n_pos} unique junctions{ss_pos} with {stat_label} > 0 -> {n_can} unique junctions{ss_can} canonical or annotated)")
+                    print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions{ss_total} -> {n_pos} unique junctions{ss_pos} with {stat_label} > 0 -> {n_can} unique junctions{ss_can} canonical)")
                 else:
                     print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions{ss_total} -> {n_pos} unique junctions{ss_pos} with {stat_label} > 0)")
             elif ss_col:
@@ -1114,20 +905,21 @@ def main() -> None:
             else:
                 print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions)")
 
-        fmt_updated = final_df.copy()
+        # Number of distinct outlier samples per (gene, junction) and metric. Only the outlier
+        # rows ever receive these columns, so they are counted here and attached to sig_df below
+        # (rather than merged into a full copy of the scored table first).
+        n_sample_counts: Dict[str, Optional[pd.DataFrame]] = {}
         for mc in computed_metrics:
             n_col = f"n_sample_outlier_{mc}"
             ocol  = f"outlier_{mc}"
             if sig_df.empty or ocol not in sig_df.columns:
-                fmt_updated[n_col] = 0
+                n_sample_counts[n_col] = None
                 continue
-            counts = (
+            n_sample_counts[n_col] = (
                 sig_df[sig_df[ocol].astype(bool)]
                 .groupby(["gene", "junction"])["sample"]
                 .nunique().rename(n_col).reset_index()
             )
-            fmt_updated = fmt_updated.merge(counts, on=["gene", "junction"], how="left")
-            fmt_updated[n_col] = fmt_updated[n_col].fillna(0).astype(int)
 
         n_sig = len(sig_df)
         print(f"  Outliers identified ({time.time() - t_thr:.2f}s)")
@@ -1205,14 +997,12 @@ def main() -> None:
                 ).drop(columns=["_max_abs_delta", "_has_named_event", "_named_event_delta"])
                 sig_df = sig_df.rename(columns={"_gene_rank": "gene_rank"})
 
-        n_sample_cols = [f"n_sample_outlier_{mc}" for mc in computed_metrics]
-        n_sample_cols_present = [c for c in n_sample_cols if c in fmt_updated.columns]
-        if n_sample_cols_present:
-            sig_df = sig_df.merge(
-                fmt_updated[["sample", "gene", "junction", "phasing"] + n_sample_cols_present]
-                .drop_duplicates(subset=["sample", "gene", "junction", "phasing"]),
-                on=["sample", "gene", "junction", "phasing"], how="left"
-            )
+        for n_col, counts in n_sample_counts.items():
+            if counts is None:
+                sig_df[n_col] = 0
+            else:
+                sig_df = sig_df.merge(counts, on=["gene", "junction"], how="left")
+                sig_df[n_col] = sig_df[n_col].fillna(0).astype(int)
 
         outlier_anchor_col = "padj_" if method == "beta_binomial" else "modz_"
         outlier_tsv_cols = []
@@ -1225,6 +1015,7 @@ def main() -> None:
                         outlier_tsv_cols.append(n_sc)
                     outlier_tsv_cols.append(f"outlier_{mc}")
         outlier_tsv_cols.append("event_type")
+        outlier_tsv_cols.append("event_id")
         outlier_tsv_cols = [c for c in outlier_tsv_cols if c in sig_df.columns]
 
         t_out = time.time()
@@ -1259,58 +1050,10 @@ def main() -> None:
             alias_data.to_csv(out_alias, sep="\t", index=False)
             print(f"  Outliers (alias) -> {out_alias} ({time.time()-t0:.2f}s)")
 
-        outlier_map: Dict[str, Dict[str, Dict[str, set]]] = {}
-        for mc in computed_metrics:
-            ocol = f"outlier_{mc}"
-            gene_jxn_map: Dict[str, Dict[str, Dict[str, set]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(set)))
-            if not filt.empty and ocol in filt.columns:
-                passing = filt[filt[ocol].astype(bool)]
-                for _, row in passing.iterrows():
-                    gene_jxn_map[row["gene"]][row["junction"]][row["sample"]].add(row["phasing"])
-            outlier_map[mc] = gene_jxn_map
 
         out_jobs.append(_write_outliers)
         out_jobs.append(_write_outliers_filtered)
         out_jobs.append(_write_outliers_alias)
-
-        if n_sig > 0:
-            for mc in computed_metrics:
-                dc = _effect_col(mc)
-                if dc not in sig_df.columns:
-                    continue
-
-                heat_mask = _outlier_mask(sig_df, mc)
-                heat_df   = sig_df.loc[heat_mask, ["gene", "sample", dc]].copy()
-
-                def _make_heatmap(df=heat_df, mc=mc, dc=dc):
-                    make_outlier_heatmap(
-                        df, mc, dc, stat_label, thr_desc,
-                        os.path.join(thr_dir, f"{prefix_name}_outlier_heatmap_{mc}.pdf"),
-                    )
-                out_jobs.append(_make_heatmap)
-
-                rc = f"rescaled_{mc}"
-                if rc in fmt_updated.columns:
-                    gj_map = outlier_map.get(mc, {})
-                    if gj_map:
-                        bp_genes = set(gj_map.keys())
-                        bp_jxns  = set(j for jxns in gj_map.values() for j in jxns)
-                        bp_df = fmt_updated.loc[
-                            fmt_updated["gene"].isin(bp_genes) &
-                            fmt_updated["junction"].isin(bp_jxns),
-                            ["gene", "junction", "phasing", "sample", rc]
-                        ].copy()
-                        def _make_boxplot(df=bp_df, mc=mc, rc=rc):
-                            make_hit_boxplots(
-                                df, outlier_map, mc, rc, thr_dir, prefix_name, tmp_dir,
-                                threshold_desc=thr_desc,
-                                stat_label=stat_label,
-                                effect_threshold=effect_threshold,
-                                is_ir_ipa=(mc in _IR_IPA_METRICS),
-                                has_jxn_type_filter=("junction_type" in fmt_updated.columns
-                                                     and mc in _IR_IPA_METRICS),
-                            )
-                        out_jobs.append(_make_boxplot)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as ex:
             futs = [ex.submit(fn) for fn in out_jobs]
@@ -1376,67 +1119,6 @@ def main() -> None:
             print(f"[WARNING] Outlier summary failed: {e}"); traceback.print_exc()
 
         print(f"\n  Finished threshold: {thr_desc} ({time.time()-t_thr:.2f}s)")
-
-    if args.gtf and gtf_junctions is not None:
-        gene_names = list(final_df["gene"].unique()) if "gene" in final_df.columns else []
-        print(f"\n{'='*56}")
-        print(f"  QC")
-        print(f"{'='*56}")
-        t_qc = time.time()
-        print(f"\n  {'Gene':<20} {'Canonical jxns':>16} {'Annotated jxns':>16}")
-        print(f"  {'-'*20} {'-'*16} {'-'*16}")
-        for g in gene_names:
-            if g in gtf_junctions:
-                n_can = len(gtf_junctions[g]["canonical_junctions"])
-                n_ann = len(gtf_junctions[g]["all_junctions"])
-                print(f"  {g:<20} {n_can:>16} {n_ann:>16}")
-            else:
-                print(f"  {g:<20} {'NOT FOUND':>16} {'NOT FOUND':>16}")
-
-        os.makedirs(qc_dir, exist_ok=True)
-        bulk_df = final_df[final_df["phasing"] == "bulk"] if "phasing" in final_df.columns else final_df
-
-        fit_prefix   = "alpha_" if method == "beta_binomial" else "median_"
-        not_fittable = ("low_n", "error") if method == "beta_binomial" else ("low_n", "no_variance")
-
-        qc_jobs = []
-        for cov_col, file_suffix, bar_metrics in _QC_FIGURES:
-            if approx_only and cov_col != "junction_coverage_approx":
-                continue
-            if hasattr(args, 'no_ss_IR') and args.no_ss_IR and cov_col in ("5ss_coverage", "3ss_coverage"):
-                continue
-            companions = [m for m in bar_metrics
-                          if args.has_ipa or m != "junction_IPA_ratio"]
-            if not companions:
-                continue
-            needed_cols = ["gene", "sample", "junction", cov_col]
-            for cm in companions:
-                ac = f"{fit_prefix}{cm}"
-                if ac in bulk_df.columns:
-                    needed_cols.append(ac)
-            needed_cols = list(dict.fromkeys(c for c in needed_cols if c in bulk_df.columns))
-            qc_slice = bulk_df[needed_cols].copy()
-
-            for subset in ("canonical", "annotated"):
-                out_pdf = os.path.join(qc_dir, f"{prefix_name}_qc_{file_suffix}_{subset}.pdf")
-                def _qc_job(df=qc_slice, cc=cov_col, cm=companions, fs=file_suffix,
-                            ss=subset, op=out_pdf):
-                    make_qc_figure(
-                        df, gtf_junctions,
-                        cc, cm, fs, ss, args.coverage_threshold, op,
-                        args.has_ipa, fit_prefix, not_fittable,
-                    )
-                qc_jobs.append(_qc_job)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as ex:
-            futs = [ex.submit(fn) for fn in qc_jobs]
-            for fut in concurrent.futures.as_completed(futs):
-                try:
-                    fut.result()
-                except Exception as e:
-                    print(f"[WARNING] QC figure failed: {e}"); traceback.print_exc()
-
-        print(f"\n  Finished QC ({time.time()-t_qc:.2f}s)")
 
     print("\nDone.")
 

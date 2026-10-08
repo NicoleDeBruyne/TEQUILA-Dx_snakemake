@@ -18,6 +18,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve
+from junction_bed_filter import read_bed, build_bed_dict, _in_bed, touches_bed as _touches_bed
 
 warnings.filterwarnings("ignore")
 
@@ -113,31 +114,21 @@ def _normalize_junction_index(index: pd.Index) -> pd.Index:
     return pd.Index(idx.values, name=index.name)
 
 
-def read_matrix(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, sep="\t", index_col=0)
-    df.index = _normalize_junction_index(df.index)
+def read_matrix(path: str, bed_dict: dict | None = None, chunksize: int = 200_000) -> pd.DataFrame:
+    """Read a junction count matrix. With bed_dict, read it in chunks and keep only junctions
+    with at least one splice site in the BED, so genome-wide matrices never sit in memory."""
+    if bed_dict is None:
+        df = pd.read_csv(path, sep="\t", index_col=0)
+        df.index = _normalize_junction_index(df.index)
+    else:
+        parts = []
+        for chunk in pd.read_csv(path, sep="\t", index_col=0, chunksize=chunksize):
+            chunk.index = _normalize_junction_index(chunk.index)
+            parts.append(chunk.loc[_touches_bed(chunk.index, bed_dict)])
+        df = pd.concat(parts) if parts else pd.DataFrame()
     df = df.apply(pd.to_numeric, errors="coerce", downcast="float")
     df = df.astype(np.float32)
     return df
-
-
-def read_bed(path: str) -> pd.DataFrame:
-    bed = pd.read_csv(
-        path, sep="\t", header=None, comment="#",
-        usecols=[0, 1, 2], names=["chrom", "start", "end"]
-    )
-    bed["start"] = bed["start"].astype(int)
-    bed["end"]   = bed["end"].astype(int)
-    return bed
-
-
-def build_bed_dict(bed: pd.DataFrame) -> dict:
-    bed_dict = {}
-    for chrom, sub in bed.groupby("chrom", sort=False):
-        starts = np.sort(sub["start"].to_numpy())
-        ends   = sub["end"].to_numpy()[np.argsort(sub["start"].to_numpy())]
-        bed_dict[chrom] = (starts, ends)
-    return bed_dict
 
 
 def deduplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -194,19 +185,7 @@ def filter_to_bed(psi_df: pd.DataFrame, bed_dict: dict) -> pd.DataFrame:
     jxn_info = parse_junctions(psi_df.index)
 
     def in_bed_vectorized(chrom_arr: np.ndarray, pos_arr: np.ndarray) -> np.ndarray:
-        result = np.zeros(len(pos_arr), dtype=bool)
-        for chrom, (starts, ends) in bed_dict.items():
-            mask = (chrom_arr == chrom)
-            if not mask.any():
-                continue
-            p = pos_arr[mask]
-            idx = np.searchsorted(starts, p, side="right") - 1
-            valid = idx >= 0
-            hit = np.zeros(len(p), dtype=bool)
-            if valid.any():
-                hit[valid] = p[valid] < ends[idx[valid]]
-            result[mask] = hit
-        return result
+        return _in_bed(bed_dict, chrom_arr, pos_arr)
 
     chrom_arr = jxn_info["chr"].to_numpy()
     ss1_arr   = jxn_info["ss1"].to_numpy(dtype=np.int64)
@@ -270,7 +249,7 @@ def load_ref_matrix(path: str, name: str,
                     min_coverage: int,
                     min_ref_samples: int) -> pd.DataFrame:
     print(f"Reading in reference matrix: {path} ({name})...")
-    counts = read_matrix(path)
+    counts = read_matrix(path, bed_dict)
     print(f"  {counts.shape[0]:,} junctions x {counts.shape[1]:,} samples")
 
     psi = compute_psi(counts, min_coverage=min_coverage,
@@ -293,7 +272,7 @@ def load_query_matrix(path: str, name: str,
                       common_jxns: pd.Index,
                       variable_jxns: pd.Index) -> tuple[pd.DataFrame, dict]:
     print(f"Reading in query matrix: {path}...")
-    counts = read_matrix(path)
+    counts = read_matrix(path, bed_dict)
 
     new_cols = []
     col_seen_local = {}

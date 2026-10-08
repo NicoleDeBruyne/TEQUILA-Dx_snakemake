@@ -298,6 +298,7 @@ def all_outputs():
             outs.append((str(od) + '/qc/' + str(s) + '_on_target.tsv'))
             outs.append((str(od) + '/qc/' + str(s) + '_read_attributes.tsv'))
             outs.append((str(od) + '/qc/' + str(s) + '_full_length_ratio.tsv'))
+            outs.append((str(od) + '/qc/' + str(s) + '_avg_coverage.tsv'))
 
         if flag("gene_quantification"):
             outs.append((str(od) + '/gene_quantification/' + str(s) + '_gene_count.tsv'))
@@ -314,8 +315,10 @@ def all_outputs():
                 outs.append((str(bod) + '/' + str(fs) + '/merged_all_hits_simplified.tsv'))
                 if bed_has_alias(cid, bid):
                     outs.append((str(bod) + '/' + str(fs) + '/merged_all_hits_simplified_alias.tsv'))
-            # Distribution plots use the default hit set only (stringent is a subset)
-            outs.append((str(bod) + '/default/junction_distributions.done'))
+            # Per-sample IGV-style hit reports, default hit set only
+            if flag("hit_reports"):
+                for s in bed_samples(cid, bid):
+                    outs.append((str(bod) + '/default/hit_reports/' + str(s) + '_hit_report.pdf'))
         for gid in GROUPS:
             god = group_outdir(gid)
             for fs in _jxn_filter_sets:
@@ -383,12 +386,18 @@ def all_outputs():
             outs.append((str(bod) + '/cohort_qc/validate_sample_types/' + str(bid) + '_distance_heatmap.pdf'))
             outs.append((str(cqd) + '/on_target_rates/' + str(bid) + '_on_target_rates.pdf'))
             outs.append((str(cqd) + '/read_attributes/' + str(bid) + '_read_lengths.pdf'))
+            for _m in ('avg_coverage', 'median_coverage', 'breadth_coverage'):
+                outs.append((str(cqd) + '/avg_coverage/' + str(bid) + '_' + _m + '_matrix.tsv'))
+                outs.append((str(cqd) + '/avg_coverage/' + str(bid) + '_' + _m + '_heatmap.pdf'))
             outs.append((str(cqd) + '/full_length_ratio/' + str(bid) + '_full_length_ratio_matrix.tsv'))
             outs.append((str(cqd) + '/full_length_ratio/' + str(bid) + '_full_length_ratio_heatmap.pdf'))
             if bed_has_alias(cid, bid):
                 outs.append((str(bod) + '/cohort_qc/validate_sample_types/' + str(bid) + '_distance_heatmap_alias.pdf'))
                 outs.append((str(cqd) + '/on_target_rates/' + str(bid) + '_on_target_rates_alias.pdf'))
                 outs.append((str(cqd) + '/read_attributes/' + str(bid) + '_read_lengths_alias.pdf'))
+                for _m in ('avg_coverage', 'median_coverage', 'breadth_coverage'):
+                    outs.append((str(cqd) + '/avg_coverage/' + str(bid) + '_' + _m + '_matrix_alias.tsv'))
+                    outs.append((str(cqd) + '/avg_coverage/' + str(bid) + '_' + _m + '_heatmap_alias.pdf'))
                 outs.append((str(cqd) + '/full_length_ratio/' + str(bid) + '_full_length_ratio_matrix_alias.tsv'))
 
     return outs

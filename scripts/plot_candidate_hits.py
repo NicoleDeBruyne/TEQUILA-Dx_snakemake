@@ -5,6 +5,8 @@ import os, glob, pandas as pd, ast, matplotlib.pyplot as plt, numpy as np
 from matplotlib import rcParams
 from matplotlib.ticker import MaxNLocator
 
+from hits_io import read_hit_rows
+
 rcParams['pdf.fonttype'] = 42
 
 def parse_args():
@@ -65,7 +67,7 @@ def main():
 
     args = parse_args()
 
-    df = pd.read_csv(args.infile, sep='\t', keep_default_na=False)
+    df = read_hit_rows(args.infile, sep='\t', keep_default_na=False)
     df = df.astype(object)
     df.fillna('.', inplace=True)
 

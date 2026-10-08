@@ -34,7 +34,7 @@ rule _8A_cohort_junction_analysis:
         script      = workflow.basedir + "/scripts/cohort_junction_analysis.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "cohort_junction_analysis", config["threads"])
     resources:
-        mem_mb     = lambda wc, attempt: attempt * 1024 * max(32, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)])),
+        mem_mb     = lambda wc, threads, attempt: max(16 * 1024, attempt * threads * 8 * 1024),
         runtime    = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/cohort_junction_analysis.log"
@@ -81,7 +81,7 @@ rule _8B_fit_and_score_cohort_junctions:
         script     = workflow.basedir + "/scripts/fit_and_score_cohort_junctions.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "fit_and_score_cohort_junctions", config["threads"])
     resources:
-        mem_mb = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)]) // 4),
+        mem_mb = lambda wc, attempt: max(8 * 1024, attempt * 1024 * len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)]) // 4),
         runtime    = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/fit_and_score_cohort_junctions.log"
@@ -123,7 +123,7 @@ rule _8C_identify_cohort_junction_outliers:
         script       = workflow.basedir + "/scripts/identify_cohort_junction_outliers.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "identify_cohort_junction_outliers", config["threads"])
     resources:
-        mem_mb = lambda wc, attempt: attempt * 1024 * 16,
+        mem_mb = lambda wc, attempt: attempt * 1024 * max(16, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)]) // 4),
         runtime    = config["time"],
     log:
         _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/identify_cohort_junction_outliers_{thr_label}.log"

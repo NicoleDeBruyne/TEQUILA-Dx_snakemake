@@ -14,6 +14,12 @@ import matplotlib.patches as mpatches
 from matplotlib import rcParams
 rcParams['pdf.fonttype'] = 42
 
+from identify_cohort_junction_outliers import load_bed, parse_gtf_junctions
+
+EVENT_TYPES = ["exon_skipping_approx", "exon_inclusion_approx", "alt_5ss_approx", "alt_3ss_approx", "complex_approx"]
+NO_EVENT = "none"
+HAP_ASYMMETRY_MAX = 10
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Remove outlier junctions from long-read RNA-seq data.")
     parser.add_argument("--infiles", nargs="+", required=True, help="Input TSV files (merged junctions).")
@@ -22,7 +28,9 @@ def parse_args():
     parser.add_argument('--padj-threshold', default=0.05, type=float, help='Maximum adjusted p-value to be considered an outlier.')
     parser.add_argument('--delta-PSI-threshold', default=0.1, type=float, help='Minimum abs(delta_PSI) to be considered an outlier.')
     parser.add_argument("--delta-PSI-direction", choices=["positive", "negative"], help="If set, only keep junctions with delta PSI in specified direction.")
-    parser.add_argument("--event-types", nargs="+", choices=["exon_skipping", "exon_inclusion", "alt_ss1", "alt_ss2", "single"], help="Event types to include when filtering junctions.")
+    parser.add_argument("--bed", required=True, help="Panel BED (column 4 gene, column 6 strand); strand decides alt_5ss vs alt_3ss.")
+    parser.add_argument("--gtf", required=True, help="Annotation GTF; Ensembl_canonical transcripts define canonical junctions.")
+    parser.add_argument("--event-types", nargs="+", choices=EVENT_TYPES + [NO_EVENT], help="Event types to include when filtering junctions.")
     parser.add_argument("--include-upreg-annotation-types", nargs="+", help="Annotation types to include when filtering upregulated junctions. Excludes all others.")
     parser.add_argument("--include-downreg-annotation-types", nargs="+", help="Annotation types to include when filtering downregulated junctions. Excludes all others.")
     parser.add_argument("--exclude-upreg-annotation-types", nargs="+", help="Annotation types to exclude when filtering upregulated junctions. Includes all others.")
@@ -37,48 +45,136 @@ def parse_args():
     return parser.parse_args()
 
 
-def define_events(df):
-    df[['chr', 'ss1', 'ss2']] = df['junction'].str.split('_', expand=True)
-    df['ss1'] = df['ss1'].astype(int)
-    df['ss2'] = df['ss2'].astype(int)
+def _sign(d):
+    return 1 if d > 0 else (-1 if d < 0 else 0)
 
-    junction_events = defaultdict(list)
 
-    for (sample, phasing, chrom), group in df.groupby(['sample', 'phasing', 'chr']):
-        group = group.sort_values(['ss1', 'ss2']).reset_index(drop=True)
-        junctions = group.to_dict('records')
-        event_dict = defaultdict(list)
+def define_events(df, strand_map, canonical_by_gene):
+    """Label each outlier junction with one splicing event, using the same rules as the cohort
+    analysis (identify_cohort_junction_outliers.py, PSI_approx labels):
 
-        for comb in combinations(junctions, 3):
-            j0, j1, j2 = comb
-            if j0['ss1'] == j1['ss1'] and j1['ss2'] == j2['ss2']:
-                if j0['delta_PSI'] < 0 and j1['delta_PSI'] > 0 and j2['delta_PSI'] < 0:
-                    for j in [j0, j1, j2]:
-                        event_dict[j['junction']].append('exon_skipping')
-                elif j0['delta_PSI'] > 0 and j1['delta_PSI'] < 0 and j2['delta_PSI'] > 0:
-                    for j in [j0, j1, j2]:
-                        event_dict[j['junction']].append('exon_inclusion')
+      * Junctions are grouped per sample, phasing and gene; only outlier junctions take part.
+      * alt_3ss_approx / alt_5ss_approx: two junctions sharing their 5' (resp. 3') splice site
+        but not the other one, with opposite-sign delta_PSI. 5'/3' follow the gene's strand.
+      * exon_skipping_approx / exon_inclusion_approx: a long junction plus a left junction
+        (same ss1, smaller ss2) and a right junction (same ss2, larger ss1), both with the
+        opposite delta_PSI sign to the long one; skipping if the long junction goes up,
+        inclusion if it goes down.
+      * Every group must contain at least one canonical junction (Ensembl_canonical transcript).
+      * One label per junction: skipping/inclusion > alt_5ss/alt_3ss; a tie at the winning level
+        is complex_approx. Junctions in no qualifying group get "none".
+      * event_id: junctions linked by any qualifying group (before labels are resolved) in the
+        same sample, phasing and gene form one event, numbered E1, E2, ... per sample and gene
+        (bulk, hap1, hap2 in turn, then by position). Junctions in no event get ".".
+    """
+    events = defaultdict(set)
+    parent = {}
 
-        for comb in combinations(junctions, 2):
-            j0, j1 = comb
-            if j0['ss1'] == j1['ss1']:
-                for j in [j0, j1]:
-                    event_dict[j['junction']].append('alt_ss2')
-            if j0['ss2'] == j1['ss2']:
-                for j in [j0, j1]:
-                    event_dict[j['junction']].append('alt_ss1')
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
 
-        for j in junctions:
-            junc = j['junction']
-            events = event_dict[junc]
-            p1 = [e for e in events if e in ['exon_skipping', 'exon_inclusion']]
-            p2 = [e for e in events if e in ['alt_ss1', 'alt_ss2']]
-            final_events = p1 if p1 else p2 if p2 else ['single']
-            junction_events[(j['sample'], j['phasing'], junc)] = ';'.join(final_events)
+    for (sample, phasing, gene), group in df.groupby(['sample', 'phasing', 'gene'], sort=False):
+        strand = strand_map.get(gene, '+')
+        canon = canonical_by_gene.get(gene, set())
+        coords, delta = {}, {}
+        for jxn, d in zip(group['junction'], group['delta_PSI']):
+            parts = jxn.split('_')
+            coords[jxn] = (int(parts[-2]), int(parts[-1]))
+            delta[jxn] = _sign(d)
 
-    df['event'] = df.set_index(['sample', 'phasing', 'junction']).index.map(junction_events.get).fillna('single')
-    df = df.drop(columns=['chr', 'ss1', 'ss2'])
+        def add(label, *jxns):
+            keys = [(sample, phasing, gene, j) for j in jxns]
+            for k in keys:
+                events[k].add(label)
+                parent.setdefault(k, k)
+            for k in keys[1:]:
+                parent[find(k)] = find(keys[0])
+
+        for jxn, (ss1, ss2) in coords.items():
+            s_jxn = delta[jxn]
+            if s_jxn == 0:
+                continue
+            five, three = (ss1, ss2) if strand == '+' else (ss2, ss1)
+
+            for p, (p1, p2) in coords.items():
+                if p == jxn or delta[p] == 0 or delta[p] == s_jxn:
+                    continue
+                if jxn not in canon and p not in canon:
+                    continue
+                p_five, p_three = (p1, p2) if strand == '+' else (p2, p1)
+                if p_five == five and p_three != three:
+                    add('alt_3ss_approx', jxn, p)
+                if p_three == three and p_five != five:
+                    add('alt_5ss_approx', jxn, p)
+
+            lefts = [j for j, (a, b) in coords.items() if j != jxn and a == ss1 and b < ss2
+                     and delta[j] == -s_jxn]
+            rights = [j for j, (a, b) in coords.items() if j != jxn and b == ss2 and a > ss1
+                      and delta[j] == -s_jxn]
+            for jl in lefts:
+                for jr in rights:
+                    if not ({jxn, jl, jr} & canon):
+                        continue
+                    add('exon_skipping_approx' if s_jxn > 0 else 'exon_inclusion_approx', jxn, jl, jr)
+
+    def resolve(evs):
+        top = (evs & {'exon_skipping_approx', 'exon_inclusion_approx'}) or \
+              (evs & {'alt_5ss_approx', 'alt_3ss_approx'})
+        if not top:
+            return NO_EVENT
+        return 'complex_approx' if len(top) > 1 else next(iter(top))
+
+    members = defaultdict(list)
+    for k in parent:
+        members[find(k)].append(k)
+    phase_rank = {'bulk': 0, 'hap1': 1, 'hap2': 2}
+
+    def _start(k):
+        return int(k[3].split('_')[-2])
+    comps = sorted(members.values(),
+                   key=lambda m: (m[0][0], m[0][2], phase_rank.get(m[0][1], 3), min(_start(k) for k in m)))
+    event_id, counter = {}, defaultdict(int)
+    for m in comps:
+        counter[(m[0][0], m[0][2])] += 1
+        for k in m:
+            event_id[k] = f"E{counter[(m[0][0], m[0][2])]}"
+
+    keys = list(zip(df['sample'], df['phasing'], df['gene'], df['junction']))
+    df = df.copy()
+    df['event'] = [resolve(events.get(k, set())) for k in keys]
+    df['event_id'] = [event_id.get(k, '.') for k in keys]
     return df
+
+
+def unreliable_haplotype_mask(full_df, outlier_df):
+    """True for haplotype outlier rows whose bulk PSI does not lie between hap1 and hap2, or whose
+    two bulk-to-haplotype gaps differ by more than HAP_ASYMMETRY_MAX-fold -- same check as the
+    cohort analysis. Uses rescaled PSI from the full (unfiltered) per-sample table so the bulk and
+    both haplotype values are available even when only one row is an outlier. Junctions missing
+    any of the three values are not judged (kept)."""
+    is_hap = outlier_df['phasing'].isin(['hap1', 'hap2'])
+    if not is_hap.any():
+        return pd.Series(False, index=outlier_df.index)
+    hap_jxns = set(outlier_df.loc[is_hap, 'junction'])
+    sub = full_df[full_df['junction'].isin(hap_jxns) & full_df['phasing'].isin(['bulk', 'hap1', 'hap2'])]
+    pivot = (sub.assign(_psi=pd.to_numeric(sub['rescaled_sample_PSI'], errors='coerce'))
+                .pivot_table(index=['sample', 'gene', 'junction'], columns='phasing', values='_psi', aggfunc='first'))
+    if any(c not in pivot.columns for c in ('bulk', 'hap1', 'hap2')):
+        return pd.Series(False, index=outlier_df.index)
+    pivot = pivot.dropna(subset=['bulk', 'hap1', 'hap2'])
+    b, h1, h2 = pivot['bulk'], pivot['hap1'], pivot['hap2']
+    sandwiched = ((h1 <= b) & (b <= h2)) | ((h2 <= b) & (b <= h1))
+    d1, d2 = (b - h1).abs(), (b - h2).abs()
+    dmax, dmin = np.maximum(d1, d2), np.minimum(d1, d2)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.where(dmin > 0, dmax / dmin, np.inf)
+    unreliable = set(pivot.index[~sandwiched | ~(ratio <= HAP_ASYMMETRY_MAX)])
+    keys = zip(outlier_df['sample'], outlier_df['gene'], outlier_df['junction'])
+    return is_hap & pd.Series([k in unreliable for k in keys], index=outlier_df.index)
+
 
 def fit_beta_dist(x, tol, n_threshold):
     x = pd.to_numeric(x, errors='coerce')
@@ -271,8 +367,8 @@ def plot_outlier_types(df, suptitle, outfile):
     event_alphas = {
         'exon_skipping/inclusion': 1.0,
         'alt_ss': 0.6,
-        'single': 0.3,
-        'other': 0.3
+        'complex': 0.8,
+        'none': 0.3,
     }
 
     phasing_groups = {
@@ -294,13 +390,10 @@ def plot_outlier_types(df, suptitle, outfile):
         ]
     }
     event_groups = {
-        'exon_skipping/inclusion': df[df['event'].str.contains('exon_skipping|exon_inclusion')],
-        'alt_ss': df[df['event'].str.contains('alt_ss1|alt_ss2')],
-        'single': df[df['event'] == 'single'],
-        'other': df[
-            (df['event'] != 'single') &
-            (~df['event'].str.contains('exon_skipping|exon_inclusion|alt_ss1|alt_ss2'))
-        ]
+        'exon_skipping/inclusion': df[df['event'].isin(['exon_skipping_approx', 'exon_inclusion_approx'])],
+        'alt_ss': df[df['event'].isin(['alt_5ss_approx', 'alt_3ss_approx'])],
+        'complex': df[df['event'] == 'complex_approx'],
+        'none': df[df['event'] == NO_EVENT],
     }
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 7))
@@ -384,7 +477,7 @@ def main():
         elif args.compare_PSI_to_cohort_median:
             print(f"Will compore PSI value to the cohort median and keep an additional file with only junctions where abs(delta_PSI_vs_cohort) >= {args.delta_PSI_vs_cohort_threshold}.")
     if args.sample_number_threshold:
-        print(f"Will keep an additional file with only junctions which are outliers in <= {args.sample_number_threshold} samples.")
+        print(f"Will keep an additional file with only events (all their junctions) in which at least one junction is an outlier in <= {args.sample_number_threshold} samples.")
 
     if len(args.infiles) == 0:
         raise ValueError("No input files provided.")
@@ -392,9 +485,17 @@ def main():
         if not os.path.isfile(input_file):
             raise FileNotFoundError(f"Input file {input_file} not found.")
 
+    gene_info = load_bed(args.bed)
+    strand_map = {g: info[2] for g, info in gene_info.items()}
+    print(f"Parsing GTF for canonical junctions: {args.gtf}")
+    gtf_junctions = parse_gtf_junctions(args.gtf, list(gene_info))
+    canonical_by_gene = {g: info['canonical_junctions'] for g, info in gtf_junctions.items()}
+    print(f"    canonical junctions found for {len(canonical_by_gene)}/{len(gene_info)} gene(s)")
+
     print(f"\nReading in {len(args.infiles)} input files...")
     dfs = []
     samples = set()
+    n_unreliable_hap = 0
     for input_file in args.infiles:
         df = pd.read_csv(input_file, sep="\t", usecols=['sample', 'phasing', 'gene', 'junction', 'jxn_alignment_count', 'jxn_coverage', 
                                                             'sample_PSI', 'rescaled_sample_PSI', 'padj', 'delta_PSI', 'annotation'])
@@ -406,8 +507,15 @@ def main():
         mask = (df['jxn_coverage'] >= args.jxn_coverage_threshold) & \
             (df['padj'] <= args.padj_threshold) & \
             (delta_num.abs() >= args.delta_PSI_threshold)
+        full_df = df
         df = df.loc[mask].copy()
         df['delta_PSI'] = delta_num.loc[mask]
+        if df.empty:
+            continue
+        bad_hap = unreliable_haplotype_mask(full_df, df)
+        n_unreliable_hap += int(bad_hap.sum())
+        df = df.loc[~bad_hap]
+        del full_df
         if df.empty:
             continue
         df.insert(0, "input_file", input_file)
@@ -416,11 +524,13 @@ def main():
         raise RuntimeError("No data after primary filtering.")
     outlier_df = pd.concat(dfs, ignore_index=True)
     jxns = outlier_df['junction'].unique()
-    print(f"Filtered for junctions with junction coverage >= {args.jxn_coverage_threshold}, padj <= {args.padj_threshold}, and abs(delta PSI) >= {args.delta_PSI_threshold}:\n"
+    print(f"Filtered for junctions with junction coverage >= {args.jxn_coverage_threshold}, padj <= {args.padj_threshold}, and abs(delta PSI) >= {args.delta_PSI_threshold}, "
+        f"after removing {n_unreliable_hap} unreliable haplotype outlier row(s) (bulk not between hap1 and hap2, or gaps > {HAP_ASYMMETRY_MAX}x lopsided):\n"
         f"    {len(outlier_df)} total hits ({len(outlier_df['junction'].unique())} unique junctions) in {len(outlier_df['sample'].unique())} samples."
     )
 
-    outlier_df = define_events(outlier_df.copy())
+    outlier_df = define_events(outlier_df, strand_map, canonical_by_gene)
+    print(f"Event types: {outlier_df['event'].value_counts().to_dict()}")
 
     outlier_df['sample_count'] = outlier_df.groupby('junction')['sample'].transform('nunique')
 
@@ -517,7 +627,14 @@ def main():
                 )
             )
         )
-        df_stage6 = df_stage6[df_stage6['sample_count'] <= args.sample_number_threshold]
+        # Recurrence is judged per event: an event (all its junctions) is kept if at least one of
+        # its junctions is an outlier in <= n samples. Junctions outside any event are judged alone.
+        ev_key = np.where(df_stage6['event_id'] != '.',
+                          df_stage6['sample'].astype(str) + '|' + df_stage6['phasing'].astype(str) + '|'
+                          + df_stage6['gene'].astype(str) + '|' + df_stage6['event_id'].astype(str),
+                          'row' + df_stage6.index.astype(str))
+        min_count = df_stage6['sample_count'].groupby(ev_key).transform('min')
+        df_stage6 = df_stage6[min_count <= args.sample_number_threshold]
         outfile_stage6 = (outfile_stage5 if "outfile_stage5" in locals() else
                         outfile_stage4 if "outfile_stage4" in locals() else
                         outfile_stage3 if "outfile_stage3" in locals() else
@@ -559,7 +676,7 @@ def main():
             legends.append(('#b271ab', '+ IQR outlier' if args.filter_by_cohort_IQR else f'+ abs(ΔPSI_vs_cohort) ≥ {args.delta_PSI_vs_cohort_threshold}'))
         if 'df_stage6' in locals() and not df_stage6.empty:
             dfs_for_plot.append(df_stage6)
-            legends.append(('#42b4b5', f'+ outlier in ≤ {args.sample_number_threshold} samples'))
+            legends.append(('#42b4b5', f'+ event with a junction that is an outlier in ≤ {args.sample_number_threshold} samples'))
         plot_outlier_counts(samples, dfs_for_plot, legends, args.title, f"{args.outprefix}_counts.pdf")
         plot_outlier_types(outlier_df,
                         f"Outlier Junction (coverage≥{args.jxn_coverage_threshold}, padj≤{args.padj_threshold}, abs(ΔPSI)≥{args.delta_PSI_threshold}) Types",

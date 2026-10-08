@@ -138,10 +138,19 @@ def load_ase_df(path):
     return ase_df.rename(columns={'ratio': 'ASE_ratio', 'sample_count': 'ASE_nsamples'})
 
 
+def _with_event_id(events, event_ids):
+    """'label' + ' [E<n>]' so the hit table records which junctions were called as one event."""
+    return [f"{e} [{i}]" if isinstance(i, str) and i.strip() not in ('', '.', 'nan') and pd.notna(e) else e
+            for e, i in zip(events, event_ids)]
+
+
 def load_junction_df(path):
-    return pd.read_csv(path, sep='\t', usecols=[
-        'sample', 'gene', 'phasing', 'junction', 'jxn_coverage', 'delta_PSI', 'sample_count', 'annotation', 'event',
-    ]).drop_duplicates()
+    cols = ['sample', 'gene', 'phasing', 'junction', 'jxn_coverage', 'delta_PSI', 'sample_count', 'annotation', 'event']
+    df = pd.read_csv(path, sep='\t', usecols=lambda c: c in cols + ['event_id'])
+    if 'event_id' in df.columns:
+        df['event'] = _with_event_id(df['event'], df['event_id'].astype(str))
+        df = df.drop(columns=['event_id'])
+    return df[cols].drop_duplicates()
 
 
 def load_cohort_junction_df(path):
@@ -163,10 +172,40 @@ def load_omim_df(path):
     return omim_df
 
 
+# Separator convention for every multi-item column in the hit table:
+#   ';' separates items (variants, junctions) -- and their parallel per-item info columns
+#   ',' separates multiple annotations of the SAME item (e.g. several event types for one
+#       junction, or one junction's values across several GTEx tissues, each written as
+#       "value (tissue)")
+_ITEM_SEP = ';'
+_ANNOT_SEP = ','
+
+
+def _cell(v):
+    """One item's value as text, with '.' for missing/empty so every per-item column stays
+    aligned item-for-item with its *_jxns column (e.g. '.;-0.48;0.33', never ';-0.48;0.33')."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return '.'
+    s = str(v).strip()
+    return '.' if s in ('', 'nan', 'NaN', 'None') else s
+
+
+def _join_items(values, sep=_ITEM_SEP):
+    return sep.join(_cell(v) for v in values)
+
+
 def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
     has_tissue = 'gtex_tissue' in df.columns
     tiers = {}
-    for phasing, sep in (('bulk', ';'), ('hap1', ','), ('hap2', ',')):
+    df = df.copy()
+    # Event lists for one junction arrive ';'-joined from the GTEx merge step (and ','-joined
+    # from the cohort step); normalize to ',' so ';' only ever separates junctions here.
+    df['event'] = df['event'].apply(
+        lambda e: _ANNOT_SEP.join(x.strip() for x in str(e).replace(';', ',').split(',') if x.strip())
+        if pd.notna(e) else e
+    )
+    for phasing in ('bulk', 'hap1', 'hap2'):
+        sep = _ITEM_SEP
         sub = df[df['phasing'] == phasing]
 
         if has_tissue:
@@ -189,24 +228,24 @@ def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
                         'annotation': g['annotation'].iloc[0],
                     }
                     for col in delta_cols:
-                        row[col] = ' '.join(f"{v} ({t})" for v, t in zip(g[col], tissues))
-                    row['event'] = ' '.join(f"{v} ({t})" for v, t in zip(g['event'], tissues))
-                    row['sample_count'] = ' '.join(f"{v} ({t})" for v, t in zip(g['sample_count'], tissues))
+                        row[col] = _ANNOT_SEP.join(f"{_cell(v)} ({t})" for v, t in zip(g[col], tissues))
+                    row['event'] = _ANNOT_SEP.join(f"{_cell(v)} ({t})" for v, t in zip(g['event'], tissues))
+                    row['sample_count'] = _ANNOT_SEP.join(f"{_cell(v)} ({t})" for v, t in zip(g['sample_count'], tissues))
                     collapsed_rows.append(row)
                 sub = pd.DataFrame(collapsed_rows)
             else:
                 sub = sub.drop(columns=['gtex_tissue'])
 
         agg_kwargs = {
-            prefix + phasing + '_jxns':         ('junction', lambda x, sep=sep: sep.join(map(str, x))),
-            prefix + phasing + '_jxn_coverage': ('jxn_coverage', lambda x, sep=sep: sep.join(map(str, x))),
+            prefix + phasing + '_jxns':         ('junction', lambda x, sep=sep: _join_items(x, sep)),
+            prefix + phasing + '_jxn_coverage': ('jxn_coverage', lambda x, sep=sep: _join_items(x, sep)),
         }
         for col in delta_cols:
             suffix = _DELTA_COL_TO_SUFFIX[col]
-            agg_kwargs[prefix + phasing + '_' + suffix] = (col, lambda x, sep=sep: sep.join(map(str, x)))
-        agg_kwargs[prefix + phasing + '_jxn_annotation'] = ('annotation', lambda x, sep=sep: sep.join(map(str, x)))
-        agg_kwargs[prefix + phasing + '_jxn_event']      = ('event', lambda x, sep=sep: sep.join(map(str, x)))
-        agg_kwargs[prefix + phasing + '_jxn_nsamples']   = ('sample_count', lambda x, sep=sep: sep.join(map(str, x)))
+            agg_kwargs[prefix + phasing + '_' + suffix] = (col, lambda x, sep=sep: _join_items(x, sep))
+        agg_kwargs[prefix + phasing + '_jxn_annotation'] = ('annotation', lambda x, sep=sep: _join_items(x, sep))
+        agg_kwargs[prefix + phasing + '_jxn_event']      = ('event', lambda x, sep=sep: _join_items(x, sep))
+        agg_kwargs[prefix + phasing + '_jxn_nsamples']   = ('sample_count', lambda x, sep=sep: _join_items(x, sep))
         tiers[phasing] = (
             sub.sort_values('junction')
                 .groupby('gene')
@@ -280,7 +319,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     else:
         for phasing in ('bulk', 'hap1', 'hap2'):
             for suffix in ('jxns', 'jxn_coverage', 'deltaPSI', 'deltaPSIapprox', 'delta5ssIR',
-                           'delta3ssIR', 'deltaFullIR', 'deltaIPA', 'jxn_annotation', 'jxn_event', 'jxn_nsamples'):
+                           'delta3ssIR', 'deltaFullIR', 'deltaIPA', 'jxn_annotation', 'jxn_event'):
                 hit_df['cohort_' + phasing + '_' + suffix] = '.'
     if omim_df is not None:
         hit_df = pd.merge(hit_df, omim_df, on='gene', how='left')
@@ -624,13 +663,13 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         'hap2_jxns', 'hap2_jxn_coverage', 'hap2_deltaPSI', 'hap2_jxn_annotation', 'hap2_jxn_event', 'hap2_jxn_nsamples',
         'cohort_bulk_jxns', 'cohort_bulk_jxn_coverage',
         'cohort_bulk_deltaPSI', 'cohort_bulk_deltaPSIapprox', 'cohort_bulk_delta5ssIR', 'cohort_bulk_delta3ssIR', 'cohort_bulk_deltaFullIR', 'cohort_bulk_deltaIPA',
-        'cohort_bulk_jxn_annotation', 'cohort_bulk_jxn_event', 'cohort_bulk_jxn_nsamples',
+        'cohort_bulk_jxn_annotation', 'cohort_bulk_jxn_event',
         'cohort_hap1_jxns', 'cohort_hap1_jxn_coverage',
         'cohort_hap1_deltaPSI', 'cohort_hap1_deltaPSIapprox', 'cohort_hap1_delta5ssIR', 'cohort_hap1_delta3ssIR', 'cohort_hap1_deltaFullIR', 'cohort_hap1_deltaIPA',
-        'cohort_hap1_jxn_annotation', 'cohort_hap1_jxn_event', 'cohort_hap1_jxn_nsamples',
+        'cohort_hap1_jxn_annotation', 'cohort_hap1_jxn_event',
         'cohort_hap2_jxns', 'cohort_hap2_jxn_coverage',
         'cohort_hap2_deltaPSI', 'cohort_hap2_deltaPSIapprox', 'cohort_hap2_delta5ssIR', 'cohort_hap2_delta3ssIR', 'cohort_hap2_deltaFullIR', 'cohort_hap2_deltaIPA',
-        'cohort_hap2_jxn_annotation', 'cohort_hap2_jxn_event', 'cohort_hap2_jxn_nsamples'
+        'cohort_hap2_jxn_annotation', 'cohort_hap2_jxn_event'
     ]]
     return hit_df
 
