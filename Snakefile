@@ -214,23 +214,32 @@ def bed_outdir(cohort_id, bed_id):
 def _quoted(items):
     return [shlex.quote(str(x)) for x in items]
 
-_DEFAULT_SAMPLE_TYPE_PALETTE = ["#8BBF9F", "#D27D7D", "#A78BC5", "#E8B04B", "#4A7C9B", "#C46B6B"]
+# Nature palette in the order colours are handed out (same list as scripts/palette.py SELECT_ORDER)
+_SELECT_ORDER = [
+    "#c23637", "#009099", "#9d4588", "#c69528", "#3d892e", "#ea6302", "#0068a9",
+    "#d95d5b", "#42b4b5", "#b271ab", "#e8c048", "#57aa3e", "#f48f3e", "#4c8fca",
+    "#ea9a9c", "#8cccce", "#cca0ca", "#f4d77e", "#95c36e", "#fbb875", "#91c4e9",
+    "#f8c9c6", "#c5e3ea", "#e8d1e6", "#ffefbb", "#d3e4be", "#fddbb4", "#c1e3fa",
+    "#912321", "#005d6e", "#6e2769", "#926d17", "#1e662a", "#ae450b", "#002b58",
+]
+
+def _auto_color(name, names, configured):
+    """Configured colour if any; otherwise the next SELECT_ORDER colour not used by a configured
+    name, handed out to the unconfigured names in sorted order."""
+    if name in configured and configured[name]:
+        return configured[name]
+    used = {str(c).lower() for c in configured.values() if c}
+    free = [c for c in _SELECT_ORDER if c not in used] or _SELECT_ORDER
+    unconfigured = sorted(n for n in set(names) if n not in configured)
+    return free[unconfigured.index(name) % len(free)]
 
 def sample_type_color(sample_type):
-    configured = config.get("sample_type_colors", {})
-    if sample_type in configured:
-        return configured[sample_type]
-    all_types = sorted({SAMPLES[s]["sample_type"] for s in SAMPLES})
-    idx = all_types.index(sample_type) % len(_DEFAULT_SAMPLE_TYPE_PALETTE)
-    return _DEFAULT_SAMPLE_TYPE_PALETTE[idx]
+    return _auto_color(sample_type, {SAMPLES[s]["sample_type"] for s in SAMPLES},
+                       config.get("sample_type_colors", {}) or {})
 
 def validate_ref_color(tissue):
-    configured = config.get("validate_ref_colors", {})
-    if tissue in configured:
-        return configured[tissue]
-    all_tissues = sorted(config.get("validate_ref_tissues", []))
-    idx = all_tissues.index(tissue) % len(_DEFAULT_SAMPLE_TYPE_PALETTE)
-    return _DEFAULT_SAMPLE_TYPE_PALETTE[idx]
+    return _auto_color(tissue, config.get("validate_ref_tissues", []),
+                       config.get("validate_ref_colors", {}) or {})
 
 def sample_alias(sample):
     return SAMPLES[sample].get("alias") or sample
@@ -319,11 +328,12 @@ def all_outputs():
             if flag("hit_reports"):
                 for s in bed_samples(cid, bid):
                     outs.append((str(bod) + '/default/final_reports/' + str(s) + '_report.pdf'))
+                    outs.append((str(bod) + '/default/final_reports/' + str(s) + '_review.html'))
         for gid in GROUPS:
             god = group_outdir(gid)
             for fs in _jxn_filter_sets:
-                for fname in ('genes_with_pathogenic_variant_boxplot.pdf', 'genes_with_ASE_boxplot.pdf',
-                              'genes_with_outlier_junction_boxplot.pdf', 'genes_with_RNA_dysregulation_boxplot.pdf'):
+                for fname in ('genes_with_pathogenic_variant_barplot.pdf', 'genes_with_ASE_barplot.pdf',
+                              'genes_with_outlier_junction_barplot.pdf', 'genes_with_RNA_dysregulation_barplot.pdf'):
                     outs.append((str(god) + '/merged_hits/' + str(fs) + '/' + fname))
 
     if flag("cohort_junction_analysis"):
@@ -343,6 +353,10 @@ def all_outputs():
                 )
 
     if flag("gene_quantification"):
+        # cohort-level per-gene CPTM / MOTR box plots (one PDF per gene, by sample type)
+        for (cid, bid) in BED_GROUPS:
+            for _m in ("count", "coverage", "assignment", "amalgam"):
+                outs.append(str(bed_outdir(cid, bid)) + "/cohort_qc/gene_quantification/by_" + _m)
         for gid in GROUPS:
             god = group_outdir(gid)
             outs.append(god + "/gene_quantification/by_count/gene_count_matrix_cptm.tsv")

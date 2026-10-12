@@ -1,55 +1,69 @@
 """
 make_sample_hit_report.py
 
-One PDF per sample (US Letter, landscape): a QC page, then IGV-style views of every candidate gene
-hit in merged_all_hits.tsv (default filter set, hit == TRUE, tier <= --max-tier, ordered by `ranking`).
+One PDF per sample (US Letter, landscape), in this order: an overview page; IGV-style views of every
+candidate gene hit in merged_all_hits.tsv (default filter set, hit == TRUE, tier <= --max-tier,
+ordered by `ranking`); then the gene-level sections -- gene expression (MOTR z-score), canonical-
+transcript coverage, junction testability, full-length ratio.
 
-QC page (first page). Every panel compares the sample with the median of the samples of its own
-sample type and the median of the whole cohort on the panel (both medians include the sample):
-  1. Read counts: stacked on-target / off-target bar; the medians are median mapped reads x median
-     on-target rate (_9A).
-  2. Sample-type PCA (_9C2): GTEx references faint, cohort samples coloured by sample type, this
-     sample as a star.
-  3. Read length (_9B): on-target and off-target boxes for the sample, and boxes built from the
-     median Q1 / median / Q3 (and min / max) of its sample type and of the cohort. Whiskers run
-     to Q1 - 1.5 IQR and Q3 + 1.5 IQR, clipped to the min / max (the per-sample summaries hold no
-     individual read lengths).
-  4. Full-length ratio per gene (_9E) and 5. junction testability per gene
-     (n_canonical_jxns_tested / n_canonical_jxns, from merged_all_hits.tsv): heatmaps with rows
-     sample / sample-type median / cohort median, genes sorted by the cohort median; grey = no
-     value (e.g. single-exon genes, or too few reads).
+QC pages. Every panel compares the sample with each sample type on the panel (the
+sample is left out of its own type). Colours: the sample in a darker shade of its type's colour,
+each sample type in its own colour; gene grids run red (0) - white (0.5) - blue (1), missing values
+hatched; all 0-1 metric axes run 0-1.
+  Overview page: read counts (stacked on-/off-target bars for the sample and each type's median
+  mapped reads x median on-target rate; _9A), read length (on-/off-target boxes for the sample and,
+  per type, a box built from the median Q1 / median / Q3 / min / max of its samples, whiskers
+  1.5 IQR clipped to min / max; _9B), sample-type PCA (_9C2; the sample as a star), and a grid
+  of the sample's candidate genes by combination of hit categories (variant, ASE, GTEx or cohort
+  outlier junction; upset-style dots under the columns) x tier, with counts in the cells and
+  marginal totals.
+  After the gene pages: gene expression (MOTR z-score of the sample type, by splice-site
+  assignment), then one section each for canonical-transcript coverage (fraction of bases at
+  depth >= merge_min_dp_snv; _9D), junction testability (n_canonical_jxns_tested /
+  n_canonical_jxns, from merged_all_hits.tsv) and full-length ratio (_9E): a summary strip (ranked-gene curves with a 25th-75th
+  percentile ribbon and median per sample type and the sample as a bold line; a per-gene box plot
+  of the sample and each type's median; a per-sample-mean box plot by type with the sample as a
+  star) and a grid of every gene (name, a cell for the sample, one per type's median), sorted high
+  to low by the sample's value, then the median of every other sample, then name. The label font
+  shrinks with gene count (6.5 pt down to 4 pt); beyond that the grid continues on further pages.
+  Gene names are text, so a PDF viewer's search finds them.
 A panel whose input is not given is left out.
 
 Every gene starts on a new page and is laid out as rows, 3 rows per page:
-  1. Bulk alignments over the whole gene body (the gene's region in the BED).
-  2. hap1 and 3. hap2 alignments over the gene body, if the gene was phased and has ASE or a
-     hap1 / hap2 outlier junction.
-  4. Variant zooms (15 bp either side of each candidate variant), up to 3 panels per row, bulk.
-  5. Outlier splicing events, one per row, bulk: the event's junctions plus 10% of their span on
+  1. Bulk alignments over the whole gene body (the gene's region in the BED), in the left 75%
+     of the width; to its right, the gene's expression (by-assignment log2(MOTR + 1)) as a box
+     per sample type with the sample as a star, and its MOTR z-score within its own type.
+  2. hap1 and hap2 alignments over the gene body (same 75% width), if the gene was phased and
+     has ASE or a hap1 / hap2 outlier junction.
+  3. Variant zooms (15 bp either side of each candidate variant), up to 3 panels per row, bulk.
+  4. Metric distributions (PSI_approx, PSI, IR, IPA) for each junction x metric that fired,
+     across every sample on the panel split by sample type, up to 4 panels per row.
+  5. Outlier splicing events (zooms), one per row, bulk: the event's junctions plus 10% of their span on
      either side. The IGV view (first two columns) has arcs for the event's junctions only; the
      third column is a sashimi plot of the same window (introns scaled by --intron-scale,
-     unspliced reads dropped for multi-exon genes, every junction with >= --sashimi-min-frac x the
+     unspliced non-exonic reads dropped for multi-exon genes, every junction with >= --sashimi-min-frac x the
      track's maximum coverage) for this sample and a representative cohort sample. An event called
      in hap1 or hap2 gets its own page with bulk, hap1 and hap2 rows (all three in the sashimi
      too). Title: event label(s) and each junction with its annotation (canonical / annotated /
      unannotated).
      Representative sample (one per gene): among the other samples of this sample's type (or, if
-     there are none, of the cohort's most common sample type), the one whose AMALGAM transcript
-     counts for the gene have the highest Pearson correlation with the candidates' mean profile.
-     If the correlation is undefined (e.g. a single transcript), the sample with the median gene
-     total is used (r = n/a).
-  6. Metric distributions (PSI_approx, PSI, IR, IPA) for each junction x metric that fired,
-     across every sample on the panel split by sample type, up to 4 panels per row.
+     there are none, of the cohort's most common sample type), leaving out samples with their own
+     outlier junction call in the gene, the one whose bulk junction PSIs (cohort junction tables;
+     junctions with coverage >= --coverage-threshold) are closest to the candidates' median PSI
+     (mean |PSI - median| over at least 3 shared junctions, or all the gene has if fewer). Among
+     candidates within 0.02 of the best, the one with the most junction reads.
 
-If the gene's canonical transcript has more than one exon, unspliced (monoexonic) reads are left
-out of the coverage and alignment tracks. Sashimi arcs run from the last exon base before the
+IGV views (coverage and alignment tracks) show every read. In the sashimi plots of a multi-exon
+gene, unspliced reads are left out unless they lie within an annotated exon (any transcript,
++/- 10 bp) -- so reads inside a long exon stay, pre-mRNA / intronic reads go. Sashimi arcs run from the last exon base before the
 intron (ss1 - 1) to the first exon base after it (ss2 + 1).
 
 Each alignment panel has a coverage track (all reads; positions where a non-reference base has
 allele frequency > 0.2 at depth >= 10 are coloured by base, as in IGV), an alignment track
 (primary and supplementary alignments, randomly downsampled to --max-reads reads; every mismatch
-coloured by base, deletions >= 10 bp as black lines, insertions >= 10 bp as purple ticks, smaller
-indels hidden, splice gaps as thin grey lines), a reference-sequence track on
+coloured by base, deletions >= 10 bp as black lines, insertions >= 10 bp as purple ticks,
+smaller indels hidden unless they match a candidate variant -- same length, within 5 bp -- in the
+gene view, or the zoomed variant in a variant zoom; splice gaps as thin grey lines), a reference-sequence track on
 variant zooms, and the gene's canonical transcript (thick = CDS, thin = UTR), drawn once under the
 bottom track of a bulk / hap1 / hap2 stack. Samples are always shown by name, never by alias.
 
@@ -59,7 +73,10 @@ back to grouping same-label junctions that share a splice site); calls of the sa
 from different sources, tissues or phasings are shown as one event.
 """
 import argparse
+import bisect
 import gzip
+import io
+import itertools
 import os
 import random
 import re
@@ -72,13 +89,17 @@ import pysam
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.collections import PolyCollection, LineCollection
+from matplotlib.collections import PolyCollection, LineCollection, PatchCollection
 from matplotlib.path import Path
-from matplotlib.patches import PathPatch, Rectangle
+from matplotlib.patches import PathPatch, Rectangle, FancyBboxPatch
 from matplotlib import rcParams
+from matplotlib.colors import LinearSegmentedColormap, to_rgb, to_hex
 
 from hits_io import read_hit_rows
+from palette import RED_WHITE_BLUE
+import tier_rules
 
 rcParams["pdf.fonttype"] = 42
 FS = 1.4                              # font scale for every text element in the report
@@ -101,7 +122,7 @@ DEL_COLOR = "#000000"
 INS_COLOR = "#8a2be2"
 GAP_COLOR = "#9e9e9e"
 COV_COLOR = "#a6a6a6"
-ARC_COLOR = "#b2182b"
+ARC_COLOR = "#b2182b"                 # reset per sample (draw_qc_page) to the sample colour: a darker shade of its type colour
 SPAN_COLOR = "#fff2a8"
 
 RASTER_DPI = 300                      # resolution of the few other rasterised artists (coverage fill)
@@ -109,7 +130,10 @@ ALIGN_DPI = 1200                      # resolution of the alignment-track images
 AF_THRESHOLD = 0.2
 AF_MIN_DEPTH = 10
 SKIP_FLAGS = 0x4 | 0x100 | 0x200 | 0x400   # unmapped, secondary, QC-fail, duplicate (primary + supplementary kept)
-MIN_INDEL = 10                             # insertions / deletions shorter than this are not drawn
+MIN_INDEL = 10                             # insertions / deletions shorter than this are not drawn,
+                                           # unless they are a candidate variant (see indel_specs)
+GENE_IGV_FRAC = 0.75                       # share of the width for the gene-body IGV views (rest: expression box)
+INDEL_POS_TOL = 5                          # bp an aligner may shift a variant indel within a repeat
 
 GTEX_LABELS = {"exon_skipping_approx", "exon_inclusion_approx", "alt_5ss_approx", "alt_3ss_approx",
                "complex_approx"}
@@ -182,8 +206,8 @@ def parse_args():
                    help="Bulk BAM of every sample on the panel (same order as --samples), for the "
                         "representative sample in the sashimi plots.")
     p.add_argument("--amalgam-matrices", nargs="*", default=[], metavar="SAMPLE_TYPE:PATH",
-                   help="AMALGAM transcript_amalgam_matrix_raw.tsv per sample type (transcript_id, "
-                        "gene_id = gene symbol, one column per sample), for choosing the representative.")
+                   help="Accepted for compatibility; not used (the representative sample is chosen from "
+                        "junction PSI in the cohort junction tables).")
     p.add_argument("--sashimi-min-frac", type=float, default=0.10,
                    help="Sashimi: show a junction in a track if its read count is >= this fraction of "
                         "the track's maximum coverage (default 0.10).")
@@ -195,9 +219,27 @@ def parse_args():
                    help="QC page: _9B {bed_id}_read_attributes.tsv (sample, targetType, min, q1, median, q3, max).")
     p.add_argument("--flr-matrix", default=None,
                    help="QC page: _9E {bed_id}_full_length_ratio_matrix.tsv (gene x sample avgFLR).")
+    p.add_argument("--coverage-matrix", default=None,
+                   help="QC: _9D {bed_id}_breadth_coverage_matrix.tsv (gene x sample fraction of canonical-"
+                        "transcript bases at depth >= merge_min_dp_snv).")
+    p.add_argument("--coverage-depth", type=int, default=50,
+                   help="Depth threshold behind --coverage-matrix (merge_min_dp_snv), for labels only.")
+    p.add_argument("--zscore-cptm", default=None,
+                   help="Accepted for compatibility; not drawn (the report shows MOTR z-scores only).")
+    p.add_argument("--zscore-motr", default=None,
+                   help="QC: the sample type's by-assignment gene_assignment_zscores_motr.tsv (gene x sample).")
+    p.add_argument("--expression-matrices", nargs="*", default=[], metavar="SAMPLE_TYPE:PATH",
+                   help="Each sample type's by-assignment gene_assignment_matrix_motr.tsv (gene x sample), "
+                        "for the expression box plot beside each gene's bulk view.")
+    p.add_argument("--zscore-threshold", type=float, default=-3.5,
+                   help="Expression outlier cut-off; cells with |z| >= |this| are outlined (default -3.5).")
     p.add_argument("--pca-coords", default=None,
                    help="QC page: _9C2 {bed_id}_PCA_coords.tsv (sample-type validation PCA coordinates).")
     p.add_argument("--outfile", required=True)
+    p.add_argument("--html-out", default=None,
+                   help="Also write an offline HTML review page (the same pages as images, with a review "
+                        "status and notes per gene) to this path.")
+    p.add_argument("--html-dpi", type=int, default=200, help="Resolution of the page images in --html-out.")
     return p.parse_args()
 
 
@@ -285,6 +327,12 @@ def load_canonical_transcripts(gtf, genes):
         tid = canon[0] if canon else max(cands, key=lambda k: sum(e - s for s, e in cands[k]["exons"]))
         r = cands[tid]
         canon_j, all_j = set(), set()
+        merged = []                              # every annotated exon of the gene, merged
+        for a, b in sorted(e for tr in cands.values() for e in tr["exons"]):
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
         for t_id, tr in cands.items():           # junctions of every transcript (same IDs as the pipeline)
             ex = sorted(tr["exons"])
             for (_, e1), (s2, _) in zip(ex, ex[1:]):
@@ -294,7 +342,7 @@ def load_canonical_transcripts(gtf, genes):
                     canon_j.add(j)
         out[gene] = dict(chrom=r["chrom"], strand=r["strand"], tid=tid,
                          exons=sorted(r["exons"]), cds=sorted(r["cds"]),
-                         canonical_junctions=canon_j, annotated_junctions=all_j)
+                         canonical_junctions=canon_j, annotated_junctions=all_j, all_exons=merged)
     return out
 
 
@@ -494,6 +542,30 @@ def _keep_spliced(read):
     return _keep(read) and _is_spliced(read)
 
 
+EXON_TOL = 10    # bp an unspliced read may extend past an annotated exon and still count as exonic
+
+
+def read_filter(tx):
+    """Read filter for a gene's sashimi tracks. A multi-exon gene keeps
+    spliced reads plus unspliced reads lying within an annotated exon (any transcript, +/- EXON_TOL),
+    so reads inside a long exon are kept while unspliced pre-mRNA / intronic reads are dropped.
+    A single-exon gene (or no transcript) keeps every read."""
+    if tx is None or len(tx["exons"]) <= 1:
+        return _keep
+    exons = tx.get("all_exons") or sorted(tx["exons"])
+    starts = [a for a, _ in exons]
+
+    def keep(read):
+        if not _keep(read):
+            return False
+        if _is_spliced(read):
+            return True
+        rs, re_ = read.reference_start, read.reference_end or read.reference_start
+        i = bisect.bisect_right(starts, rs + EXON_TOL) - 1
+        return i >= 0 and exons[i][0] - EXON_TOL <= rs and re_ <= exons[i][1] + EXON_TOL
+    return keep
+
+
 def sample_reads(bam, chrom, start, end, max_reads, seed, keep=_keep):
     """Reservoir-sample up to max_reads reads overlapping the region; returns (reads, n_total)."""
     rng = random.Random(seed)
@@ -609,14 +681,43 @@ def draw_coverage(ax, acgt, ref_seq, start, end, label, arcs=None, show_xticks=T
     else:
         ax.set_xticks([])
     if label:
+        _track_label(ax, label)
+
+
+def _track_label(ax, label):
+    """Left-hand track label; for 'name\nrest' (e.g. 'bulk\ncoverage') the track name is bold."""
+    if "\n" not in label:
         ax.set_ylabel(label, fontsize=6 * FS, rotation=0, ha="right", va="center", labelpad=4)
+        return
+    name, rest = label.split("\n", 1)
+    tr = matplotlib.transforms.offset_copy(ax.transAxes, fig=ax.figure, x=-4, y=0, units="points")
+    ax.text(0, 0.5, name, transform=tr, fontsize=6 * FS, fontweight="bold", ha="right", va="bottom")
+    ax.text(0, 0.5, rest, transform=tr, fontsize=6 * FS, ha="right", va="top")
+
+
+def indel_specs(variants):
+    """(kind, 0-based reference position, length) of every candidate indel, so a read's matching
+    indel is drawn even when shorter than MIN_INDEL. Deletion: the deleted bases start at VCF POS
+    (0-based), length len(REF) - len(ALT). Insertion: before 0-based POS, length len(ALT) - len(REF)."""
+    out = []
+    for v in variants:
+        d = len(v["alt"]) - len(v["ref"])
+        if d < 0:
+            out.append(("D", v["pos"], -d))
+        elif d > 0:
+            out.append(("I", v["pos"], d))
+    return out
+
+
+def _is_variant_indel(kind, pos, ln, specs):
+    return any(k == kind and l == ln and abs(p - pos) <= INDEL_POS_TOL for k, p, l in specs)
 
 
 def _rgb(c):
     return tuple(int(round(v * 255)) for v in matplotlib.colors.to_rgb(c))
 
 
-def draw_alignments(ax, reads, n_total, ref_seq, start, end, label):
+def draw_alignments(ax, reads, n_total, ref_seq, start, end, label, keep_indels=()):
     """Paint the alignment track straight into an RGB image sized to the axes at ALIGN_DPI and
     embed it unresampled -- far sharper (and lighter on memory) than rasterising thousands of
     matplotlib patches onto a full-page canvas."""
@@ -675,7 +776,7 @@ def draw_alignments(ax, reads, n_total, ref_seq, start, end, label):
                 pos += ln
                 qpos += ln
             elif op == 1:
-                if ln >= MIN_INDEL and start <= pos <= end:
+                if start <= pos <= end and (ln >= MIN_INDEL or _is_variant_indel("I", pos, ln, keep_indels)):
                     c = min(int((pos - start) * px_per_base), W - 1)
                     img[r0:r1, max(c - 1, 0):c + 1] = ins_c
                 qpos += ln
@@ -683,9 +784,9 @@ def draw_alignments(ax, reads, n_total, ref_seq, start, end, label):
                 a, b = max(pos, start), min(pos + ln, end)
                 if a < b:
                     c0, c1 = xcols(a, b)
-                    if ln >= MIN_INDEL:
+                    if ln >= MIN_INDEL or _is_variant_indel("D", pos, ln, keep_indels):
                         img[l0:l1, c0:c1] = del_c
-                    else:                       # small deletion: drawn as part of the read
+                    else:                       # small deletion: hidden (drawn as part of the read)
                         img[r0:r1, c0:c1] = read_c
                 pos += ln
             elif op == 3:
@@ -789,10 +890,8 @@ def draw_distribution(ax, metric, junction, values, sample_to_type, type_colors,
                     ax.scatter(x, y, marker="*", s=50, color=col, edgecolors="black", linewidths=0.5, zorder=4)
                     ax.annotate(s, (x, y), xytext=(4, 0), textcoords="offset points",
                                 fontsize=5 * FS, va="center", fontweight="bold")
-                elif s in outliers:
+                elif s in outliers:         # other samples' outlier calls: outlined, not labelled
                     ax.scatter(x, y, s=9, color=col, edgecolors="black", linewidths=0.4, zorder=3)
-                    ax.annotate(s, (x, y), xytext=(3, 0), textcoords="offset points",
-                                fontsize=4 * FS, va="center")
                 else:
                     ax.scatter(x, y, s=6, color=col, alpha=0.8, linewidths=0, zorder=2)
         ax.set_xticks(range(1, len(types) + 1))
@@ -847,6 +946,261 @@ def _flush_pdf_images(pdf):
         f._images[("written", name)] = (None, name, ob)
 
 
+REVIEW_CTX = ("overview", None)          # what the page being drawn belongs to (for --html-out)
+
+
+def link_text(fig, x_in, y_in, text, target, ha="right"):
+    """Clickable header text at (x, y) inches from the bottom-left; `target` is resolved to a page
+    after the PDF is written (see add_pdf_navigation)."""
+    t = fig.text(x_in / PAGE_W, y_in / PAGE_H, text, fontsize=6 * FS, color="#0068a9", ha=ha, va="top")
+    t._pdf_link = target
+    return t
+
+
+def _link_rects(fig):
+    """(rect in PDF points, target) of every link_text on the figure."""
+    texts = [t for t in fig.texts if getattr(t, "_pdf_link", None) is not None]
+    if not texts:
+        return []
+    r = fig.canvas.get_renderer()
+    k = 72.0 / fig.dpi
+    out = []
+    for t in texts:
+        bb = t.get_window_extent(renderer=r)
+        out.append(((bb.x0 * k - 1, bb.y0 * k - 1, bb.x1 * k + 1, bb.y1 * k + 1), t._pdf_link))
+    return out
+
+
+def nav_links(fig, prev_gene=None, next_gene=None):
+    """'« previous gene: X    contents    next gene: Y »' at the top right of a page."""
+    y, x = PAGE_H - 0.16, PAGE_W - MARGIN_R
+    items = ([(f"next gene: {next_gene} \u00bb", ("gene", next_gene))] if next_gene else []) \
+        + [("contents", ("contents",))] \
+        + ([(f"\u00ab previous gene: {prev_gene}", ("gene", prev_gene))] if prev_gene else [])
+    r = fig.canvas.get_renderer()
+    for text, target in items:                       # right to left, each placed by the width of the last
+        t = link_text(fig, x, y, text, target)
+        x -= t.get_window_extent(renderer=r).width / fig.dpi + 0.25
+
+
+def draw_contents(pdf, shown, genes):
+    """Contents pages, drawn last (when every page number is known) and moved to just after the
+    overview by add_pdf_navigation. Every row links to its first page."""
+    global REVIEW_CTX
+    fp_ = pdf.first_page
+    qc_sections = sorted(((n, i) for (k, n), i in fp_.items() if k == "qc"), key=lambda x: x[1])
+    rows = [("Overview", None, None, None, ("overview", None))]
+    rows += [(g["gene"], g["rank"], g["tier"], g["hits"], ("gene", g["gene"])) for g in genes
+             if ("gene", g["gene"]) in fp_]
+    rows += [(n, None, None, None, ("qc", n)) for n, _ in qc_sections]
+    per_page = 30
+    n_cont = max(1, -(-len(rows) // per_page))
+    REVIEW_CTX = ("contents", None)
+    for k in range(n_cont):
+        fig = plt.figure(figsize=(PAGE_W, PAGE_H))
+        fig.text(MARGIN_L / PAGE_W, 1 - 0.22 / PAGE_H, f"{shown}  |  Contents" + (f"  (page {k + 1})" if k else ""),
+                 fontsize=11 * FS, fontweight="bold", va="top")
+        fig.text(MARGIN_L / PAGE_W, 1 - 0.48 / PAGE_H, "click a name to jump to its pages; every page links "
+                 "back here (top right)", fontsize=6.5 * FS, va="top", color="#333")
+        y = PAGE_H - 0.95
+        for x, h in ((MARGIN_L, "Rank"), (MARGIN_L + 0.5, "Gene / section"), (MARGIN_L + 2.3, "Tier"),
+                     (MARGIN_L + 2.8, "Hits"), (PAGE_W - MARGIN_R - 0.4, "Page")):
+            fig.text(x / PAGE_W, y / PAGE_H, h, fontsize=6.5 * FS, fontweight="bold", va="top")
+        y -= 0.24
+        prev_kind = "overview"
+        for name, rank, tier, hits, target in rows[k * per_page:(k + 1) * per_page]:
+            if target[0] != prev_kind:
+                y -= 0.06
+                prev_kind = target[0]
+            i = fp_.get(target)
+            if rank:
+                fig.text(MARGIN_L / PAGE_W, y / PAGE_H, rank, fontsize=6.5 * FS, va="top")
+            link_text(fig, MARGIN_L + 0.5, y, name, target, ha="left").set_fontsize(6.5 * FS)
+            if tier:
+                fig.text((MARGIN_L + 2.3) / PAGE_W, y / PAGE_H, tier, fontsize=6.5 * FS, va="top")
+            if hits:
+                h = hits if len(hits) <= 95 else hits[:92] + "..."
+                fig.text((MARGIN_L + 2.8) / PAGE_W, y / PAGE_H, h, fontsize=5.5 * FS, va="top", color="#333")
+            if i is not None:                        # final page number: contents pages sit after page 1
+                fig.text((PAGE_W - MARGIN_R - 0.4) / PAGE_W, y / PAGE_H, str(i + 1 + (n_cont if i > 0 else 0)),
+                         fontsize=6.5 * FS, va="top")
+            y -= 0.205
+        pdf.savefig(fig)
+        plt.close(fig)
+    return rows
+
+
+def add_pdf_navigation(path, cap, rows):
+    """Finish the PDF in place with an incremental update (no extra libraries): move the contents
+    pages to just after the overview, turn every link_text into a link to its target's first page,
+    and add bookmarks. Relies on matplotlib's plain PDF layout (catalog, page tree with /Kids, an
+    /Annots object per page); if that is not what it finds, the PDF is left as written."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+
+    def obj(num):
+        m = re.search(rb"(?<![0-9])%d 0 obj\s*(.*?)\s*endobj" % num, data, re.S)
+        return m.group(1) if m else None
+
+    try:
+        tr = data[data.rindex(b"trailer"):]
+        size = int(re.search(rb"/Size (\d+)", tr).group(1))
+        root = int(re.search(rb"/Root (\d+) 0 R", tr).group(1))
+        info = re.search(rb"/Info (\d+) 0 R", tr)
+        prev = int(re.search(rb"startxref\s+(\d+)", data[data.rindex(b"startxref"):]).group(1))
+        pages_num = int(re.search(rb"/Pages (\d+) 0 R", obj(root)).group(1))
+        kids = [int(x) for x in re.findall(rb"(\d+) 0 R", re.search(rb"/Kids \[(.*?)\]", obj(pages_num), re.S).group(1))]
+        annots = [int(re.search(rb"/Annots (\d+) 0 R", obj(k)).group(1)) for k in kids]
+    except Exception as e:                           # unexpected layout: leave the file alone
+        print(f"  [WARNING] PDF navigation not added ({e!r}).")
+        return
+    if len(kids) != cap.n:
+        print(f"  [WARNING] PDF navigation not added (expected {cap.n} pages, found {len(kids)}).")
+        return
+
+    cont = [i for i in range(cap.n) if cap.page_ctx[i][0] == "contents"]
+    order = [0] + cont + [i for i in range(1, cap.n) if i not in cont]
+    pos = {orig: new for new, orig in enumerate(order)}           # original index -> final index
+
+    def dest(target):
+        i = 0 if target[0] == "overview" else (cont[0] if target[0] == "contents" and cont else
+                                                cap.first_page.get(target))
+        return None if i is None else kids[i]
+
+    new_objs = {}
+    nxt = [size]
+
+    def add(body):
+        n = nxt[0]
+        nxt[0] += 1
+        new_objs[n] = body
+        return n
+
+    per_page = defaultdict(list)
+    for i, (x0, y0, x1, y1), target in cap.links:
+        d = dest(target)
+        if d is not None:
+            a = add(b"<< /Type /Annot /Subtype /Link /Rect [ %.2f %.2f %.2f %.2f ] /Border [ 0 0 0 ] "
+                    b"/Dest [ %d 0 R /Fit ] >>" % (x0, y0, x1, y1, d))
+            per_page[i].append(a)
+    for i, refs in per_page.items():
+        new_objs[annots[i]] = b"[ " + b" ".join(b"%d 0 R" % r for r in refs) + b" ]"
+    old_pages = obj(pages_num)
+    new_objs[pages_num] = re.sub(rb"/Kids \[.*?\]", b"/Kids [ " + b" ".join(b"%d 0 R" % kids[i] for i in order)
+                                 + b" ]", old_pages, flags=re.S)
+
+    # bookmarks: Overview, Contents, Candidate genes > each gene, QC and expression > each section
+    def esc(t):
+        return t.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)").encode("latin-1", "replace")
+    tops = [("Overview", ("overview", None), [])]
+    if cont:
+        tops.append(("Contents", ("contents",), []))
+    genes_ = [(f"{r[1]}. {r[0]} (tier {r[2]})", r[4]) for r in rows if r[4][0] == "gene" and dest(r[4]) is not None]
+    qcs = [(r[0], r[4]) for r in rows if r[4][0] == "qc" and dest(r[4]) is not None]
+    if genes_:
+        tops.append(("Candidate genes", genes_[0][1], genes_))
+    if qcs:
+        tops.append(("QC and expression", qcs[0][1], qcs))
+    outl = nxt[0]; nxt[0] += 1
+    top_nums = [nxt[0] + k for k in range(len(tops))]; nxt[0] += len(tops)
+    for k, (title, target, children) in enumerate(tops):
+        ch_nums = [nxt[0] + c for c in range(len(children))]; nxt[0] += len(children)
+        for c, (ct, ctarget) in enumerate(children):
+            body = b"<< /Title (%s) /Parent %d 0 R /Dest [ %d 0 R /Fit ]" % (esc(ct), top_nums[k], dest(ctarget))
+            if c > 0:
+                body += b" /Prev %d 0 R" % ch_nums[c - 1]
+            if c + 1 < len(children):
+                body += b" /Next %d 0 R" % ch_nums[c + 1]
+            new_objs[ch_nums[c]] = body + b" >>"
+        body = b"<< /Title (%s) /Parent %d 0 R /Dest [ %d 0 R /Fit ]" % (esc(title), outl, dest(target))
+        if k > 0:
+            body += b" /Prev %d 0 R" % top_nums[k - 1]
+        if k + 1 < len(tops):
+            body += b" /Next %d 0 R" % top_nums[k + 1]
+        if children:
+            body += b" /First %d 0 R /Last %d 0 R /Count %d" % (ch_nums[0], ch_nums[-1], len(children))
+        new_objs[top_nums[k]] = body + b" >>"
+    new_objs[outl] = b"<< /Type /Outlines /First %d 0 R /Last %d 0 R /Count %d >>" % (
+        top_nums[0], top_nums[-1], len(tops))
+    cat = obj(root).rstrip()
+    assert cat.endswith(b">>")
+    new_objs[root] = cat[:-2].rstrip() + b" /Outlines %d 0 R /PageMode /UseOutlines >>" % outl
+
+    out = bytearray(data if data.endswith(b"\n") else data + b"\n")
+    offsets = {}
+    for n in sorted(new_objs):
+        offsets[n] = len(out)
+        out += b"%d 0 obj\n" % n + new_objs[n] + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 1\n0000000000 65535 f \n"
+    for n in sorted(offsets):
+        out += b"%d 1\n%010d 00000 n \n" % (n, offsets[n])
+    out += b"trailer\n<< /Size %d /Root %d 0 R" % (nxt[0], root)
+    if info:
+        out += b" /Info %s 0 R" % info.group(1)
+    out += b" /Prev %d >>\nstartxref\n%d\n%%%%EOF\n" % (prev, xref)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(out)
+    os.replace(tmp, path)
+    print(f"  contents page, bookmarks and {sum(len(v) for v in per_page.values())} page link(s) added")
+
+
+def _compact_png(png):
+    """The page PNG reduced to a 256-colour palette (about a third of the size, no visible change
+    for these plots); unchanged if Pillow (a matplotlib dependency) is unavailable."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return png
+    im = Image.open(io.BytesIO(png)).convert("RGB")
+    q = im.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+    out = io.BytesIO()
+    q.save(out, format="PNG", optimize=True)
+    return out.getvalue() if out.tell() < len(png) else png
+
+
+class CapturePdf:
+    """PdfPages stand-in that also keeps each saved page as a PNG (for the HTML review page),
+    tagged with what it belongs to: the figure's _review_ctx (set when a gene page is created), or
+    REVIEW_CTX at the time it is saved."""
+
+    def __init__(self, pdf, dpi):
+        self._pdf, self._dpi, self.pages = pdf, dpi, []
+        self.n = 0                    # pages saved so far
+        self.first_page = {}          # review context -> its first page index
+        self.links = []               # (page index, (x0, y0, x1, y1) in PDF points, target)
+        self.page_ctx = []            # review context of every page, in order
+
+    def savefig(self, fig, *a, **k):
+        ctx = getattr(fig, "_review_ctx", REVIEW_CTX)
+        self.first_page.setdefault(ctx, self.n)
+        self.page_ctx.append(ctx)
+        self.links += [(self.n, r, t) for r, t in _link_rects(fig)]
+        self._pdf.savefig(fig, *a, **k)
+        self.n += 1
+        if self._dpi and ctx[0] != "contents":
+            nav = [t for t in fig.texts if getattr(t, "_pdf_link", None) is not None]
+            for t in nav:                 # PDF-only links: not clickable in the HTML page images
+                t.set_visible(False)
+            # the alignment tracks are 1200-dpi images: drawn nearest-neighbour at screen resolution
+            # they alias (reads drop out, splice lines turn into stripes), so smooth them for the PNG
+            ims = [im for ax in fig.axes for im in ax.images]
+            old = [im.get_interpolation() for im in ims]
+            for im in ims:
+                im.set_interpolation("antialiased")
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=self._dpi)
+            for im, o in zip(ims, old):
+                im.set_interpolation(o)
+            for t in nav:
+                t.set_visible(True)
+            self.pages.append((ctx, _compact_png(buf.getvalue())))
+
+    def __getattr__(self, name):
+        return getattr(self._pdf, name)
+
+
 class Pager:
     """Hands out row slots, 4 per page, with a page header naming the gene."""
 
@@ -858,6 +1212,7 @@ class Pager:
     def _new_page(self):
         self.flush()
         self.fig = plt.figure(figsize=(PAGE_W, PAGE_H))
+        self.fig._review_ctx = REVIEW_CTX
         self.part += 1
         self.header_fn(self.fig, self.part)
         self.row = 0
@@ -900,7 +1255,7 @@ def panel_columns(n, per_row):
 
 def alignment_panel(fig, left, width, top, h, title, bam, chrom, start, end, fasta, tx, args, seed,
                     label_tracks=True, arcs_junctions=None, ref_track=False, highlight=None,
-                    marks=None, spans=None, track_label="", show_tx=True, title_width=None):
+                    marks=None, spans=None, track_label="", show_tx=True, title_width=None, keep_indels=()):
     max_chars = int((title_width or width) * 19 / FS)
     if len(title) > max_chars:
         title = title[:max_chars - 3] + "..."
@@ -915,8 +1270,8 @@ def alignment_panel(fig, left, width, top, h, title, bam, chrom, start, end, fas
     if len(ref_seq) < end - max(0, start):
         ref_seq = ref_seq + "N" * (end - max(0, start) - len(ref_seq))
     start = max(0, start)
-    # for a spliced gene (multi-exon canonical transcript), unspliced reads are left out of both tracks
-    keep = _keep_spliced if (tx is not None and len(tx["exons"]) > 1) else _keep
+    # IGV views show every read (unmapped, secondary, QC-fail and duplicate reads aside)
+    keep = _keep
     acgt = coverage_counts(bam, chrom, start, end, keep)
     arcs = None
     if arcs_junctions:
@@ -929,7 +1284,8 @@ def alignment_panel(fig, left, width, top, h, title, bam, chrom, start, end, fas
     y -= cov_h + pad
     reads, n = sample_reads(bam, chrom, start, end, args.max_reads, seed, keep)
     ax = _ax(fig, left, y - aln_h, width, aln_h)
-    draw_alignments(ax, reads, n, ref_seq, start, end, "alignments" if label_tracks else "")
+    draw_alignments(ax, reads, n, ref_seq, start, end, "alignments" if label_tracks else "",
+                    keep_indels=keep_indels)
     y -= aln_h + pad
     if ref_track:
         ax = _ax(fig, left, y - ref_h, width, ref_h)
@@ -944,20 +1300,50 @@ def alignment_panel(fig, left, width, top, h, title, bam, chrom, start, end, fas
 # ----------------------------------------------------------------------------------------------
 # Sashimi plots (outlier splicing events) and the representative cohort sample
 # ----------------------------------------------------------------------------------------------
-def load_amalgam_matrix(path):
-    df = pd.read_csv(path, sep="\t")
-    df.columns = df.columns.astype(str)
-    df["gene_id"] = df["gene_id"].astype(str)
-    return df
+REP_MIN_JUNCTIONS = 3        # a candidate must share this many covered junctions with the median
+REP_DEPTH_MARGIN = 0.02      # candidates this close to the best distance are ranked by depth
 
 
-def choose_representative(gene, sample, samples, sample_to_type, sample_bams, amalgam_paths, cache):
-    """The cohort sample whose AMALGAM transcript counts for `gene` correlate best (Pearson) with
-    the mean profile of the candidates: the other samples of this sample's type, or, if there are
-    none, the samples of the cohort's most common sample type. Returns
-    dict(sample, sample_type, r, n) or None."""
+def load_gene_psi(manifests, gene, coverage_threshold):
+    """This gene's bulk junction PSI from the cohort junction tables (8A raw TSVs), as
+    (psi: sample x junction, depth: sample -> total junction reads). A PSI is kept only where the
+    junction's coverage in that sample is >= coverage_threshold."""
+    rows = []
+    for stype, mpath in manifests.items():
+        if not os.path.isfile(mpath):
+            continue
+        man = pd.read_csv(mpath, sep="\t", dtype=str, keep_default_na=False)
+        for rp in man.loc[man["gene"] == gene, "result_path"].tolist():
+            rp = str(rp).strip()
+            if not rp or rp in ("None", "nan", "NA") or not os.path.isfile(rp):
+                continue
+            df = pd.read_csv(rp, sep="\t", dtype=str)
+            need = {"sample", "phasing", "junction", "rescaled_junction_PSI", "junction_coverage"}
+            if not need <= set(df.columns):
+                continue
+            df = df[df["phasing"] == "bulk"]
+            rows.append(pd.DataFrame({"sample": df["sample"].astype(str), "junction": df["junction"],
+                                      "psi": pd.to_numeric(df["rescaled_junction_PSI"], errors="coerce"),
+                                      "cov": pd.to_numeric(df["junction_coverage"], errors="coerce")}))
+    if not rows:
+        return pd.DataFrame(), pd.Series(dtype=float)
+    long = pd.concat(rows, ignore_index=True).drop_duplicates(["sample", "junction"])
+    depth = long.groupby("sample")["cov"].sum(min_count=1)
+    ok = long[(long["cov"] >= coverage_threshold) & long["psi"].notna()]
+    psi = ok.pivot(index="sample", columns="junction", values="psi")
+    return psi, depth
+
+
+def choose_representative(gene, sample, samples, sample_to_type, sample_bams, psi, depth, exclude):
+    """The most typical cohort sample for this gene's splicing: among the candidates (the other
+    samples of this sample's type, or, if there are none, the samples of the cohort's most common
+    sample type), leaving out any sample with its own outlier junction call in the gene, the one
+    whose junction PSIs are closest (mean |PSI - median|) to the candidates' median PSI, over
+    junctions covered in both (at least REP_MIN_JUNCTIONS of them, or all the gene has if fewer).
+    Among candidates within REP_DEPTH_MARGIN of the best distance, the one with the most junction
+    reads, so the sashimi is well populated. Returns dict(sample, sample_type, dist, n) or None."""
     stype = sample_to_type.get(sample)
-    usable = [s for s in samples if s != sample and s in sample_bams]
+    usable = [s for s in samples if s != sample and s in sample_bams and s not in exclude]
     cands = [s for s in usable if sample_to_type.get(s) == stype]
     rtype = stype
     if not cands:
@@ -969,33 +1355,25 @@ def choose_representative(gene, sample, samples, sample_to_type, sample_bams, am
         order = {t: i for i, t in enumerate(dict.fromkeys(sample_to_type.get(s) for s in samples))}
         rtype = max(counts, key=lambda t: (counts[t], -order.get(t, 0)))
         cands = [s for s in usable if sample_to_type.get(s) == rtype]
-    path = amalgam_paths.get(rtype)
-    if not path or not os.path.isfile(path):
-        print(f"  [WARNING] no AMALGAM transcript matrix for {rtype}; no representative sample.")
+    if psi is None or psi.empty:
         return None
-    if path not in cache:
-        cache[path] = load_amalgam_matrix(path)
-    mat = cache[path]
-    cands = [s for s in cands if s in mat.columns]
-    rows = mat[mat["gene_id"] == gene]
-    if not cands or rows.empty:
+    cands = [s for s in cands if s in psi.index and psi.loc[s].notna().any()]
+    if not cands:
         return None
-    expr = rows[cands].apply(pd.to_numeric, errors="coerce").fillna(0)
-    mean_profile = expr.mean(axis=1)
-    best, best_r = None, -np.inf
+    sub = psi.loc[cands].dropna(axis=1, how="all")
+    median = sub.median(axis=0, skipna=True)
+    min_shared = min(REP_MIN_JUNCTIONS, sub.shape[1])
+    scored = []
     for c in cands:
-        col = expr[c]
-        if len(col) < 2 or col.std() == 0 or mean_profile.std() == 0:
-            continue
-        r = float(np.corrcoef(col.to_numpy(float), mean_profile.to_numpy(float))[0, 1])
-        if r > best_r:
-            best, best_r = c, r
-    if best is None:
-        # correlation undefined (e.g. a single transcript): the sample with the median gene total
-        tot = expr.sum(axis=0)
-        best = (tot - tot.median()).abs().idxmin()
-        best_r = np.nan
-    return dict(sample=best, sample_type=rtype, r=best_r, n=len(cands))
+        diff = (sub.loc[c] - median).abs().dropna()
+        if len(diff) >= min_shared:
+            scored.append((float(diff.mean()), c))
+    if not scored:
+        return None
+    best_d = min(d for d, _ in scored)
+    close = [(d, c) for d, c in scored if d <= best_d + REP_DEPTH_MARGIN]
+    d, best = max(close, key=lambda dc: (float(depth.get(dc[1], 0) or 0), -dc[0]))
+    return dict(sample=best, sample_type=rtype, dist=d, n=len(cands))
 
 
 def sashimi_data(bam, chrom, start, end, keep, min_frac):
@@ -1071,7 +1449,7 @@ def _arc_sides(tracks):
 def draw_sashimi(fig, left, width, top, bottom, tracks, tx, chrom, start, end, args):
     """tracks: list of dict(label, bam, color). Sashimi tracks stacked from `top` down to `bottom`
     (inches), the canonical transcript (intron-scaled) under the last one."""
-    keep = _keep_spliced if (tx is not None and len(tx["exons"]) > 1) else _keep
+    keep = read_filter(tx)
     start = max(0, start)
     for t in tracks:
         t["cov"], t["junctions"], t["n"] = sashimi_data(t["bam"], chrom, start, end, keep, args.sashimi_min_frac)
@@ -1129,9 +1507,19 @@ def draw_sashimi(fig, left, width, top, bottom, tracks, tx, chrom, start, end, a
 # ----------------------------------------------------------------------------------------------
 # QC page
 # ----------------------------------------------------------------------------------------------
-QC_ON_COLOR, QC_OFF_COLOR = "#4c72b0", "#c8c8c8"
-QC_SAMPLE_COLOR, QC_COHORT_COLOR = "#333333", "#999999"
-QC_NAN_COLOR = "#bbbbbb"
+QC_SAMPLE_COLOR = "#333333"   # reset per sample to a darker shade of its type colour
+QC_NAN_COLOR = "#d9d9d9"
+# every box plot in the pipeline: plain black outline, no fill
+_BLACK_LINE = dict(color="black", linewidth=0.8)
+BOX_STYLE = dict(boxprops=_BLACK_LINE, whiskerprops=_BLACK_LINE, capprops=_BLACK_LINE, medianprops=_BLACK_LINE)
+# both heatmaps: red (0) - white (0.5) - blue (1), the pipeline's continuous scale (palette.py)
+QC_HEAT_CMAP = RED_WHITE_BLUE
+
+
+def darker(color, f=0.5):
+    """`color` mixed with black (f = fraction of black)."""
+    r, g, b = to_rgb(color)
+    return to_hex((r * (1 - f), g * (1 - f), b * (1 - f)))
 
 
 def _read_tsv(path, **kw):
@@ -1154,8 +1542,17 @@ def _qc_unavailable(ax, title, msg="not available"):
     _qc_spines(ax)
 
 
-def qc_read_counts(ax, df, sample, shown, stype, type_samples, all_samples):
-    """Stacked on-/off-target bar for the sample, its sample-type median and the cohort median."""
+def _xlabels(ax, labels, n_rot=3):
+    """Tick labels; rotated when there are many."""
+    if len(labels) > n_rot:
+        ax.set_xticklabels(labels, fontsize=5 * FS, rotation=35, ha="right")
+    else:
+        ax.set_xticklabels(labels, fontsize=5.5 * FS)
+
+
+def qc_read_counts(ax, df, sample, shown, tgroups):
+    """Stacked on-/off-target bar for the sample and the median of each sample type
+    (median mapped reads x median on-target rate), in the types' colours."""
     title = "Read counts"
     if df is None:
         return _qc_unavailable(ax, title)
@@ -1166,46 +1563,52 @@ def qc_read_counts(ax, df, sample, shown, stype, type_samples, all_samples):
     df = df.set_index("sample")
     if sample not in df.index:
         return _qc_unavailable(ax, title, f"{shown} not in the on-target table")
-    bars = [(shown, df.at[sample, "mapped"], df.at[sample, "on_target_rate"] / 100)]
-    for lab, group in ((f"{stype}\nmedian", type_samples), ("cohort\nmedian", all_samples)):
-        sub = df.reindex([s for s in group if s in df.index])
+    bars = [(shown, df.at[sample, "mapped"], df.at[sample, "on_target_rate"] / 100, QC_SAMPLE_COLOR)]
+    for t, members, col in tgroups:
+        sub = df.reindex([s for s in members if s in df.index])
         if len(sub):
-            bars.append((lab, sub["mapped"].median(), sub["on_target_rate"].median() / 100))
+            bars.append((f"{t}\nmedian", sub["mapped"].median(), sub["on_target_rate"].median() / 100, col))
     x = np.arange(len(bars))
     mapped = np.array([b[1] for b in bars], dtype=float)
     rate = np.array([b[2] for b in bars], dtype=float)
     scale, unit = (1e6, "M") if np.nanmax(mapped) >= 1e6 else (1e3, "k")
     on, off = mapped * rate / scale, mapped * (1 - rate) / scale
-    ax.bar(x, on, color=QC_ON_COLOR, width=0.65, label="on-target")
-    ax.bar(x, off, bottom=on, color=QC_OFF_COLOR, width=0.65, label="off-target")
+    cols = [b[3] for b in bars]
+    # on-target solid, off-target white, both outlined in the bar's colour
+    ax.bar(x, on, color=cols, width=0.65, edgecolor=cols, linewidth=0.8)
+    ax.bar(x, off, bottom=on, color="white", width=0.65, edgecolor=cols, linewidth=0.8)
+    from matplotlib.patches import Patch
+    legend_handles = [Patch(facecolor="#777777", edgecolor="#777777", linewidth=0.8, label="on-target"),
+                      Patch(facecolor="white", edgecolor="#777777", linewidth=0.8, label="off-target")]
     for i in range(len(bars)):
-        ax.text(x[i], mapped[i] / scale * 1.02, f"{mapped[i] / scale:.1f}{unit}\n{rate[i]:.0%} on",
-                ha="center", va="bottom", fontsize=5.5 * FS)
+        ax.text(x[i], mapped[i] / scale * 1.02, f"{mapped[i] / scale:.1f}{unit}\n{rate[i]:.0%}",
+                ha="center", va="bottom", fontsize=(5.5 if len(bars) <= 4 else 4.5) * FS)
     ax.set_xticks(x)
-    ax.set_xticklabels([b[0] for b in bars], fontsize=5.5 * FS)
+    _xlabels(ax, [b[0] for b in bars])
     ax.set_ylabel(f"mapped reads ({unit})")
     ax.set_ylim(0, np.nanmax(mapped) / scale * 1.4)
     ax.set_title(title, fontsize=7 * FS, fontweight="bold")
-    ax.legend(fontsize=5 * FS, frameon=False, loc="upper right", ncol=2, bbox_to_anchor=(1, 1.03))
+    ax.legend(handles=legend_handles, fontsize=5 * FS, frameon=False, loc="upper right", ncol=2,
+              bbox_to_anchor=(1, 1.03))
     _qc_spines(ax)
 
-
-def qc_read_lengths(ax, df, sample, shown, stype, type_samples, all_samples, type_color):
-    """On-/off-target read-length boxes: sample, sample-type median quartiles, cohort median quartiles."""
-    title = "Read length\n(whiskers: 1.5 IQR, clipped to min/max)"
+def qc_read_lengths(ax, df, sample, shown, tgroups):
+    """On-/off-target read-length boxes: the sample, and a box per sample type built from the
+    median Q1 / median / Q3 (and min / max) of its samples, filled in the types' colours."""
+    title = "Read length"
     if df is None:
         return _qc_unavailable(ax, title)
     df = df.copy()
     df["sample"] = df["sample"].astype(str)
     for c in ("min", "q1", "median", "q3", "max"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    n_box = 1 + len(tgroups)
     stats, pos, cols, ticks, groups = [], [], [], [], []
     for g, tt in enumerate(("on_target", "off_target")):
         sub = df[df["targetType"] == tt].set_index("sample")
-        rows = [(shown, sub.loc[[sample]] if sample in sub.index else sub.iloc[0:0], QC_SAMPLE_COLOR),
-                (stype, sub.reindex([s for s in type_samples if s in sub.index]), type_color),
-                ("cohort", sub.reindex([s for s in all_samples if s in sub.index]), QC_COHORT_COLOR)]
-        x0 = g * 4
+        rows = [(shown, sub.loc[[sample]] if sample in sub.index else sub.iloc[0:0], QC_SAMPLE_COLOR)]
+        rows += [(t, sub.reindex([s for s in members if s in sub.index]), col) for t, members, col in tgroups]
+        x0 = g * (n_box + 1)
         for k, (lab, part, col) in enumerate(rows):
             ticks.append((x0 + k, lab))
             if part.empty:
@@ -1217,17 +1620,18 @@ def qc_read_lengths(ax, df, sample, shown, stype, type_samples, all_samples, typ
                               whishi=min(q["max"], q["q3"] + 1.5 * iqr)))
             pos.append(x0 + k)
             cols.append(col)
-        groups.append((x0 + 1, tt.replace("_", "-")))
+        groups.append((x0 + (n_box - 1) / 2, tt.replace("_", "-")))
     if not stats:
         return _qc_unavailable(ax, title, f"{shown} not in the read-length table")
-    b = ax.bxp(stats, positions=pos, widths=0.6, patch_artist=True, showfliers=False)
+    # read-length boxes keep a colour fill (sample / sample types), black outline
+    b = ax.bxp(stats, positions=pos, widths=0.6, showfliers=False, patch_artist=True,
+               boxprops=dict(edgecolor="black", linewidth=0.8), whiskerprops=_BLACK_LINE, capprops=_BLACK_LINE,
+               medianprops=_BLACK_LINE)
     for patch, c in zip(b["boxes"], cols):
-        patch.set_facecolor(c); patch.set_alpha(0.75); patch.set_edgecolor("black"); patch.set_linewidth(0.6)
-    for m in b["medians"]:
-        m.set_color("black")
+        patch.set_facecolor(c); patch.set_alpha(0.75); patch.set_edgecolor("black")
     ax.set_xticks([t[0] for t in ticks])
-    ax.set_xticklabels([t[1] for t in ticks], fontsize=5 * FS, rotation=30, ha="right")
-    ax.set_xlim(-0.6, 6.6)
+    ax.set_xticklabels([t[1] for t in ticks], fontsize=(5 if n_box <= 3 else 4.2) * FS, rotation=35, ha="right")
+    ax.set_xlim(-0.6, 2 * n_box + 0.6)
     for xc, lab in groups:
         ax.text(xc, 1.0, lab, transform=ax.get_xaxis_transform(), ha="center", va="bottom",
                 fontsize=6 * FS, fontweight="bold")
@@ -1235,17 +1639,16 @@ def qc_read_lengths(ax, df, sample, shown, stype, type_samples, all_samples, typ
     ax.set_title(title, fontsize=7 * FS, fontweight="bold", pad=14 * FS)
     _qc_spines(ax)
 
-
 def qc_pca(ax, df, sample, shown):
     """Sample-type validation PCA (PC1 vs PC2) with this sample as a star."""
-    title = "Sample type (junction PSI PCA)"
+    title = "Sample type"
     if df is None or not {"PC1", "PC2"} <= set(df.columns):
         return _qc_unavailable(ax, title)
     df = df.copy()
     df["sample"] = df["sample"].astype(str)
     handles = []
     for kind, kw in (("reference", dict(s=6, alpha=0.25, linewidths=0, marker="o", zorder=2)),
-                     ("query", dict(s=22, alpha=0.9, marker="D", edgecolors="white", linewidths=0.3, zorder=3))):
+                     ("query", dict(s=34, alpha=0.9, marker="D", edgecolors="white", linewidths=0.3, zorder=3))):
         sub = df[df["kind"] == kind]
         for grp, gsub in sub.groupby("group", sort=False):
             col = gsub["color"].iloc[0]
@@ -1254,10 +1657,8 @@ def qc_pca(ax, df, sample, shown):
             handles.append(h)
     me = df[(df["kind"] == "query") & (df["sample"] == sample)]
     if not me.empty:
-        ax.scatter(me["PC1"], me["PC2"], s=140, marker="*", color=me["color"].iloc[0],
+        ax.scatter(me["PC1"], me["PC2"], s=140, marker="*", color=QC_SAMPLE_COLOR,
                    edgecolors="black", linewidths=0.8, zorder=5)
-        ax.annotate(shown, (me["PC1"].iloc[0], me["PC2"].iloc[0]), xytext=(6, 4), textcoords="offset points",
-                    fontsize=6 * FS, fontweight="bold", zorder=6)
     else:
         ax.text(0.02, 0.98, f"{shown} not in the PCA", transform=ax.transAxes, va="top", color="#b00",
                 fontsize=5.5 * FS)
@@ -1265,37 +1666,320 @@ def qc_pca(ax, df, sample, shown):
     v2 = df["PC2_var_pct"].iloc[0] if "PC2_var_pct" in df else np.nan
     ax.set_xlabel(f"PC1 ({v1:.1f}%)"); ax.set_ylabel(f"PC2 ({v2:.1f}%)")
     ax.set_title(title, fontsize=7 * FS, fontweight="bold")
-    leg = ax.legend(handles=handles, fontsize=4.5 * FS, frameon=False, loc="center left",
-                    bbox_to_anchor=(1.0, 0.5), markerscale=0.8)
-    for lh in leg.legend_handles if hasattr(leg, "legend_handles") else leg.legendHandles:
-        lh.set_alpha(0.9)
+    # shape key only (colours are in the page's colour key)
+    shape_handles = [
+        plt.Line2D([0], [0], marker="o", linestyle="", color="#888888", markersize=4, alpha=0.6, label="GTEx"),
+        plt.Line2D([0], [0], marker="D", linestyle="", color="#888888", markersize=5, label="TEQUILA-Dx"),
+    ]
+    ax.legend(handles=shape_handles, fontsize=4.5 * FS, frameon=False, loc="best", handletextpad=0.3,
+              borderaxespad=0.2, labelspacing=0.3)
+    _qc_spines(ax)
+    refs = df[df["kind"] == "reference"]
+    return [(str(g), gs["color"].iloc[0], len(gs)) for g, gs in refs.groupby("group", sort=False)]
+
+
+def _qc_box(ax, groups, title, ylabel=None, star=None, ylim=(0, 1), points=False):
+    """groups: list of (label, values, color). Tukey boxes (whiskers 1.5 IQR, fliers hidden);
+    star = (x index, value) marks this sample; points = also draw each value as a dot;
+    ylim = None scales the axis to the data."""
+    data = [(lab, np.asarray(v, dtype=float), c) for lab, v, c in groups]
+    data = [(lab, v[~np.isnan(v)], c) for lab, v, c in data]
+    pos = [i for i, (_, v, _) in enumerate(data) if len(v)]
+    if points:      # every value as a dot, under the (unfilled) box
+        rng = np.random.default_rng(0)
+        for i in pos:
+            v = data[i][1]
+            many = len(v) > 50
+            ax.scatter(i + rng.uniform(-0.22, 0.22, len(v)), v, s=3 if many else 6, color=data[i][2],
+                       alpha=0.35 if many else 0.8, linewidths=0, zorder=1)
+    if pos:
+        ax.boxplot([data[i][1] for i in pos], positions=pos, widths=0.6, showfliers=False, zorder=2,
+                   **BOX_STYLE)
+    if star is not None and not np.isnan(star[1]):
+        ax.scatter([star[0]], [star[1]], s=110, marker="*", color=QC_SAMPLE_COLOR, edgecolors="black",
+                   linewidths=0.5, zorder=5)
+    ax.set_xticks(range(len(data)))
+    ax.set_xticklabels([d[0] for d in data], fontsize=5 * FS, rotation=40, ha="right")
+    ax.set_xlim(-0.6, len(data) - 0.4)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    else:
+        vals = np.concatenate([d[1] for d in data] + ([np.array([star[1]])] if star is not None else []))
+        vals = vals[~np.isnan(vals)]
+        if len(vals):
+            lo, hi = vals.min(), vals.max()
+            padv = max((hi - lo) * 0.15, 0.02)
+            ax.set_ylim(max(0, lo - padv), min(1.0, hi + padv) if hi <= 1 else hi + padv)
+    ax.tick_params(axis="y", labelsize=5 * FS)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=5 * FS)
+    ax.set_title(title, fontsize=6 * FS, fontweight="bold")
     _qc_spines(ax)
 
 
-def qc_heatmap(fig, ax, cax, matrix, sample, shown, stype, type_samples, all_samples, title, cmap, cbar_label):
-    """Three-row gene heatmap: sample, sample-type median, cohort median; sorted by cohort median."""
+def draw_expression_box(ax, gene, sample, stype, tgroups, expr, zmat, threshold):
+    """This gene's by-assignment MOTR expression, log2(MOTR + 1): one box per sample type (dots
+    behind; the sample left out of its own type) with the sample as a star, and the sample's
+    z-score within its type."""
+    title = "Expression"
+    vals_by_type = {t: m.loc[gene] for t, m in expr.items() if m is not None and gene in m.index}
+    own_val = vals_by_type.get(stype, pd.Series(dtype=float)).get(sample, np.nan)
+    if not vals_by_type or np.isnan(own_val):
+        return _qc_unavailable(ax, title, "no expression data")
+    groups = []
+    for t, members, col in tgroups:
+        v = vals_by_type.get(t)
+        if v is not None:
+            groups.append((t, np.log2(v.reindex([m_ for m_ in members if m_ in v.index]).astype(float) + 1), col))
+    own = next((k for k, (t, *_r) in enumerate(groups) if t == stype), None)
+    if own is None:
+        groups.insert(0, (stype, pd.Series(dtype=float), QC_SAMPLE_COLOR))
+        own = 0
+    _qc_box(ax, groups, title, ylabel="log2(MOTR + 1)", star=(own, float(np.log2(own_val + 1))),
+            ylim=None, points=True)
+    z = zmat.loc[gene, sample] if zmat is not None and gene in zmat.index and sample in zmat.columns else np.nan
+    if not np.isnan(z):
+        flag = abs(z) >= abs(threshold)
+        ax.text(0.5, 1.0, f"z = {z:+.1f} vs {stype}", transform=ax.transAxes, ha="center", va="bottom",
+                fontsize=5 * FS, color=QC_SAMPLE_COLOR if flag else "#555",
+                fontweight="bold" if flag else "normal")
+        ax.set_title(title, fontsize=6 * FS, fontweight="bold", pad=10 * FS)
+
+
+def _ranked(values, grid):
+    """Gene values sorted high -> low, as a curve over % of genes (0-100), sampled on `grid`."""
+    v = np.sort(np.asarray(values, dtype=float)[~np.isnan(np.asarray(values, dtype=float))])[::-1]
+    if len(v) == 0:
+        return np.full(len(grid), np.nan)
+    if len(v) == 1:
+        return np.full(len(grid), v[0])
+    return np.interp(grid, np.linspace(0, 100, len(v)), v)
+
+
+def qc_curve(ax, matrix, sample, shown, tgroups, ylim=(-0.02, 1.02), ylabel=None):
+    """Ranked-gene curves: for each sample type (own type first) the 25th-75th percentile ribbon
+    and median line of its samples' curves (thin individual lines if it has < 3 samples); this
+    sample as a bold line. The sample is not part of its type's ribbon."""
+    grid = np.linspace(0, 100, 201)
+    handles = []
+    for t, members, col in tgroups:
+        members = [s for s in members if s in matrix.columns]
+        if not members:
+            continue
+        curves = np.vstack([_ranked(matrix[s].to_numpy(), grid) for s in members])
+        if len(members) >= 3:
+            lo, med, hi = np.nanpercentile(curves, [25, 50, 75], axis=0)
+            ax.fill_between(grid, lo, hi, color=col, alpha=0.25, linewidth=0, zorder=1)
+            ax.plot(grid, med, color=col, linewidth=0.8, zorder=2)
+        else:
+            for c in curves:
+                ax.plot(grid, c, color=col, linewidth=0.6, alpha=0.7, zorder=2)
+    ax.plot(grid, _ranked(matrix[sample].to_numpy(), grid), color=QC_SAMPLE_COLOR, linewidth=1.6, zorder=3)
+    ax.set_xlim(0, 100)
+    ax.set_ylim(*ylim)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=5 * FS)
+    ax.set_xlabel("% of genes (ranked)", fontsize=5 * FS)
+    ax.tick_params(labelsize=5 * FS)
+    ax.set_title("ranked genes", fontsize=6 * FS, fontweight="bold")
+    _qc_spines(ax)
+
+
+GRID_FONT_MAX, GRID_FONT_MIN = 6.5, 4.0     # gene-label font (pt): shrinks with gene count, then pages are added
+
+
+def _grid_layout(n_genes, n_cells, max_label, width, h_first, h_next):
+    """Font size and grid geometry for the labelled gene grid: the largest font (<= GRID_FONT_MAX)
+    at which every gene fits on the first page, else GRID_FONT_MIN with extra pages."""
+    def geom(f):
+        row_h = f * 1.25 / 72                            # inches
+        cell_w = f * 1.7 / 72
+        label_w = max_label * 0.62 * f / 72
+        col_w = label_w + 0.05 + n_cells * cell_w + 0.16
+        ncols = max(1, int(width // col_w))
+        return row_h, cell_w, label_w, col_w, ncols, max(1, int(h_first // row_h)), max(1, int(h_next // row_h))
+    f = GRID_FONT_MAX
+    while f > GRID_FONT_MIN:
+        g = geom(f)
+        if g[4] * g[5] >= n_genes:
+            return (f,) + g
+        f = round(f - 0.25, 2)
+    return (GRID_FONT_MIN,) + geom(GRID_FONT_MIN)
+
+
+def _metric_header(fig, shown, title, sub):
+    nav_links(fig)
+    fig.text(MARGIN_L / PAGE_W, 1 - 0.22 / PAGE_H, f"{shown}  |  {title}", fontsize=11 * FS, fontweight="bold", va="top")
+    fig.text(MARGIN_L / PAGE_W, 1 - 0.48 / PAGE_H, sub, fontsize=6.5 * FS, va="top", color="#333")
+
+
+def _grid_pages(pdf, names, values, cell_cols, cmap, norm, shown, title, sub, summary_fn, cbar_label,
+                outline=None, gap_after_first=False, cbar_ticks=None):
+    """Labelled gene grid over as many pages as needed: each gene is a row (its name, then one cell
+    per column of `values`), rows stacked into page columns. cell_cols: header tick colour per cell;
+    outline: genes x cells booleans for cells to outline; gap_after_first: a small gap after the
+    first cell. The first page also gets `summary_fn(fig)` above the grid."""
+    n_cells = values.shape[1]
+    gap = 0.45 if gap_after_first else 0.0          # in cell widths
+    cbar_space = 0.6                                 # room right of the grid for the colour bar
+    grid_left, grid_w = MARGIN_L, PAGE_W - MARGIN_L - MARGIN_R - cbar_space
+    first_top, next_top, bottom = 5.3, PAGE_H - MARGIN_T - 0.05, 0.3
+    f, row_h, cell_w, label_w, col_w, ncols, rows1, rows2 = _grid_layout(
+        len(names), n_cells + gap, max(len(n) for n in names), grid_w, first_top - bottom, next_top - bottom)
+
+    def cell_x(x0, j):
+        return x0 + label_w + 0.05 + (j + (gap if (gap_after_first and j > 0) else 0)) * cell_w
+
+    def grid(fig, start, top, nrows):
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.set_xlim(0, PAGE_W); ax.set_ylim(0, PAGE_H); ax.axis("off")
+        end = min(len(names), start + nrows * ncols)
+        rects, colors, nan_rects, out_rects = [], [], [], []
+        for k in range(start, end):
+            c, r = divmod(k - start, nrows)
+            x0 = grid_left + c * col_w
+            y = top - (r + 1) * row_h
+            ax.text(x0 + label_w, y + row_h / 2, names[k], ha="right", va="center", fontsize=f)
+            for j, v in enumerate(values[k]):
+                rx, ry, rw, rh = cell_x(x0, j), y + row_h * 0.06, cell_w * 0.92, row_h * 0.88
+                if np.isnan(v):
+                    nan_rects.append(Rectangle((rx, ry), rw, rh))
+                else:
+                    rects.append(Rectangle((rx, ry), rw, rh)); colors.append(cmap(norm(float(v))))
+                    if outline is not None and outline[k, j]:
+                        out_rects.append(Rectangle((rx, ry), rw, rh))
+        if rects:
+            ax.add_collection(PatchCollection(rects, facecolors=colors, edgecolors="none"))
+        if nan_rects:
+            ax.add_collection(PatchCollection(nan_rects, facecolors=QC_NAN_COLOR, edgecolors="white",
+                                              hatch="//////", linewidths=0))
+        if out_rects:
+            ax.add_collection(PatchCollection(out_rects, facecolors="none", edgecolors="black", linewidths=0.4))
+        # coloured ticks above each page column's cells: which cell is which
+        used_cols = (end - start + nrows - 1) // nrows
+        for c in range(used_cols):
+            x0 = grid_left + c * col_w
+            for j, col in enumerate(cell_cols):
+                ax.add_patch(Rectangle((cell_x(x0, j), top + 0.02), cell_w * 0.92, 0.035, facecolor=col,
+                                       edgecolor="none"))
+        cax = _ax(fig, PAGE_W - MARGIN_R - cbar_space + 0.2, top - 1.6, 0.09, 1.6)
+        cb = fig.colorbar(plt.cm.ScalarMappable(cmap=cmap, norm=norm), cax=cax)
+        cb.outline.set_visible(False)
+        if cbar_ticks is not None:
+            cb.set_ticks(cbar_ticks)
+        cb.ax.tick_params(labelsize=5 * FS)
+        cb.set_label(cbar_label, fontsize=5 * FS)
+        return end
+
+    fig = plt.figure(figsize=(PAGE_W, PAGE_H))
+    _metric_header(fig, shown, title, sub)
+    summary_fn(fig)
+    done = grid(fig, 0, first_top, rows1)
+    page = 1
+    while True:
+        pdf.savefig(fig, dpi=RASTER_DPI)
+        plt.close(fig)
+        if done >= len(names):
+            break
+        page += 1
+        fig = plt.figure(figsize=(PAGE_W, PAGE_H))
+        _metric_header(fig, shown, f"{title} (continued, page {page})", sub)
+        done = grid(fig, done, next_top, rows2)
+
+
+def qc_mean_panel(ax, matrix, sample, stype, tgroups, title):
+    """Box plot of every sample's mean over genes, one box per sample type (dots behind), with this
+    sample as a star among its own type's dots; 0-1 axis."""
     if matrix is None or matrix.empty or sample not in matrix.columns:
-        cax.set_visible(False)
-        return _qc_unavailable(ax, title, "not available" if matrix is None or matrix.empty
-                               else f"{shown} not in the table")
-    type_cols = [s for s in type_samples if s in matrix.columns]
-    all_cols = [s for s in all_samples if s in matrix.columns] or list(matrix.columns)
-    cohort_med = matrix[all_cols].median(axis=1, skipna=True)
-    rows = [matrix[sample], matrix[type_cols].median(axis=1, skipna=True), cohort_med]
-    order = cohort_med.sort_values(na_position="last", kind="mergesort").index
-    m = np.vstack([r.reindex(order).to_numpy(dtype=float) for r in rows])
-    cm = plt.get_cmap(cmap).copy()
-    cm.set_bad(QC_NAN_COLOR)
-    im = ax.imshow(np.ma.masked_invalid(m), aspect="auto", cmap=cm, vmin=0, vmax=1, interpolation="nearest")
-    ax.set_yticks([0, 1, 2])
-    ax.set_yticklabels([shown, f"{stype}\nmedian (n={len(type_cols)})", f"cohort\nmedian (n={len(all_cols)})"],
-                       fontsize=5.5 * FS, linespacing=0.9)
-    ax.set_xticks([])
-    ax.set_xlabel(f"{len(order)} panel genes, sorted by cohort median (grey = no value)", fontsize=5.5 * FS)
-    ax.set_title(title, fontsize=7 * FS, fontweight="bold", loc="left")
-    cb = fig.colorbar(im, cax=cax)
-    cb.ax.tick_params(labelsize=5 * FS)
-    cb.set_label(cbar_label, fontsize=5 * FS)
+        return _qc_unavailable(ax, title)
+    per_sample = matrix.mean(axis=0, skipna=True)
+    groups = [(t, per_sample.reindex([c for c in m_ if c in matrix.columns]), col) for t, m_, col in tgroups]
+    groups = [g for g in groups if len(g[1])]
+    own = next((k for k, (t, *_r) in enumerate(groups) if t == stype), None)
+    if own is None:
+        groups.insert(0, (stype, pd.Series(dtype=float), QC_SAMPLE_COLOR))
+        own = 0
+    _qc_box(ax, groups, title, star=(own, float(per_sample.get(sample, np.nan))), points=True)
+
+
+def draw_metric_pages(pdf, matrix, sample, shown, stype, tgroups, title, desc, value_label):
+    """One QC metric (gene x sample matrix of 0-1 values): a summary strip (ranked-gene curves,
+    per-gene box plot, per-sample-mean box plot) and a grid of every gene -- its name, then a cell
+    for the sample and one per sample type's median -- continued on further pages if needed.
+    Genes are sorted high to low by the sample's value, then the median of every other sample, then name."""
+    if matrix is None or matrix.empty or sample not in matrix.columns:
+        print(f"  {title}: no data for {shown}; page skipped.")
+        return
+    others = [s_ for s_ in matrix.columns if s_ != sample]
+    rest_med = matrix[others].median(axis=1, skipna=True) if others else pd.Series(np.nan, index=matrix.index)
+    # high to low: the sample's value, then the median of every other sample (NaN last), then name
+    order = (pd.DataFrame({"s": matrix[sample], "c": rest_med, "g": matrix.index.astype(str)}, index=matrix.index)
+             .sort_values(["s", "c", "g"], ascending=[False, False, True], na_position="last",
+                          kind="mergesort").index)
+    meds = []
+    for t, members, col in tgroups:
+        cols_ = [s_ for s_ in members if s_ in matrix.columns]
+        if cols_:
+            meds.append((t, cols_, col, matrix[cols_].median(axis=1, skipna=True)))
+    cells = [(shown, QC_SAMPLE_COLOR, matrix[sample])] + [(f"{t} median", col, m_) for t, _, col, m_ in meds]
+    values = np.vstack([v.reindex(order).to_numpy(dtype=float) for _, _, v in cells]).T   # genes x cells
+
+    def summary(fig):
+        kax = _ax(fig, 0.95, 6.15, 2.4, 1.05)
+        qc_curve(kax, matrix, sample, shown, tgroups)
+        bax1 = _ax(fig, 3.85, 6.15, 1.45, 1.05)
+        _qc_box(bax1, [(shown, matrix[sample], QC_SAMPLE_COLOR)] + [(t, m_, col) for t, _, col, m_ in meds],
+                "per gene (type = median)", points=True)
+        qc_mean_panel(_ax(fig, 5.95, 6.15, 1.45, 1.05), matrix, sample, stype, tgroups, "per-sample mean")
+        draw_page_legend(fig, 8.2, 7.45, shown, tgroups)
+
+    _grid_pages(pdf, [str(g) for g in order], values, [c for _, c, _ in cells], QC_HEAT_CMAP,
+                plt.Normalize(0, 1), shown, title, desc, summary, value_label)
+
+
+Z_CAP = 5.0          # z-score colour scale runs -Z_CAP .. +Z_CAP
+
+
+def _cluster_order(df):
+    """Column order from average-linkage clustering on the columns' values (NaN -> 0)."""
+    if df.shape[1] < 3:
+        return list(df.columns)
+    from scipy.cluster.hierarchy import linkage, leaves_list
+    X = df.fillna(0).to_numpy(dtype=float).T
+    return [df.columns[i] for i in leaves_list(linkage(X, method="average", metric="euclidean"))]
+
+
+def draw_zscore_pages(pdf, zmat, sample, shown, stype, tgroups, norm_name, threshold):
+    """Gene-expression z-scores (by splice-site assignment, one normalisation) for this sample and
+    every other sample of its type: a summary strip and a grid of every gene -- its name, this
+    sample's cell, then the other samples clustered by similarity. Genes sorted by this sample's
+    z-score, lowest first. Cells at or beyond +/- |threshold| are outlined."""
+    title = f"Gene expression ({norm_name} z-score)"
+    if zmat is None or zmat.empty or sample not in zmat.columns:
+        print(f"  {title}: no data for {shown}; page skipped.")
+        return
+    others = _cluster_order(zmat[[c for c in zmat.columns if c != sample]])
+    cols = [sample] + others
+    order = (pd.DataFrame({"s": zmat[sample], "g": zmat.index.astype(str)}, index=zmat.index)
+             .sort_values(["s", "g"], na_position="last", kind="mergesort").index)
+    values = zmat.loc[order, cols].to_numpy(dtype=float)
+    thr = abs(float(threshold))
+    outline = np.abs(np.nan_to_num(values, nan=0.0)) >= thr
+    tcol = next((c for t, _, c in tgroups if t == stype), "#999999")
+
+    def summary(fig):
+        kax = _ax(fig, 0.95, 6.15, 3.0, 1.05)
+        own = [(t, [c for c in m_ if c in zmat.columns], col) for t, m_, col in tgroups if t == stype]
+        qc_curve(kax, zmat.clip(-Z_CAP, Z_CAP), sample, shown, own, ylim=(-Z_CAP - 0.3, Z_CAP + 0.3),
+                 ylabel="z-score")
+        kax.axhline(-thr, color="#777", linewidth=0.6, linestyle=":")
+        kax.axhline(thr, color="#777", linewidth=0.6, linestyle=":")
+        draw_page_legend(fig, 8.2, 7.45, shown, [g for g in tgroups if g[0] == stype])
+
+    _grid_pages(pdf, [str(g) for g in order], values, [QC_SAMPLE_COLOR] + [tcol] * len(others),
+                QC_HEAT_CMAP, plt.Normalize(-Z_CAP, Z_CAP), shown, title, "", summary,
+                f"z-score (capped at +/-{Z_CAP:g})", outline=outline, gap_after_first=True,
+                cbar_ticks=[-Z_CAP, -thr, 0, thr, Z_CAP])
 
 
 def load_flr_matrix(path):
@@ -1323,42 +2007,218 @@ def load_testability_matrix(hits_tsv):
     return df.pivot_table(index="gene", columns="sample", values="frac", aggfunc="first", dropna=False)
 
 
-def draw_qc_page(pdf, args, sample, shown, sample_to_type, type_colors):
+def _hit_flag(v):
+    return _nonempty(v) and str(v).strip().lower() not in ("false", "0")
+
+
+# Combination x tier cells the tier rules can produce (tier_rules.py, shared with merge_hits.py);
+# every other cell of the overview grid is drawn grey with a dash
+_POSSIBLE_CELLS = tier_rules.possible_cells()
+
+
+def draw_hit_tier_grid(fig, rows, left=1.3, bottom=0.35):
+    """Tier x hit-category grid: columns are the combinations of hit categories (variant, ASE,
+    GTEx or cohort outlier junction; upset-style dots underneath), rows are tiers 1-6, each cell
+    the number of this sample's candidate genes (printed; zero left blank), shaded white -> the
+    sample colour (square-root scale). Bars above / to the right give the column / row totals."""
+    cats = ["variant", "ASE", "junction"]          # dot-matrix rows, top to bottom
+    order = ["variant", "junction", "ASE"]         # combination order, as in the cohort upset plot
+    combos = [frozenset(c) for k in range(1, 4) for c in itertools.combinations(order, k)]
+    tiers = [1, 2, 3, 4, 5, 6]
+    grid = np.zeros((len(tiers), len(combos)), dtype=int)
+    no_cat = 0
+    for _, r in rows.iterrows():
+        have = frozenset(c for c, ok in (
+            ("variant", _hit_flag(r.get("variant"))),
+            ("ASE", _hit_flag(r.get("ASE"))),
+            ("junction", _hit_flag(r.get("outlier_junction")) or _hit_flag(r.get("cohort_outlier_junction"))),
+        ) if ok)
+        tier = pd.to_numeric(pd.Series([r.get("tier")]), errors="coerce").iloc[0]
+        if pd.isna(tier) or int(tier) not in tiers:
+            continue
+        if not have:
+            no_cat += 1
+            continue
+        grid[tiers.index(int(tier)), combos.index(have)] += 1
+    if no_cat:
+        print(f"  [WARNING] {no_cat} candidate gene(s) have a tier but no variant / ASE / junction hit; "
+              "left out of the hit-category grid.")
+    n_genes = int(grid.sum())
+
+    cw, rh = 0.62, 0.32                             # cell width / height (inches)
+    gw, gh = cw * len(combos), rh * len(tiers)
+    grid_bottom = bottom + 1.0
+    # main grid
+    ax = _ax(fig, left, grid_bottom, gw, gh)
+    vmax = max(int(grid.max()), 1)
+    cmap = LinearSegmentedColormap.from_list("hits", ["#ffffff", QC_SAMPLE_COLOR])
+    for i in range(len(tiers)):
+        for j in range(len(combos)):
+            v = grid[i, j]
+            impossible = (combos[j], tiers[i]) not in _POSSIBLE_CELLS
+            frac = np.sqrt(v / vmax)
+            if impossible and not v:     # cannot happen under the tier rules: light grey with a dash
+                ax.add_patch(Rectangle((j, i), 1, 1, facecolor="#eeeeee", edgecolor="#dddddd", linewidth=0.5))
+                ax.text(j + 0.5, i + 0.5, "\u2013", ha="center", va="center", fontsize=6.5 * FS, color="#aaaaaa")
+                continue
+            ax.add_patch(Rectangle((j, i), 1, 1, facecolor=cmap(frac), edgecolor="#dddddd", linewidth=0.5))
+            if v:
+                ax.text(j + 0.5, i + 0.5, str(v), ha="center", va="center", fontsize=6.5 * FS,
+                        color="white" if frac > 0.6 else "black")
+            if impossible and v:         # should never happen: the tier rules and the hit flags disagree
+                ax.add_patch(Rectangle((j, i), 1, 1, facecolor="none", edgecolor="#c23637", linewidth=1.2))
+                print(f"  [WARNING] {v} gene(s) in tier {tiers[i]} with hit categories "
+                      f"{'+'.join(sorted(combos[j]))}, which the tier rules should not produce.")
+    ax.set_xlim(0, len(combos)); ax.set_ylim(len(tiers), 0)
+    ax.set_xticks([]); ax.set_yticks(np.arange(len(tiers)) + 0.5)
+    ax.set_yticklabels([f"Tier {t}" for t in tiers], fontsize=6 * FS)
+    ax.tick_params(axis="y", length=0)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    # column totals above, row totals to the right
+    col_tot, row_tot = grid.sum(axis=0), grid.sum(axis=1)
+    axt = _ax(fig, left, grid_bottom + gh + 0.08, gw, 0.7)
+    axt.bar(np.arange(len(combos)) + 0.5, col_tot, width=0.6, color=QC_SAMPLE_COLOR)
+    for j, v in enumerate(col_tot):
+        axt.text(j + 0.5, v, str(v), ha="center", va="bottom", fontsize=5.5 * FS)
+    axt.set_xlim(0, len(combos)); axt.set_ylim(0, max(col_tot.max(), 1) * 1.3)
+    axt.axis("off")
+    axt.set_title(f"Candidate genes by hit category and tier ({n_genes} genes)", fontsize=7 * FS,
+                  fontweight="bold", pad=4)
+    axr = _ax(fig, left + gw + 0.08, grid_bottom, 0.9, gh)
+    axr.barh(np.arange(len(tiers)) + 0.5, row_tot, height=0.6, color=QC_SAMPLE_COLOR)
+    for i, v in enumerate(row_tot):
+        axr.text(v, i + 0.5, f" {v}", ha="left", va="center", fontsize=5.5 * FS)
+    axr.set_ylim(len(tiers), 0); axr.set_xlim(0, max(row_tot.max(), 1) * 1.35)
+    axr.axis("off")
+    # upset dots under the columns
+    axm = _ax(fig, left, bottom, gw, 0.85)
+    cat_y = {c: len(cats) - k for k, c in enumerate(cats)}
+    for j, c in enumerate(combos):
+        ys = [cat_y[k] for k in c]
+        if len(ys) > 1:
+            axm.plot([j + 0.5, j + 0.5], [min(ys), max(ys)], color="black", linewidth=1.5, zorder=2)
+        for k in cats:
+            axm.scatter([j + 0.5], [cat_y[k]], s=40, zorder=3, color="black" if k in c else "#dddddd")
+    axm.set_xlim(0, len(combos)); axm.set_ylim(0.5, len(cats) + 0.5)
+    axm.set_yticks(list(cat_y.values())); axm.set_yticklabels(list(cat_y.keys()), fontsize=6 * FS)
+    axm.tick_params(axis="y", length=0)
+    axm.set_xticks([])
+    for sp in axm.spines.values():
+        sp.set_visible(False)
+
+
+def draw_page_legend(fig, left, top, shown, tgroups, refs=None):
+    """Page-wide colour key: the sample (star), each sample type (square) and, if given, the GTEx
+    reference tissues of the sample-type PCA (faint dots)."""
+    width, height = PAGE_W - MARGIN_R - left, 3.0
+    ax = _ax(fig, left, top - height, width, height)
+    ax.set_xlim(0, width); ax.set_ylim(top - height, top); ax.axis("off")   # data units = inches
+    mx, tx, step = 0.15, 0.28, 0.13
+    y = top
+    x0 = 0.08                             # inset from the box edge
+    ax.text(x0, y - 0.06, "TEQUILA-Dx", fontsize=6 * FS, fontweight="bold", va="top")
+    y -= 0.06
+    y -= step * 1.5
+    entries = [("star", QC_SAMPLE_COLOR, shown)] + [("square", col, f"{t} (n={len(m_)})") for t, m_, col in tgroups]
+    if refs:
+        entries.append(("head", None, "GTEx"))
+        entries += [("dot", col, textwrap.shorten(str(g), 24, placeholder="...")) for g, col, _ in refs]
+    for kind, col, lab in entries:
+        if kind == "head":
+            y -= step * 0.3
+            ax.text(0.08, y, lab, fontsize=5 * FS, va="center", color="#555")
+        else:
+            if kind == "star":
+                ax.scatter([mx], [y], marker="*", s=80, color=col, edgecolors="black", linewidths=0.5, clip_on=False)
+            elif kind == "square":
+                ax.scatter([mx], [y], marker="s", s=35, color=col, clip_on=False)
+            else:
+                ax.scatter([mx], [y], marker="o", s=14, color=col, alpha=0.5, linewidths=0, clip_on=False)
+            ax.text(tx, y, lab, fontsize=5 * FS, va="center")
+        y -= step
+    # little box around the key, sized to the entries and the longest label
+    longest = max(len(e[2]) for e in entries + [("", None, "TEQUILA-Dx")])
+    box_w = min(width, tx + longest * 0.62 * 5 * FS / 72 + 0.1)
+    ax.add_patch(FancyBboxPatch((0, y + step * 0.4), box_w, top - (y + step * 0.4),
+                                boxstyle="round,pad=0,rounding_size=0.05", facecolor="none",
+                                edgecolor="#999999", linewidth=0.6, clip_on=False))
+
+
+def draw_qc_page(pdf, args, sample, shown, sample_to_type, type_colors, hit_rows):
+    """Overview page (read counts, read length, sample-type PCA, hit categories, per-sample QC means).
+    Returns what draw_qc_sections needs to draw the QC sections after the gene pages."""
     stype = sample_to_type.get(sample, "unknown")
-    all_samples = [str(s) for s in args.samples] or [sample]
-    type_samples = [s for s in all_samples if sample_to_type.get(s) == stype] or [sample]
-    testability = load_testability_matrix(args.hits_tsv)
-    if testability is None and not any((args.on_target_tsv, args.read_attributes_tsv,
-                                        args.flr_matrix, args.pca_coords)):
-        print("  No QC inputs; QC page skipped.")
-        return
+    global QC_SAMPLE_COLOR
+    QC_SAMPLE_COLOR = darker(type_colors.get(stype, "#4c72b0"))
+    global ARC_COLOR
+    ARC_COLOR = QC_SAMPLE_COLOR       # IGV sashimi arcs in the sample's colour
+    # comparison groups (one per sample type, own type first, then by size) exclude the sample itself
+    all_samples = [str(s) for s in args.samples if str(s) != sample]
+    counts = {}
+    for s_ in all_samples:
+        t = sample_to_type.get(s_)
+        if t:
+            counts[t] = counts.get(t, 0) + 1
+    type_order = [stype] + sorted((t for t in counts if t != stype), key=lambda t: -counts[t])
+    tgroups = [(t, [s for s in all_samples if sample_to_type.get(s) == t], type_colors.get(t, "#7f7f7f"))
+               for t in type_order]
+    tgroups = [g for g in tgroups if g[1]]
+
     fig = plt.figure(figsize=(PAGE_W, PAGE_H))
-    fig.text(MARGIN_L / PAGE_W, 1 - 0.22 / PAGE_H, f"{shown}  |  QC  (sample type: {stype})",
+    nav_links(fig)
+    fig.text(MARGIN_L / PAGE_W, 1 - 0.22 / PAGE_H, f"{shown}  |  Overview  (sample type: {stype})",
              fontsize=11 * FS, fontweight="bold", va="top")
     fig.text(MARGIN_L / PAGE_W, 1 - 0.48 / PAGE_H,
-             f"compared with {stype} (n = {len(type_samples)}) and the whole cohort (n = {len(all_samples)}); "
-             "medians include this sample",
+             ", ".join(f"{t} (n = {len(m_)}{' others' if t == stype else ''})" for t, m_, _ in tgroups),
              fontsize=6.5 * FS, va="top", color="#333")
-    qc_read_counts(_ax(fig, 0.95, 5.1, 2.3, 2.4), _read_tsv(args.on_target_tsv),
-                   sample, shown, stype, type_samples, all_samples)
-    qc_read_lengths(_ax(fig, 3.95, 5.1, 2.6, 2.2), _read_tsv(args.read_attributes_tsv),
-                    sample, shown, stype, type_samples, all_samples, type_colors.get(stype, "#4c72b0"))
-    qc_pca(_ax(fig, 7.15, 5.1, 2.2, 2.4), _read_tsv(args.pca_coords), sample, shown)
-    qc_heatmap(fig, _ax(fig, 1.75, 2.85, 8.2, 1.05), _ax(fig, 10.05, 2.85, 0.12, 1.05),
-               load_flr_matrix(args.flr_matrix), sample, shown, stype, type_samples, all_samples,
-               "Full-length ratio per gene", "viridis", "full-length ratio")
-    qc_heatmap(fig, _ax(fig, 1.75, 0.85, 8.2, 1.05), _ax(fig, 10.05, 0.85, 0.12, 1.05),
-               testability, sample, shown, stype, type_samples, all_samples,
-               "Junction testability per gene (fraction of canonical junctions tested)", "magma",
-               "fraction tested")
+    qc_read_counts(_ax(fig, 0.95, 5.0, 2.3, 2.6), _read_tsv(args.on_target_tsv), sample, shown, tgroups)
+    qc_read_lengths(_ax(fig, 3.95, 5.0, 2.6, 2.4), _read_tsv(args.read_attributes_tsv), sample, shown, tgroups)
+    refs = qc_pca(_ax(fig, 7.0, 5.0, 2.3, 2.6), _read_tsv(args.pca_coords), sample, shown)
+    draw_page_legend(fig, 9.55, 7.6, shown, tgroups, refs)
+    flr = load_flr_matrix(args.flr_matrix)
+    testability = load_testability_matrix(args.hits_tsv)
+    coverage = load_flr_matrix(args.coverage_matrix)
+    draw_hit_tier_grid(fig, hit_rows, left=1.1, bottom=0.35)
+    # sample quality: per-sample means of the three gene-level QC metrics, each on its own 0-1 axis
+    # with a y label saying what the metric measures (spaced so each label clears the panel before)
+    for k, (mat, name, ylab) in enumerate((
+            (coverage, "Coverage",
+             f"Fraction of canonical transcript at >= {args.coverage_depth}x\n(average across panel)"),
+            (testability, "Junction testability", "Fraction of canonical junctions tested\n(average across panel)"),
+            (flr, "Full-length ratio", "Fraction of canonical transcript covered by a single read\n(average across panel)"))):
+        ax = _ax(fig, 7.2 + k * 1.4, 1.2, 0.75, 2.9)
+        qc_mean_panel(ax, mat, sample, stype, tgroups, name)
+        ax.set_title(name, fontsize=5.5 * FS, fontweight="bold")
+        ax.set_ylabel(ylab, fontsize=4.8 * FS, labelpad=2, linespacing=1.1)
     pdf.savefig(fig, dpi=RASTER_DPI)
-    _flush_pdf_images(pdf)
     plt.close(fig)
 
+    return dict(stype=stype, tgroups=tgroups, flr=flr, testability=testability, coverage=coverage)
 
-# ----------------------------------------------------------------------------------------------
-# Main
-# ----------------------------------------------------------------------------------------------
+
+def draw_qc_sections(pdf, args, sample, shown, ctx):
+    """After the gene pages: gene expression (MOTR z-score), canonical-transcript coverage,
+    junction testability, full-length ratio."""
+    global REVIEW_CTX
+    stype, tgroups = ctx["stype"], ctx["tgroups"]
+    REVIEW_CTX = ("qc", "Gene expression (MOTR z-score)")
+    draw_zscore_pages(pdf, load_flr_matrix(args.zscore_motr), sample, shown, stype, tgroups, "MOTR",
+                      args.zscore_threshold)
+    for mat, title, desc, label in (
+            (ctx["coverage"], "Canonical-transcript coverage",
+             f"fraction of each gene's canonical-transcript bases at depth >= {args.coverage_depth}",
+             f"fraction >= {args.coverage_depth}x"),
+            (ctx["testability"], "Junction testability",
+             "fraction of each gene's canonical junctions tested", "fraction tested"),
+            (ctx["flr"], "Full-length ratio",
+             "fraction of each gene's canonical-transcript bases covered by a single read, on average",
+             "full-length ratio")):
+        REVIEW_CTX = ("qc", title)
+        draw_metric_pages(pdf, mat, sample, shown, stype, tgroups, title, desc, label)
+    _flush_pdf_images(pdf)
+
+
 def main():
     args = parse_args()
     sample = args.sample
@@ -1396,24 +2256,61 @@ def main():
     tx_by_gene = load_canonical_transcripts(args.gtf, genes) if genes else {}
     hap_bams = load_gene_bams(args.gene_bam_mapping)
     sample_bams = dict(zip(map(str, args.samples), args.sample_bams)) if args.sample_bams else {}
-    amalgam_paths = {}
-    for item in args.amalgam_matrices:
+    expr = {}
+    for item in args.expression_matrices:
         st, _, path = item.partition(":")
-        if path:
-            amalgam_paths[st] = path
-    amalgam_cache = {}
+        if path and os.path.isfile(path):
+            expr[st] = load_flr_matrix(path)
+    zmat_motr = load_flr_matrix(args.zscore_motr) if args.zscore_motr else None
+    # gene -> samples with their own outlier junction call there (never used as the representative)
+    jxn_outlier_samples = defaultdict(set)
+    for _, hrow in hits.iterrows():
+        if junction_calls(hrow):
+            jxn_outlier_samples[str(hrow["gene"])].add(str(hrow["sample"]))
     type_color = lambda st: type_colors.get(st, "#7f7f7f")
     fasta = pysam.FastaFile(args.genome)
     bulk = pysam.AlignmentFile(args.bam, "rb")
 
-    with PdfPages(args.outfile) as pdf:
-        draw_qc_page(pdf, args, str(sample), shown_name, sample_to_type, type_colors)
+    global REVIEW_CTX
+    review_genes = []
+    with PdfPages(args.outfile) as real_pdf:
+        pdf = CapturePdf(real_pdf, args.html_dpi if args.html_out else 0)
+        REVIEW_CTX = ("overview", None)
+        qc_ctx = draw_qc_page(pdf, args, str(sample), shown_name, sample_to_type, type_colors,
+                              hits[hits["sample"].astype(str) == str(sample)] if not hits.empty else hits)
         if not genes:
             fig = plt.figure(figsize=(PAGE_W, PAGE_H))
             fig.text(0.5, 0.5, f"{shown_name}: no candidate gene hits.", ha="center", va="center", fontsize=14 * FS)
             pdf.savefig(fig)
             plt.close(fig)
-            return
+            draw_qc_sections(pdf, args, str(sample), shown_name, qc_ctx)
+            pages = pdf.pages
+            genes_done = True
+        else:
+            genes_done = False
+        if not genes_done:
+            pages = _draw_gene_pages(pdf, args, sample, shown_name, mine, regions, tx_by_gene, hap_bams,
+                                     sample_bams, expr, zmat_motr, jxn_outlier_samples, type_color, fasta,
+                                     bulk, sample_to_type, type_colors, manifests, outliers_by_pair, qc_ctx,
+                                     review_genes)
+        contents_rows = draw_contents(pdf, shown_name, review_genes)
+    bulk.close()
+    fasta.close()
+    add_pdf_navigation(args.outfile, pdf, contents_rows)
+    print(f"Saved: {args.outfile}")
+    if args.html_out:
+        import review_html
+        review_html.write_review_page(args.html_out, shown_name, qc_ctx["stype"], review_genes, pages)
+        print(f"Saved: {args.html_out}")
+
+
+def _draw_gene_pages(pdf, args, sample, shown_name, mine, regions, tx_by_gene, hap_bams, sample_bams, expr,
+                     zmat_motr, jxn_outlier_samples, type_color, fasta, bulk, sample_to_type, type_colors,
+                     manifests, outliers_by_pair, qc_ctx, review_genes):
+    """Every candidate gene's pages, then the QC sections. Returns the captured pages."""
+    global REVIEW_CTX
+    gene_order = [g for g in mine["gene"] if g in regions]
+    if True:
 
         pager = Pager(pdf, None)
         for _, row in mine.iterrows():
@@ -1430,16 +2327,30 @@ def main():
             cats = [c for c in ("pathogenic_variant", "variant", "ASE", "outlier_junction",
                                 "cohort_outlier_junction")
                     if _nonempty(row.get(c)) and str(row.get(c)) not in ("False", "FALSE")]
-            def header(fig, part, gene=gene, row=row, cats=cats):
+            gi = gene_order.index(gene)
+            prev_g = gene_order[gi - 1] if gi > 0 else None
+            next_g = gene_order[gi + 1] if gi + 1 < len(gene_order) else None
+
+            def header(fig, part, gene=gene, row=row, cats=cats, prev_g=prev_g, next_g=next_g):
+                nav_links(fig, prev_g, next_g)
                 fig.text(MARGIN_L / PAGE_W, 1 - 0.22 / PAGE_H,
                          f"{shown_name}  |  {gene}  |  rank {row.get('ranking', '.')}, tier {row.get('tier', '.')}"
                          + (f"  (page {part})" if part > 1 else ""),
                          fontsize=11 * FS, fontweight="bold", va="top")
                 sub = "hits: " + (", ".join(f"{c}={row.get(c)}" for c in cats) or ".")
                 if _nonempty(row.get("inheritance_patterns")):
-                    sub += f"   |   inheritance: {row.get('inheritance_patterns')}"
+                    inh = str(row.get("inheritance_patterns"))
+                    if tier_rules.is_dominant(inh) and str(row.get("haploinsufficient", "")).strip().upper() == "TRUE":
+                        inh += " (haploinsufficient)"
+                    sub += f"   |   inheritance: {inh}"
                 fig.text(MARGIN_L / PAGE_W, 1 - 0.48 / PAGE_H, sub, fontsize=6.5 * FS, va="top", color="#333")
 
+            REVIEW_CTX = ("gene", gene)
+            review_genes.append(dict(
+                gene=gene, rank=str(row.get("ranking", ".")), tier=str(row.get("tier", ".")),
+                hits=", ".join(f"{c}={row.get(c)}" for c in cats), cats=cats,
+                inheritance=str(row.get("inheritance_patterns", "")) if _nonempty(row.get("inheritance_patterns")) else "",
+                haploinsufficient=str(row.get("haploinsufficient", "")).strip().upper() == "TRUE"))
             pager.new_gene(header)
             print(f"  {gene}: {len(variants)} variant(s), {len(events)} event(s), {len(pairs)} distribution(s)")
             full_left, full_w = MARGIN_L, PAGE_W - MARGIN_L - MARGIN_R
@@ -1458,14 +2369,21 @@ def main():
                     hh = pysam.AlignmentFile(path, "rb")
                     hap_handles.append(hh)
                     tracks.append((name, hh))
-            # the canonical transcript is drawn once, under the last (bottom) track
+            # the canonical transcript is drawn once, under the last (bottom) track. The IGV views
+            # take GENE_IGV_FRAC of the width; beside the bulk view, the gene's expression box plot
+            igv_gene_w = full_w * GENE_IGV_FRAC
             for k, (name, handle) in enumerate(tracks):
                 fig, top, h = pager.next_row()
-                alignment_panel(fig, full_left, full_w, top, h,
+                if k == 0:
+                    bx_left = full_left + igv_gene_w + 0.75
+                    bx = _ax(fig, bx_left, top - h + 0.75, full_left + full_w - bx_left - 0.05, h - 1.15)
+                    draw_expression_box(bx, gene, str(sample), qc_ctx["stype"], qc_ctx["tgroups"], expr,
+                                        zmat_motr, args.zscore_threshold)
+                alignment_panel(fig, full_left, igv_gene_w, top, h,
                                 "",
                                 handle, chrom, gstart, gend, fasta, tx, args, args.seed,
                                 marks=var_marks, spans=ev_spans, track_label=name,
-                                show_tx=(k == len(tracks) - 1))
+                                show_tx=(k == len(tracks) - 1), keep_indels=indel_specs(variants))
             for hh in hap_handles:
                 hh.close()
 
@@ -1480,23 +2398,50 @@ def main():
                     alignment_panel(fig, left, w, top, h, title, bulk, v["chrom"],
                                     vs - args.variant_flank, ve + args.variant_flank, fasta, tx, args,
                                     args.seed, label_tracks=(k == 0), ref_track=True, highlight=(vs, ve),
-                                    track_label="bulk")
+                                    track_label="bulk", keep_indels=indel_specs([v]))
 
-            # 5. splicing events: one row (bulk); a haplotype event gets its own page with bulk,
+            # 5. distributions of junctions outside every event (rare), up to 4 per row; each event's
+            # own distributions are drawn under its title, just before its zoom (6)
+            values = load_metric_values(manifests, gene, pairs, args.coverage_threshold) if (pairs and manifests) else {}
+            if pairs and not manifests:
+                print(f"  {gene}: no cohort manifests given; distribution panels skipped.")
+            ev_jxns = {j for e in events for j in e["junctions"]}
+
+            def dist_rows(chunk_pairs, title=None):
+                """Distribution panels, 4 per row; `title` above the first row. Returns the last figure."""
+                fig = None
+                for i in range(0, len(chunk_pairs), DIST_PANELS_PER_ROW):
+                    chunk = chunk_pairs[i:i + DIST_PANELS_PER_ROW]
+                    fig, top, h = pager.next_row()
+                    t_off = 0.0
+                    if title and i == 0:
+                        fig.text(full_left / PAGE_W, (top - 0.17) / PAGE_H, title, fontsize=6.5 * FS,
+                                 fontweight="bold", va="bottom", ha="left")
+                        t_off = 0.2
+                    for (left, w), (metric, jxn) in zip(panel_columns(len(chunk), DIST_PANELS_PER_ROW), chunk):
+                        ax = _ax(fig, left + 0.25, top - h + 0.3, w - 0.3, h - 0.55 - t_off)
+                        draw_distribution(ax, metric, jxn, values.get((metric, jxn), {}), sample_to_type, type_colors,
+                                          outliers_by_pair.get((metric, jxn), set()), sample)
+                return fig
+
+            if manifests:
+                dist_rows([p_ for p_ in pairs if p_[1] not in ev_jxns])
+
+            # 6. splicing events: one row (bulk); a haplotype event gets its own page with bulk,
             # hap1 and hap2 rows. One title, on the bulk row. The IGV view takes the first two
             # columns; the third holds a sashimi plot of this sample (bulk, and hap1 / hap2 for a
             # haplotype event) and a representative cohort sample (chosen once per gene).
             rep, rep_bam = None, None
             if events:
+                psi, depth = load_gene_psi(manifests, gene, args.coverage_threshold)
                 rep = choose_representative(gene, str(sample), [str(x) for x in args.samples], sample_to_type,
-                                            sample_bams, amalgam_paths, amalgam_cache)
+                                            sample_bams, psi, depth, jxn_outlier_samples.get(gene, set()))
                 if rep:
                     rep_bam = pysam.AlignmentFile(sample_bams[rep["sample"]], "rb")
-                    r_txt = "n/a" if np.isnan(rep["r"]) else f"{rep['r']:.3f}"
-                    print(f"  {gene}: representative {rep['sample']} ({rep['sample_type']}, r = {r_txt}, "
-                          f"{rep['n']} candidate(s))")
+                    print(f"  {gene}: representative {rep['sample']} ({rep['sample_type']}, mean |dPSI| from "
+                          f"median = {rep['dist']:.3f}, {rep['n']} candidate(s))")
                 else:
-                    print(f"  {gene}: no representative sample (no AMALGAM data or no other samples)")
+                    print(f"  {gene}: no representative sample (no covered junction PSI in other samples)")
             cols3 = panel_columns(3, 3)
             igv_w = cols3[1][0] + cols3[1][1] - full_left
             sash_left, sash_w = cols3[2]
@@ -1506,6 +2451,12 @@ def main():
                 flank = max(int(round((t - s) * args.junction_flank)), 5)
                 title = (f"{' / '.join(e['labels'])}  —  "
                          + "; ".join(f"{j} ({junction_annotation(tx, j)})" for j in e["junctions"]))
+                max_chars = int(full_w * 19 / FS)
+                if len(title) > max_chars:
+                    title = title[:max_chars - 3] + "..."
+                # the event's distributions first, under its title
+                ev_pairs = [p_ for p_ in pairs if p_[1] in e["junctions"]] if manifests else []
+                dist_fig = dist_rows(ev_pairs, title) if ev_pairs else None
                 is_hap_event = any(f", hap1]" in c or f", hap2]" in c for c in e["calls"])
                 ev_tracks = [("bulk", None)]
                 if is_hap_event and gene in hap_bams:
@@ -1517,7 +2468,9 @@ def main():
                     handles.append((name, handle))
                     fig, top, h = pager.next_row()
                     slots.append((fig, top, h))
-                    alignment_panel(fig, full_left, igv_w, top, h, title if k == 0 else "", handle, chrom,
+                    # the title sits over the distributions; repeated on the zoom only if that starts a new page
+                    show_title = k == 0 and fig is not dist_fig
+                    alignment_panel(fig, full_left, igv_w, top, h, title if show_title else "", handle, chrom,
                                     s - flank, t + flank, fasta, tx, args, args.seed,
                                     arcs_junctions=e["junctions"], track_label=name,
                                     show_tx=(k == len(ev_tracks) - 1), title_width=full_w)
@@ -1526,11 +2479,10 @@ def main():
                 same = [sl for sl in slots if sl[0] is fig0]
                 sash_top = top0 - 0.19 - 0.06
                 sash_bottom = same[-1][1] - same[-1][2] + 0.10
-                sash_tracks = [dict(label=f"{sample} {name}", bam=handle, color=type_color(sample_to_type.get(str(sample))))
+                sash_tracks = [dict(label=f"{sample} {name}", bam=handle, color=darker(type_color(sample_to_type.get(str(sample)))))
                                for name, handle in handles[:len(same)]]
                 if rep_bam is not None:
-                    r_txt = "n/a" if np.isnan(rep["r"]) else f"{rep['r']:.3f}"
-                    sash_tracks.append(dict(label=f"{rep['sample']} (representative {rep['sample_type']}, r = {r_txt})",
+                    sash_tracks.append(dict(label=f"{rep['sample']} (representative {rep['sample_type']})",
                                             bam=rep_bam, color=type_color(rep["sample_type"])))
                 else:
                     sash_tracks[0]["label"] += "  (no representative sample)"
@@ -1544,22 +2496,9 @@ def main():
             if rep_bam is not None:
                 rep_bam.close()
 
-            # 6. metric distributions, up to 4 per row
-            if pairs and manifests:
-                values = load_metric_values(manifests, gene, pairs, args.coverage_threshold)
-                for i in range(0, len(pairs), DIST_PANELS_PER_ROW):
-                    chunk = pairs[i:i + DIST_PANELS_PER_ROW]
-                    fig, top, h = pager.next_row()
-                    for (left, w), (metric, jxn) in zip(panel_columns(len(chunk), DIST_PANELS_PER_ROW), chunk):
-                        ax = _ax(fig, left + 0.25, top - h + 0.3, w - 0.3, h - 0.55)
-                        draw_distribution(ax, metric, jxn, values.get((metric, jxn), {}), sample_to_type, type_colors,
-                                          outliers_by_pair.get((metric, jxn), set()), sample)
-            elif pairs:
-                print(f"  {gene}: no cohort manifests given; distribution panels skipped.")
         pager.flush()
-    bulk.close()
-    fasta.close()
-    print(f"Saved: {args.outfile}")
+        draw_qc_sections(pdf, args, str(sample), shown_name, qc_ctx)
+        return pdf.pages
 
 
 if __name__ == "__main__":

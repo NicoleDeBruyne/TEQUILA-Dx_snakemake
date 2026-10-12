@@ -7,6 +7,7 @@ from math import ceil
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from palette import SELECT_ORDER
 from matplotlib import rcParams
 rcParams['pdf.fonttype'] = 42
 
@@ -131,8 +132,8 @@ def main():
 
     if args.plot:
         legends = [
-            ('#d95d5b', f'Genes with minor haplotype fraction < {args.minor_haplotype_frequency_threshold} and padj ≤ {args.padj_threshold}'), \
-            ('#4c8fca', f'Genes with allelic imbalance in ≤ {args.sample_number_threshold} samples')
+            (SELECT_ORDER[0], f'Genes with minor haplotype fraction < {args.minor_haplotype_frequency_threshold} and padj ≤ {args.padj_threshold}'), \
+            (SELECT_ORDER[1], f'Genes with allelic imbalance in ≤ {args.sample_number_threshold} samples')
         ]
         plot_outlier_counts(samples, [merged_df, filtered_df], legends, args.title, f"{args.outprefix}_counts.pdf")
 

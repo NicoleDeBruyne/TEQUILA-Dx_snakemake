@@ -8,7 +8,6 @@ import numpy as np
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
 from expression_outliers import compute_outlier_scores
 from motr import add_motr_args, compute_size_factors
-from gene_boxplots import make_gene_boxplots
 
 
 def add_outlier_args(parser):
@@ -53,7 +52,6 @@ def main():
     args = parse_args()
 
     raw_col = "raw_count" if args.metric == "count" else "raw_coverage"
-    metric_label = "read count" if args.metric == "count" else "max coverage"
 
     per_sample_dfs = [pd.read_csv(f, sep="\t") for f in args.infiles]
     samples = [d['sample'].iloc[0] for d in per_sample_dfs if not d.empty]
@@ -96,10 +94,6 @@ def main():
     alias_motr_df.to_csv(out_matrix_motr_alias, sep="\t")
     print("Saved alias-labeled MOTR matrix: " + out_matrix_motr_alias)
 
-    plot_outdir = os.path.dirname(args.outprefix)
-    make_gene_boxplots(cptm_df, plot_outdir, "CPTM (" + metric_label + ")", "_cptm")
-    make_gene_boxplots(motr_df, plot_outdir, "MOTR (" + metric_label + ")", "_motr")
-    print("Saved per-gene CPTM/MOTR boxplots to: " + plot_outdir)
 
     z_cptm_df, _ = compute_outlier_scores(
         cptm_df,

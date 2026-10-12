@@ -1,6 +1,7 @@
 
 import argparse
 import os
+import sys
 import subprocess
 import pysam
 import numpy as np
@@ -856,6 +857,31 @@ def _is_snv(key):
     return len(ref) == 1 and len(alt) == 1
 
 
+_NOT_COVERED = object()
+
+
+def _query_position_at(aln, pos0):
+    """Query index of the read base aligned to reference position pos0 (0-based); None if pos0
+    falls in a deletion or splice gap of the read; _NOT_COVERED if the read does not span pos0."""
+    rpos = aln.reference_start
+    qpos = 0
+    for op, ln in aln.cigartuples:
+        if op in (0, 7, 8):                      # M, =, X
+            if rpos <= pos0 < rpos + ln:
+                return qpos + (pos0 - rpos)
+            rpos += ln
+            qpos += ln
+        elif op in (1, 4):                       # I, S
+            qpos += ln
+        elif op in (2, 3):                       # D, N
+            if rpos <= pos0 < rpos + ln:
+                return None
+            rpos += ln
+        if rpos > pos0:
+            break
+    return _NOT_COVERED
+
+
 def evaluate_snv(
     bam_path,
     variant,
@@ -877,68 +903,59 @@ def evaluate_snv(
 
     with pysam.AlignmentFile(bam_path, "rb") as bam:
 
-        for pileupcolumn in bam.pileup(
-            chrom,
-            pos0,
-            pos0 + 1,
-            truncate=True,
-            min_base_quality=0,
-            flag_filter=0,
-            ignore_overlaps=False,
-            max_depth=100_000_000,   # pysam's default (8000) silently drops reads beyond that depth
-        ):
+        # Stream the reads overlapping the variant one at a time (rather than bam.pileup, which
+        # holds every overlapping read in memory: with no depth cap that ran out of memory on very
+        # deep genes, and its default cap of 8000 silently dropped reads). Same reads and same
+        # base calls as a pileup with flag_filter=0, min_base_quality=0.
+        for aln in bam.fetch(chrom, pos0, pos0 + 1):
 
-            for pread in pileupcolumn.pileups:
+            if aln.is_unmapped or aln.cigartuples is None:
+                continue
 
-                aln = pread.alignment
+            query_position = _query_position_at(aln, pos0)
+            if query_position is _NOT_COVERED:
+                continue
 
-                if aln.is_unmapped:
-                    continue
+            read_name = aln.query_name
 
-                read_name = aln.query_name
-
-                if (
-                    pread.is_del
-                    or pread.is_refskip
-                    or pread.query_position is None
-                ):
-                    unassigned_reads.add(read_name)
-                    continue
-
-                observed = aln.query_sequence[
-                    pread.query_position
-                ].upper()
-
-                if observed == ref_u:
-                    ref_reads.add(read_name)
-                    continue
-
-                if observed == alt_u:
-
-                    alt_reads.add(read_name)
-
-                    if check_end_bias:
-
-                        total_alt_alignments += 1
-
-                        query_pos = pread.query_position
-                        q_start = aln.query_alignment_start
-                        q_end = aln.query_alignment_end - 1
-
-                        distance_to_end = min(
-                            query_pos - q_start,
-                            q_end - (
-                                query_pos +
-                                max(len(ref), len(alt))
-                            )
-                        )
-
-                        if distance_to_end < min_distance_from_read_end:
-                            end_alt_alignments += 1
-
-                    continue
-
+            if query_position is None:          # deletion or splice gap over the variant
                 unassigned_reads.add(read_name)
+                continue
+
+            observed = aln.query_sequence[
+                query_position
+            ].upper()
+
+            if observed == ref_u:
+                ref_reads.add(read_name)
+                continue
+
+            if observed == alt_u:
+
+                alt_reads.add(read_name)
+
+                if check_end_bias:
+
+                    total_alt_alignments += 1
+
+                    query_pos = query_position
+                    q_start = aln.query_alignment_start
+                    q_end = aln.query_alignment_end - 1
+
+                    distance_to_end = min(
+                        query_pos - q_start,
+                        q_end - (
+                            query_pos +
+                            max(len(ref), len(alt))
+                        )
+                    )
+
+                    if distance_to_end < min_distance_from_read_end:
+                        end_alt_alignments += 1
+
+                continue
+
+            unassigned_reads.add(read_name)
 
 
     unassigned_reads -= ref_reads
@@ -2179,6 +2196,8 @@ def main():
                 in gene_regions.items()
             }
 
+            failed_genes = []
+
             for future in concurrent.futures.as_completed(
                 futures
             ):
@@ -2196,12 +2215,23 @@ def main():
 
                 except Exception as e:
 
+                    failed_genes.append(gene)
+
                     print(
                         f"Error encountered while phasing "
-                        f"{gene}: {e}"
+                        f"{gene}: {e!r}"
                     )
 
                     traceback.print_exc()
+
+        # A failed gene (e.g. a worker killed for running out of memory, which breaks the whole
+        # pool) must fail the job, so Snakemake retries it with more memory instead of keeping a
+        # summary that silently lacks those genes.
+        if failed_genes:
+            sys.exit(
+                f"\nPhasing failed for {len(failed_genes)} of {len(gene_regions)} gene(s): "
+                + ", ".join(sorted(failed_genes))
+            )
 
     else:
 

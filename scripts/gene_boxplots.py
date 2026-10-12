@@ -7,7 +7,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-def make_gene_boxplots(value_df, outdir, y_label, filename_suffix):
+from palette import darker
+
+
+def make_gene_boxplots(value_df, outdir, y_label, filename_suffix, color=None):
+    """One box plot per gene; points in `color` (the sample type's colour), the highest and
+    lowest sample in a darker shade, larger and labelled."""
+    color = (color or "#7f7f7f").strip("'\"")
+    dark = darker(color)
     os.makedirs(outdir, exist_ok=True)
     for gene in value_df.index:
         vals = value_df.loc[gene].dropna()
@@ -21,19 +28,19 @@ def make_gene_boxplots(value_df, outdir, y_label, filename_suffix):
                    boxprops=_black, whiskerprops=_black, capprops=_black, medianprops=_black)
 
         jitter = (np.random.RandomState(0).rand(len(vals)) - 0.5) * 0.15
-        ax.scatter(1 + jitter, vals.to_numpy(), color="#2c7fb8", zorder=3, s=18)
+        ax.scatter(1 + jitter, vals.to_numpy(), color=color, zorder=3, s=18)
 
         max_sample = vals.idxmax()
         min_sample = vals.idxmin()
         ax.scatter([1 + jitter[list(vals.index).index(max_sample)]], [vals[max_sample]],
-                   color="#c0392b", zorder=4, s=30)
+                   color=dark, zorder=4, s=36)
         ax.annotate(max_sample, (1 + jitter[list(vals.index).index(max_sample)], vals[max_sample]),
-                    textcoords="offset points", xytext=(6, 0), fontsize=7, color="#c0392b", va="center")
+                    textcoords="offset points", xytext=(6, 0), fontsize=7, color=dark, va="center")
         if min_sample != max_sample:
             ax.scatter([1 + jitter[list(vals.index).index(min_sample)]], [vals[min_sample]],
-                       color="#c0392b", zorder=4, s=30)
+                       color=dark, zorder=4, s=36)
             ax.annotate(min_sample, (1 + jitter[list(vals.index).index(min_sample)], vals[min_sample]),
-                        textcoords="offset points", xytext=(6, 0), fontsize=7, color="#c0392b", va="center")
+                        textcoords="offset points", xytext=(6, 0), fontsize=7, color=dark, va="center")
 
         ax.set_xticks([])
         ax.set_ylabel(y_label)

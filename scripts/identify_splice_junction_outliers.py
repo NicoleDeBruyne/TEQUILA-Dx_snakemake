@@ -46,12 +46,12 @@ def plot_volcano(df, outfile, padj_threshold, delta_PSI_threshold, n=0):
     ax.scatter(df['delta_PSI'], df['-log10_padj'], color='black', s=4)
     ax.set_xlabel('Delta PSI')
     ax.set_ylabel('-log10(padj)')
-    ax.axhline(-np.log10(padj_threshold), color='red', linestyle='--')
-    ax.axvline(delta_PSI_threshold, color='red', linestyle='--')
-    ax.axvline(-delta_PSI_threshold, color='red', linestyle='--')
+    ax.axhline(-np.log10(padj_threshold), color='#c23637', linestyle='--')
+    ax.axvline(delta_PSI_threshold, color='#c23637', linestyle='--')
+    ax.axvline(-delta_PSI_threshold, color='#c23637', linestyle='--')
     for _, row in top_hits.iterrows():
         ax.text(row['delta_PSI'], row['-log10_padj'], row['gene'],
-                fontsize=6, color='red', ha='left', va='bottom', zorder=100, rotation=45)
+                fontsize=6, color='#c23637', ha='left', va='bottom', zorder=100, rotation=45)
 
     plot_outfile = f'{os.path.splitext(outfile)[0]}_volcano_plot'
     plt.savefig(f'{plot_outfile}_volcano_plot.pdf')

@@ -11,6 +11,7 @@ from math import ceil
 from statsmodels.stats.multitest import multipletests
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from palette import SELECT_ORDER
 from matplotlib import rcParams
 rcParams['pdf.fonttype'] = 42
 
@@ -353,89 +354,6 @@ def plot_outlier_counts(samples, dfs, legends, suptitle, outfile):
     plt.close()
     print(f"Box plot saved to {boxplot_file}")
 
-def plot_outlier_types(df, suptitle, outfile):
-
-    annotation_colors = {
-        'unannotated': '#d95d5b',
-        'protein_coding': '#4c8fca',
-        'protein_coding_CDS_not_defined': '#57aa3e',
-        'nonsense_mediated_decay': '#f48f3e',
-        'retained_intron': '#b271ab',
-        'lncRNA': '#42b4b5',
-        'other': '#a0a0a0'
-    }
-    event_alphas = {
-        'exon_skipping/inclusion': 1.0,
-        'alt_ss': 0.6,
-        'complex': 0.8,
-        'none': 0.3,
-    }
-
-    phasing_groups = {
-        'bulk': df[df['phasing'] == 'bulk'],
-        'haplotype-specific': df[df['phasing'].isin(['hap1','hap2'])],
-        'other': df[~df['phasing'].isin(['bulk','hap1','hap2'])]
-    }
-    annotation_groups = {
-        'unannotated': df[df['annotation'] == 'unannotated'],
-        'protein_coding': df[df['annotation'] == 'annotated:protein_coding'],
-        'protein_coding_CDS_not_defined': df[df['annotation'] == 'annotated:protein_coding_CDS_not_defined'],
-        'nonsense_mediated_decay': df[df['annotation'] == 'annotated:nonsense_mediated_decay'],
-        'retained_intron': df[df['annotation'] == 'annotated:retained_intron'],
-        'lncRNA': df[df['annotation'] == 'annotated:lncRNA'],
-        'other': df[
-            (df['annotation'] == 'other') |
-            (~df['annotation'].isin(['unannotated','annotated:protein_coding','annotated:protein_coding_CDS_not_defined',
-                'annotated:nonsense_mediated_decay','annotated:retained_intron','lncRNA']))
-        ]
-    }
-    event_groups = {
-        'exon_skipping/inclusion': df[df['event'].isin(['exon_skipping_approx', 'exon_inclusion_approx'])],
-        'alt_ss': df[df['event'].isin(['alt_5ss_approx', 'alt_3ss_approx'])],
-        'complex': df[df['event'] == 'complex_approx'],
-        'none': df[df['event'] == NO_EVENT],
-    }
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
-    for ax, (phasing_label, ph_df) in zip(axes, phasing_groups.items()):
-        sizes, colors = [], []
-        for ann_label, ann_df in annotation_groups.items():
-            sub_df = ph_df[ph_df.index.isin(ann_df.index)]
-            for evt_label, evt_df in event_groups.items():
-                count = len(sub_df[sub_df.index.isin(evt_df.index)])
-                if count > 0:
-                    sizes.append(count)
-                    base_color = annotation_colors[ann_label]
-                    rgba = list(plt.matplotlib.colors.to_rgba(base_color))
-                    rgba[-1] = event_alphas[evt_label]
-                    colors.append(rgba)
-        if sizes:
-            ax.pie(sizes, labels=None, colors=colors, startangle=90, wedgeprops=dict(edgecolor='white'))
-        ax.set(aspect="equal")
-        ax.set_title(f"{phasing_label.capitalize()} (n={sum(sizes)})")
-
-    used_annotations = set()
-    used_events = set()
-    for ax, (phasing_label, ph_df) in zip(axes, phasing_groups.items()):
-        for ann_label, ann_df in annotation_groups.items():
-            sub_df = ph_df[ph_df.index.isin(ann_df.index)]
-            for evt_label, evt_df in event_groups.items():
-                count = len(sub_df[sub_df.index.isin(evt_df.index)])
-                if count > 0:
-                    used_annotations.add(ann_label)
-                    used_events.add(evt_label)
-    ann_patches = [mpatches.Patch(color=annotation_colors[a], label=a) for a in annotation_colors if a in used_annotations]
-    evt_patches = [mpatches.Patch(facecolor='gray', alpha=event_alphas[e], label=e) for e in event_alphas if e in used_events]
-    leg1 = fig.legend(handles=ann_patches, title="Annotation", loc="center right", bbox_to_anchor=(1.15, 0.7))
-    fig.add_artist(leg1)
-    fig.legend(handles=evt_patches, title="Event type", loc="center right", bbox_to_anchor=(1.15, 0.3))
-
-    plt.suptitle(suptitle)
-    plt.tight_layout()
-    plt.savefig(outfile, bbox_inches="tight")
-    plt.close()
-    print(f"Pie charts saved to {outfile}")
-
 def main():
     args = parse_args()
 
@@ -648,13 +566,13 @@ def main():
         legends = []
         if 'outlier_df' in locals() and not outlier_df.empty:
             dfs_for_plot.append(outlier_df)
-            legends.append(('#d95d5b', f'coverage ≥ {args.jxn_coverage_threshold}, abs(ΔPSI) ≥ {args.delta_PSI_threshold}, and padj ≤ {args.padj_threshold}'))
+            legends.append((SELECT_ORDER[0], f'coverage ≥ {args.jxn_coverage_threshold}, abs(ΔPSI) ≥ {args.delta_PSI_threshold}, and padj ≤ {args.padj_threshold}'))
         if 'df_stage2' in locals() and not df_stage2.empty:
             dfs_for_plot.append(df_stage2)
-            legends.append(('#4c8fca', f"+ upregulated junctions (delta PSI > 0)" if args.delta_PSI_direction == "positive" else f"+ downregulated junctions (delta PSI < 0)"))
+            legends.append((SELECT_ORDER[1], f"+ upregulated junctions (delta PSI > 0)" if args.delta_PSI_direction == "positive" else f"+ downregulated junctions (delta PSI < 0)"))
         if 'df_stage3' in locals() and not df_stage3.empty:
             dfs_for_plot.append(df_stage3)
-            legends.append(('#57aa3e', f"+ event types: \n        " + ',\n        '.join(args.event_types)))
+            legends.append((SELECT_ORDER[2], f"+ event types: \n        " + ',\n        '.join(args.event_types)))
         if 'df_stage4' in locals() and not df_stage4.empty:
             dfs_for_plot.append(df_stage4)
             legend_parts = []
@@ -670,17 +588,14 @@ def main():
                 legend_parts.append("- downregulated junctions with annotation:\n        " + ",\n        ".join(args.exclude_downreg_annotation_types))
             else:
                 legend_parts.append("+ all downregulated junctions")
-            legends.append(('#f48f3e', "\n".join(legend_parts)))
+            legends.append((SELECT_ORDER[3], "\n".join(legend_parts)))
         if 'df_stage5' in locals() and not df_stage5.empty:
             dfs_for_plot.append(df_stage5)
-            legends.append(('#b271ab', '+ IQR outlier' if args.filter_by_cohort_IQR else f'+ abs(ΔPSI_vs_cohort) ≥ {args.delta_PSI_vs_cohort_threshold}'))
+            legends.append((SELECT_ORDER[4], '+ IQR outlier' if args.filter_by_cohort_IQR else f'+ abs(ΔPSI_vs_cohort) ≥ {args.delta_PSI_vs_cohort_threshold}'))
         if 'df_stage6' in locals() and not df_stage6.empty:
             dfs_for_plot.append(df_stage6)
-            legends.append(('#42b4b5', f'+ event with a junction that is an outlier in ≤ {args.sample_number_threshold} samples'))
+            legends.append((SELECT_ORDER[5], f'+ event with a junction that is an outlier in ≤ {args.sample_number_threshold} samples'))
         plot_outlier_counts(samples, dfs_for_plot, legends, args.title, f"{args.outprefix}_counts.pdf")
-        plot_outlier_types(outlier_df,
-                        f"Outlier Junction (coverage≥{args.jxn_coverage_threshold}, padj≤{args.padj_threshold}, abs(ΔPSI)≥{args.delta_PSI_threshold}) Types",
-                        f"{args.outprefix}_types.pdf")
 
 if __name__ == "__main__":
     main()

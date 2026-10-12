@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 import warnings
 
+import tier_rules
+
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 _DELTA_COL_TO_SUFFIX = {
@@ -370,20 +372,9 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         return max_bulk, max_hap1, max_hap2
 
     def inspect_row(row, prefix=''):
-        max_bulk, max_hap1, max_hap2 = max_deltas(row, prefix)
-        dominant = any(x in row['inheritance_patterns'] for x in ['AD', 'XLD']) if pd.notna(row.get('inheritance_patterns')) else False
-        if (
-            (max_bulk >= 0.5)
-            or (max_hap1 >= 0.5 and max_hap2 >= 0.5)
-            or (dominant and (max_bulk >= 0.2 or max_hap1 >= 0.5 or max_hap2 >= 0.5))
-        ):
-            return "Strong"
-        elif (max_bulk >= 0.2 or max_hap1 >= 0.5 or max_hap2 >= 0.5):
-            return "Moderate"
-        elif (max_bulk > 0 or max_hap1 > 0 or max_hap2 > 0):
-            return "Weak"
-        else:
-            return "None"
+        # strength depends only on the size / allelic pattern of the change (tier_rules.py);
+        # inheritance is taken into account by the tier rules
+        return tier_rules.junction_strength(*max_deltas(row, prefix))
     hit_df['outlier_junction'] = hit_df.apply(inspect_row, axis=1)
     if mod_cohort_junction_df is not None:
         hit_df['cohort_outlier_junction'] = hit_df.apply(lambda row: inspect_row(row, prefix='cohort_'), axis=1)
@@ -402,17 +393,6 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
 
     def _clean_inheritance(s):
         return str(s).strip().strip('"') if pd.notna(s) else ''
-
-    def _inheritance_bucket(inheritance_patterns):
-        s = _clean_inheritance(inheritance_patterns)
-        has_dominant = ('AD' in s) or ('XLD' in s)
-        has_recessive = ('AR' in s) or ('XLR' in s)
-        if has_dominant and has_recessive:
-            return 2
-        elif has_dominant:
-            return 1
-        else:
-            return 3
 
     def _classify_gene_variants(gene_variant_rows):
         empty = dict(
@@ -488,77 +468,13 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
 
     def _assign_tier(row):
         vc = variant_class_by_gene.get(row['gene'], _empty_variant_class)
-        ase = row['ASE'] is True
-        haploinsufficient = row['haploinsufficient'] is True
-        strong = (row['outlier_junction'] == 'Strong') or (row['cohort_outlier_junction'] == 'Strong')
-        moderate = (row['outlier_junction'] == 'Moderate') or (row['cohort_outlier_junction'] == 'Moderate')
-        weak = (row['outlier_junction'] == 'Weak') or (row['cohort_outlier_junction'] == 'Weak')
-        bucket = _inheritance_bucket(row['inheritance_patterns'])
-
-        ase_hapi_or_strong = (ase and haploinsufficient) or strong
-        ase_not_hapi_or_moderate = (ase and not haploinsufficient) or moderate
-
-        # Bucket 1: AD or XLD only
-        if bucket == 1:
-            if vc['has_pathogenic']:
-                return 1
-            if ase_hapi_or_strong:
-                return 2
-            if ase_not_hapi_or_moderate:
-                return 3
-            if weak:
-                return 4
-            if vc['has_vus']:
-                return 5
-            return None
-
-        # Bucket 2: mixed inheritance (AD/AR or XLD/XLR)
-        if bucket == 2:
-            if vc['has_2_pathogenic_trans'] or vc['has_homozygous_pathogenic']:
-                return 1
-            if vc['has_pathogenic']:
-                return 2
-            if ase_hapi_or_strong:
-                return 3
-            if ase_not_hapi_or_moderate:
-                return 4
-            if weak:
-                return 5
-            if vc['has_vus']:
-                return 6
-            return None
-
-        # Bucket 3: AR, XLR, or unknown inheritance
-        if vc['has_2_pathogenic_trans'] or vc['has_homozygous_pathogenic']:
-            return 1
-        if vc['has_1_pathogenic_1_vus_trans'] or vc['has_2_pathogenic_unclear']:
-            return 2
-        # 1 P/LP alone, OR 2 VUS in trans, OR 1 homozygous VUS
-        if vc['has_pathogenic'] or vc['has_2_vus_trans'] or vc['has_homozygous_vus']:
-            if strong:
-                return 2
-            if ase or moderate:
-                return 3
-            if weak:
-                return 4
-            return 5
-        # Any other VUS
-        if vc['has_vus']:
-            if strong:
-                return 3
-            if ase or moderate:
-                return 4
-            if weak:
-                return 5
-            return 6
-        # No VUS, but RNA dysregulation is present
-        if strong:
-            return 4
-        if ase or moderate:
-            return 5
-        if weak:
-            return 6
-        return None
+        return tier_rules.assign_tier(
+            vc,
+            ase=row['ASE'] is True,
+            haploinsufficient=row['haploinsufficient'] is True,
+            strength=tier_rules.strongest(row['outlier_junction'], row['cohort_outlier_junction']),
+            dominant=tier_rules.is_dominant(_clean_inheritance(row['inheritance_patterns'])),
+        )
 
     hit_df['tier'] = hit_df.apply(_assign_tier, axis=1)
     hit_df['_tb_n_pathogenic'] = hit_df['gene'].map(

@@ -57,11 +57,11 @@ def plot_volcano(df, outprefix, padj_threshold, minor_haplotype_frequency_thresh
     ax.scatter(df['diff'], df['-log10_padj'], color='black', s=1)
     ax.set_xlabel('Difference in haplotype ratio')
     ax.set_ylabel('-log10(p-value)')
-    ax.axhline(-np.log10(padj_threshold), color='red', linestyle='--')
-    ax.axvline(diff_threshold, color='red', linestyle='--')
+    ax.axhline(-np.log10(padj_threshold), color='#c23637', linestyle='--')
+    ax.axvline(diff_threshold, color='#c23637', linestyle='--')
     for _, row in top_hits.iterrows():
         ax.text(row['diff'], row['-log10_padj'], row['gene'],
-                fontsize=6, color='red', ha='left', va='bottom', zorder=100, rotation=45)
+                fontsize=6, color='#c23637', ha='left', va='bottom', zorder=100, rotation=45)
     plt.savefig(f'{outprefix}_volcano_plot.png', dpi=300)
     plt.savefig(f'{outprefix}_volcano_plot.pdf')
 

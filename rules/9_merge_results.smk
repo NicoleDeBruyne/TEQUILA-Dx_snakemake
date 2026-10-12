@@ -80,6 +80,7 @@ rule _9A_merge_on_target_rates:
         outprefix  = lambda wc: (str(bed_outdir(wc.cohort_id, wc.bed_id)) + '/cohort_qc/on_target_rates/' + str(wc.bed_id)),
         title      = lambda wc: config.get("cohort_qc_title", (str(wc.cohort_id) + ' ' + str(wc.bed_id) + ' on-target rates')),
         alias_args = lambda wc: _quoted(alias_map_args(bed_samples(wc.cohort_id, wc.bed_id))),
+        colors     = lambda wc: _quoted([sample_type_color(SAMPLES[s]["sample_type"]) for s in bed_samples(wc.cohort_id, wc.bed_id)]),
         script     = workflow.basedir + "/scripts/plot_on_target_rates.py",
     threads: 1
     resources:
@@ -93,6 +94,7 @@ rule _9A_merge_on_target_rates:
         python -u {params.script} \\
             --infiles   {input.infiles} \\
             --groups    {params.groups} \\
+            --colors    {params.colors} \\
             --outprefix {params.outprefix} \\
             --title     {params.title:q} \\
             --alias-map {params.alias_args} \\
@@ -384,6 +386,7 @@ rule _9F2_gene_count_zscore_report:
         threshold  = config.get("gene_outlier_report_zscore_threshold", -3.5),
         cptm_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene count CPTM",
         motr_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene count MOTR",
+        color      = lambda wc: _quoted([sample_type_color(wc.sample_type)])[0],
         script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
     threads: 1
     resources:
@@ -398,12 +401,14 @@ rule _9F2_gene_count_zscore_report:
             --threshold     {params.threshold} \\
             --title         {params.cptm_title:q} \\
             --outprefix     {params.cptm_outprefix} \\
+            --color         {params.color} \\
         2>&1 | tee {log}
         python -u {params.script} \\
             --zscore-matrix {input.zscores_motr} \\
             --threshold     {params.threshold} \\
             --title         {params.motr_title:q} \\
             --outprefix     {params.motr_outprefix} \\
+            --color         {params.color} \\
         2>&1 | tee -a {log}
         """
 
@@ -467,6 +472,7 @@ rule _9G2_gene_coverage_zscore_report:
         threshold  = config.get("gene_outlier_report_zscore_threshold", -3.5),
         cptm_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene coverage CPTM",
         motr_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene coverage MOTR",
+        color      = lambda wc: _quoted([sample_type_color(wc.sample_type)])[0],
         script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
     threads: 1
     resources:
@@ -481,12 +487,14 @@ rule _9G2_gene_coverage_zscore_report:
             --threshold     {params.threshold} \\
             --title         {params.cptm_title:q} \\
             --outprefix     {params.cptm_outprefix} \\
+            --color         {params.color} \\
         2>&1 | tee {log}
         python -u {params.script} \\
             --zscore-matrix {input.zscores_motr} \\
             --threshold     {params.threshold} \\
             --title         {params.motr_title:q} \\
             --outprefix     {params.motr_outprefix} \\
+            --color         {params.color} \\
         2>&1 | tee -a {log}
         """
 
@@ -502,7 +510,6 @@ rule _9H1_merge_gene_by_assignment:
         matrix_raw   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_raw.tsv",
         matrix_raw_all_genes = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_raw_all_genes.tsv",
         assignment_stats     = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_read_outcomes.tsv",
-        assignment_stats_pdf = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_read_outcomes.pdf",
         zscores_cptm = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_cptm.tsv",
         zscores_motr = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_zscores_motr.tsv",
         matrix_alias = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/gene_quantification/by_assignment/gene_assignment_matrix_cptm_alias.tsv",
@@ -555,6 +562,7 @@ rule _9H2_gene_assignment_zscore_report:
         threshold  = config.get("gene_outlier_report_zscore_threshold", -3.5),
         cptm_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene assignment CPTM",
         motr_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", gene assignment MOTR",
+        color      = lambda wc: _quoted([sample_type_color(wc.sample_type)])[0],
         script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
     threads: 1
     resources:
@@ -569,12 +577,14 @@ rule _9H2_gene_assignment_zscore_report:
             --threshold     {params.threshold} \\
             --title         {params.cptm_title:q} \\
             --outprefix     {params.cptm_outprefix} \\
+            --color         {params.color} \\
         2>&1 | tee {log}
         python -u {params.script} \\
             --zscore-matrix {input.zscores_motr} \\
             --threshold     {params.threshold} \\
             --title         {params.motr_title:q} \\
             --outprefix     {params.motr_outprefix} \\
+            --color         {params.color} \\
         2>&1 | tee -a {log}
         """
 
@@ -836,6 +846,7 @@ rule _9I7_amalgam_zscore_report:
         threshold  = config.get("gene_outlier_report_zscore_threshold", -3.5),
         cptm_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", AMALGAM CPTM",
         motr_title = lambda wc: str(wc.cohort_id) + " " + str(wc.bed_id) + " " + str(wc.sample_type) + ", AMALGAM MOTR",
+        color      = lambda wc: _quoted([sample_type_color(wc.sample_type)])[0],
         script     = workflow.basedir + "/scripts/report_zscore_outliers.py",
     threads: 1
     resources:
@@ -850,13 +861,66 @@ rule _9I7_amalgam_zscore_report:
             --threshold     {params.threshold} \\
             --title         {params.cptm_title:q} \\
             --outprefix     {params.cptm_outprefix} \\
+            --color         {params.color} \\
         2>&1 | tee {log}
         python -u {params.script} \\
             --zscore-matrix {input.zscores_motr} \\
             --threshold     {params.threshold} \\
             --title         {params.motr_title:q} \\
             --outprefix     {params.motr_outprefix} \\
+            --color         {params.color} \\
         2>&1 | tee -a {log}
+        """
+
+
+# Cohort-level per-gene CPTM / MOTR box plots, one PDF per gene (US Letter, landscape) for each
+# quantification method: one panel per sample type (own y-axis), CPTM top row, MOTR bottom row.
+_GQ_METHODS = {
+    "count":      ("by_count",      "gene_count",      "read count"),
+    "coverage":   ("by_coverage",   "gene_coverage",   "max coverage"),
+    "assignment": ("by_assignment", "gene_assignment", "assigned reads"),
+    "amalgam":    ("by_amalgam",    "gene_amalgam",    "AMALGAM"),
+}
+
+def _gq_matrix(cohort_id, bed_id, sample_type, method, norm):
+    subdir, prefix, _ = _GQ_METHODS[method]
+    return (config["output_dir"] + "/" + str(cohort_id) + "/" + str(bed_id) + "/output/sample_types/"
+            + str(sample_type) + "/output/gene_quantification/" + subdir + "/" + prefix + "_matrix_" + norm + ".tsv")
+
+def _gq_types(cohort_id, bed_id):
+    return [GROUP_SAMPLE_TYPE[gid] for gid in BED_GROUPS[(cohort_id, bed_id)]]
+
+
+rule _9P_gene_quantification_boxplots:
+    input:
+        cptm = lambda wc: [_gq_matrix(wc.cohort_id, wc.bed_id, st, wc.method, "cptm") for st in _gq_types(wc.cohort_id, wc.bed_id)],
+        motr = lambda wc: [_gq_matrix(wc.cohort_id, wc.bed_id, st, wc.method, "motr") for st in _gq_types(wc.cohort_id, wc.bed_id)],
+    output:
+        outdir = directory(_cohort_outdir + "/{bed_id}/output/cohort_qc/gene_quantification/by_{method}"),
+    wildcard_constraints:
+        method = "count|coverage|assignment|amalgam",
+    params:
+        cptm_args = lambda wc: _quoted([st + ":" + _gq_matrix(wc.cohort_id, wc.bed_id, st, wc.method, "cptm") for st in _gq_types(wc.cohort_id, wc.bed_id)]),
+        motr_args = lambda wc: _quoted([st + ":" + _gq_matrix(wc.cohort_id, wc.bed_id, st, wc.method, "motr") for st in _gq_types(wc.cohort_id, wc.bed_id)]),
+        colors    = lambda wc: _quoted([st + ":" + sample_type_color(st) for st in _gq_types(wc.cohort_id, wc.bed_id)]),
+        label     = lambda wc: _GQ_METHODS[wc.method][2],
+        script    = workflow.basedir + "/scripts/plot_gene_quantification.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
+        runtime = 120,
+    log:
+        _cohort_outdir + "/{bed_id}/logs/gene_quantification_boxplots_{method}.log"
+    shell:
+        """
+        mkdir -p $(dirname {log})
+        python -u {params.script} \\
+            --cptm         {params.cptm_args} \\
+            --motr         {params.motr_args} \\
+            --colors       {params.colors} \\
+            --metric-label {params.label:q} \\
+            --outdir       {output.outdir} \\
+        2>&1 | tee {log}
         """
 
 
@@ -1116,13 +1180,9 @@ rule _9M2_plot_group_hits:
         all_hits = lambda wc: _group_all_hits_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.filter_set),
     output:
         pathogenic_bar  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_pathogenic_variant_barplot.pdf",
-        pathogenic_box  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_pathogenic_variant_boxplot.pdf",
         ase_bar         = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_ASE_barplot.pdf",
-        ase_box         = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_ASE_boxplot.pdf",
         junction_bar    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_outlier_junction_barplot.pdf",
-        junction_box    = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_outlier_junction_boxplot.pdf",
         dysreg_bar      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_RNA_dysregulation_barplot.pdf",
-        dysreg_box      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/genes_with_RNA_dysregulation_boxplot.pdf",
     params:
         outdir = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}",
         script = workflow.basedir + "/scripts/plot_candidate_hits.py",
@@ -1189,6 +1249,7 @@ rule _9N2_plot_hits_upset:
         sample_types = lambda wc: [SAMPLES[s]["sample_type"] for s in bed_samples(wc.cohort_id, wc.bed_id)],
         outdir       = _cohort_outdir + "/{bed_id}/output/{filter_set}",
         title        = lambda wc: f"{wc.bed_id} ({wc.filter_set}): Candidate Gene Hit Categories by Sample",
+        colors       = lambda wc: _quoted([sample_type_color(SAMPLES[s]["sample_type"]) for s in bed_samples(wc.cohort_id, wc.bed_id)]),
         script       = workflow.basedir + "/scripts/plot_hits_upset.py",
     threads: 1
     resources:
@@ -1203,6 +1264,7 @@ rule _9N2_plot_hits_upset:
             --infile      {input.all_hits} \\
             --samples     {params.samples} \\
             --sample-types {params.sample_types} \\
+            --colors      {params.colors} \\
             --outdir      {params.outdir} \\
             --title       "{params.title}" \\
         2>&1 | tee {log}
@@ -1237,6 +1299,18 @@ def _bed_cja_manifests(cohort_id, bed_id):
 # same sample type and the whole cohort), then IGV-style pages for its candidate genes: gene body
 # (bulk, hap1, hap2), variant zooms, outlier splicing events with sashimi arcs, and cohort metric
 # distributions.
+def _sample_type_zscores(wc, norm):
+    return (str(bed_outdir(wc.cohort_id, wc.bed_id)) + "/sample_types/" + str(SAMPLES[wc.sample]["sample_type"])
+            + "/output/gene_quantification/by_assignment/gene_assignment_zscores_" + norm + ".tsv")
+
+
+def _bed_expression_matrices(wc):
+    """(sample_type, by-assignment MOTR matrix) for every sample type on the panel."""
+    return [(GROUP_SAMPLE_TYPE[gid], str(bed_outdir(wc.cohort_id, wc.bed_id)) + "/sample_types/" + str(GROUP_SAMPLE_TYPE[gid])
+             + "/output/gene_quantification/by_assignment/gene_assignment_matrix_motr.tsv")
+            for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]]
+
+
 def _cohort_qc_file(wc, rel):
     return str(bed_outdir(wc.cohort_id, wc.bed_id)) + "/cohort_qc/" + rel.format(b=wc.bed_id)
 
@@ -1258,11 +1332,15 @@ rule _9O_sample_final_report:
         read_attrs    = lambda wc: (_cohort_qc_file(wc, "read_attributes/{b}_read_attributes.tsv") if flag("qc") else []),
         flr_matrix    = lambda wc: (_cohort_qc_file(wc, "full_length_ratio/{b}_full_length_ratio_matrix.tsv") if flag("qc") else []),
         pca_coords    = lambda wc: (_cohort_qc_file(wc, "validate_sample_types/{b}_PCA_coords.tsv") if flag("qc") else []),
-        # AMALGAM transcript counts per sample type, to choose each gene's representative sample
-        amalgam       = lambda wc: [_amalgam_group_dir(wc.cohort_id, wc.bed_id, GROUP_SAMPLE_TYPE[gid]) + "/transcript_amalgam_matrix_raw.tsv"
-                                    for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]] if flag("gene_quantification") else [],
+        coverage      = lambda wc: (_cohort_qc_file(wc, "avg_coverage/{b}_breadth_coverage_matrix.tsv") if flag("qc") else []),
+        # by-assignment expression z-scores of the sample's own sample type
+        zscore_cptm   = lambda wc: (_sample_type_zscores(wc, "cptm") if flag("gene_quantification") else []),
+        zscore_motr   = lambda wc: (_sample_type_zscores(wc, "motr") if flag("gene_quantification") else []),
+        # each sample type's by-assignment MOTR matrix, for the expression box plot on each gene page
+        expr_mats     = lambda wc: ([p for _, p in _bed_expression_matrices(wc)] if flag("gene_quantification") else []),
     output:
         pdf = _cohort_outdir + "/{bed_id}/output/default/final_reports/{sample}_report.pdf",
+        html = _cohort_outdir + "/{bed_id}/output/default/final_reports/{sample}_review.html",
     params:
         genome           = config["genome"],
         mapping_arg      = lambda wc, input: ("--gene-bam-mapping " + str(input.mapping)) if input.mapping else "",
@@ -1270,15 +1348,20 @@ rule _9O_sample_final_report:
             f"{opt} {val}" for opt, val in (("--on-target-tsv", input.on_target),
                                             ("--read-attributes-tsv", input.read_attrs),
                                             ("--flr-matrix", input.flr_matrix),
-                                            ("--pca-coords", input.pca_coords)) if val),
+                                            ("--pca-coords", input.pca_coords),
+                                            ("--coverage-matrix", input.coverage),
+                                            ("--zscore-cptm", input.zscore_cptm),
+                                            ("--zscore-motr", input.zscore_motr)) if val)
+                                   + (f" --zscore-threshold {config.get('gene_outlier_report_zscore_threshold', -3.5)}"
+                                      if input.zscore_cptm else "")
+                                   + (f" --coverage-depth {config.get('merge_min_dp_snv', 50)}" if input.coverage else ""),
         cohort_manifests = lambda wc: _quoted(_bed_cohort_manifest_args(wc.cohort_id, wc.bed_id)) if flag("cohort_junction_analysis") else [],
         samples          = lambda wc: bed_samples(wc.cohort_id, wc.bed_id),
         sample_types     = lambda wc: [SAMPLES[s]["sample_type"] for s in bed_samples(wc.cohort_id, wc.bed_id)],
         colors           = lambda wc: _quoted([sample_type_color(SAMPLES[s]["sample_type"]) for s in bed_samples(wc.cohort_id, wc.bed_id)]),
         sample_bams      = lambda wc: _quoted([SAMPLES[s]["bam"] for s in bed_samples(wc.cohort_id, wc.bed_id)]),
-        amalgam_args     = lambda wc: (("--amalgam-matrices " + " ".join(_quoted(
-            [GROUP_SAMPLE_TYPE[gid] + ":" + _amalgam_group_dir(wc.cohort_id, wc.bed_id, GROUP_SAMPLE_TYPE[gid]) + "/transcript_amalgam_matrix_raw.tsv"
-             for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]]))) if flag("gene_quantification") else ""),
+        expr_args        = lambda wc: (("--expression-matrices " + " ".join(_quoted(
+            [t + ":" + p for t, p in _bed_expression_matrices(wc)]))) if flag("gene_quantification") else ""),
         cov_thr          = config["sample_coverage_threshold"],
         top_n            = config.get("hit_report_top_n", 0),
         max_tier         = config.get("hit_report_max_tier", 5),
@@ -1307,11 +1390,12 @@ rule _9O_sample_final_report:
             --sample-types       {params.sample_types} \\
             --colors             {params.colors} \\
             --sample-bams        {params.sample_bams} \\
-            {params.amalgam_args} \\
+            {params.expr_args} \\
             --coverage-threshold {params.cov_thr} \\
             --top-n              {params.top_n} \\
             --max-tier           {params.max_tier} \\
             --max-reads          {params.max_reads} \\
             --outfile            {output.pdf} \\
+            --html-out           {output.html} \\
         2>&1 | tee {log}
         """

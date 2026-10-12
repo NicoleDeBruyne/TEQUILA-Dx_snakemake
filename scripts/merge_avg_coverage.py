@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors
 import matplotlib.patches
 import seaborn as sns
+from palette import RED_WHITE_BLUE
 from matplotlib import rcParams
 
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
@@ -118,7 +119,7 @@ def make_heatmap(matrix, on_target, sample_colors, sample_types, sample_labels, 
         data_max = np.nanmax(matrix.to_numpy()) if np.isfinite(matrix.to_numpy()).any() else center
         vmax = max(float(data_max), center + 1.0)
     norm = matplotlib.colors.TwoSlopeNorm(vmin=0.0, vcenter=center, vmax=vmax)
-    cmap = matplotlib.colormaps["RdBu"].copy()
+    cmap = RED_WHITE_BLUE.copy()
     cmap.set_bad("#BBBBBB")
 
     show_gene_labels = (heat_h / max(n_genes, 1)) * 72 >= 5

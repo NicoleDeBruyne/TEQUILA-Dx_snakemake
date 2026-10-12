@@ -12,6 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
+from palette import BLUE_WHITE_RED, SELECT_ORDER
 from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import pdist
 from sklearn.decomposition import PCA
@@ -349,10 +350,10 @@ def select_variable_junctions(avg_psi_per_tissue: pd.DataFrame,
 
     if outprefix:
         fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(np.arange(1, len(vals) + 1), vals, color="#4c8fca", lw=1.2)
-        ax.axvline(n_select, color="#d95d5b", lw=1.2, ls="--",
+        ax.plot(np.arange(1, len(vals) + 1), vals, color="#009099", lw=1.2)
+        ax.axvline(n_select, color="#c23637", lw=1.2, ls="--",
                    label=f"selected N = {n_select:,}")
-        ax.scatter([n_select], [vals[n_select - 1]], color="#d95d5b", s=50, zorder=4)
+        ax.scatter([n_select], [vals[n_select - 1]], color="#c23637", s=50, zorder=4)
         ax.set_xlabel("Junctions ranked by variance", fontsize=9)
         ax.set_ylabel("Cross-tissue PSI variance", fontsize=9)
         ax.set_title("Ranked variance — elbow detection", fontsize=10)
@@ -369,10 +370,7 @@ def select_variable_junctions(avg_psi_per_tissue: pd.DataFrame,
 
 
 def _tissue_palette(tissues: list, colors: list | None = None) -> dict:
-    defaults=[
-        "#912321","#002b58","#1e662a","#c23637","#0068a9","#3d892e",
-        "#d95d5b","#4c8fca","#57aa3e","#ea9a9c","#91c4e9","#95c36e",
-    ]
+    defaults = SELECT_ORDER
     palette = {}
     for i, tissue in enumerate(tissues):
         user_color = (colors[i] if colors and i < len(colors) else None)
@@ -383,12 +381,7 @@ def _tissue_palette(tissues: list, colors: list | None = None) -> dict:
 
 
 def _query_palette(query_names: list, colors: list | None = None) -> dict:
-    defaults = [
-        "#ae450b","#6e2769","#005d6e","#926d17",
-        "#ea6302","#9d4588","#009099","#c69528",
-        "#f48f3e","#b271ab","#42b4b5","#e8c048",
-        "#fbb875","#cca0ca","#8cccce","#f4d77e",
-    ]
+    defaults = SELECT_ORDER
     palette = {}
     for i, name in enumerate(query_names):
         user_color = (colors[i] if colors and i < len(colors) else None)
@@ -598,7 +591,7 @@ def plot_distance_heatmap(score_df: pd.DataFrame,
 
     sns.heatmap(
         df_plot, ax=ax_heat,
-        cmap="YlOrRd_r",
+        cmap=BLUE_WHITE_RED,
         linewidths=0.3, linecolor="#a0a0a0",
         annot=(n_samples <= 60), fmt=".2f", annot_kws={"size": 7},
         cbar_kws={"label": "Mean |ΔPSI|", "shrink": 0.6},

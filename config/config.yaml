@@ -164,11 +164,11 @@ cohort_jxn_min_reads: 20    # minimum bulk read count for a junction to be inclu
 validate_ref_tissues: ["fibroblasts", "lymphocytes", "wholeblood"]    # GTEx tissues to plot alongside samples in the sample-type validation heatmap
 validate_ref_colors: # plot color per GTEx reference tissue above; any tissue not listed here gets an auto-assigned color
   fibroblasts: "#009099"
-  lymphocytes: "#3D892E"
+  lymphocytes: "#C69528"
   wholeblood: "#C23637"
 sample_type_colors: # plot color per sample_type; any sample_type not listed here gets an auto-assigned color
   fibroblasts: "#009099"
-  lymphocytes: "#3D892E"
+  lymphocytes: "#C69528"
   PBMCs: "#9D4588"
   wholeblood: "#C23637"
 cohort_qc_title: "Cohort QC"    # title prefix used on cohort QC plots

@@ -9,6 +9,7 @@ from matplotlib import rcParams
 rcParams['pdf.fonttype'] = 42
 import seaborn as sns
 
+from palette import SELECT_ORDER, GREY
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve, resolve_all
 
 
@@ -85,7 +86,10 @@ def main():
     df.to_csv(out_tsv, sep="\t", index=False)
     print(f"\u2705 Attributes saved to {out_tsv}")
 
-    palette_dict = dict(zip(target_order, sns.color_palette("pastel")))
+    # on / off target and mapped in select order; unmapped grey; anything else continues the order
+    fixed = {"on_target": SELECT_ORDER[0], "off_target": SELECT_ORDER[1], "mapped": SELECT_ORDER[2], "unmapped": GREY}
+    extra = iter(SELECT_ORDER[3:])
+    palette_dict = {tt: fixed.get(tt) or next(extra) for tt in target_order}
 
     print("\nPlotting read length boxplot...")
     plot_boxplot(df, sample_order, target_order, palette_dict, f"{args.outprefix}_read_lengths.pdf", args.title)

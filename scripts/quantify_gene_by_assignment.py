@@ -12,7 +12,6 @@ from matplotlib import rcParams
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
 from expression_outliers import compute_outlier_scores
 from motr import add_motr_args, compute_size_factors
-from gene_boxplots import make_gene_boxplots
 rcParams['pdf.fonttype'] = 42
 
 
@@ -58,40 +57,14 @@ def parse_args():
 
 
 _STATS_CATEGORIES = [
-    ("spliced_assigned",                   "Spliced: assigned",                        "#2ca25f"),
-    ("spliced_unassigned_zero_shared",     "Spliced: 0 shared splice sites",           "#fc9272"),
-    ("spliced_unassigned_tied",            "Spliced: tied genes",                      "#de2d26"),
-    ("unspliced_assigned",                 "Unspliced: assigned",                      "#66c2a4"),
-    ("unspliced_unassigned_zero_overlap",  "Unspliced: 0 overlapping gene exons",      "#fdae6b"),
-    ("unspliced_unassigned_multi_overlap", "Unspliced: multiple overlapping genes",    "#e6550d"),
-    ("unspliced_unassigned_not_contained", "Unspliced: not entirely within exon",      "#a63603"),
+    ("spliced_assigned",                   "Spliced: assigned"),
+    ("spliced_unassigned_zero_shared",     "Spliced: 0 shared splice sites"),
+    ("spliced_unassigned_tied",            "Spliced: tied genes"),
+    ("unspliced_assigned",                 "Unspliced: assigned"),
+    ("unspliced_unassigned_zero_overlap",  "Unspliced: 0 overlapping gene exons"),
+    ("unspliced_unassigned_multi_overlap", "Unspliced: multiple overlapping genes"),
+    ("unspliced_unassigned_not_contained", "Unspliced: not entirely within exon"),
 ]
-
-
-def make_assignment_summary_plot(stats_df, out_pdf, title):
-    samples = list(stats_df.index)
-    n_samples = len(samples)
-
-    fig_height = max(3, 0.35 * n_samples + 1.5)
-    fig, ax = plt.subplots(figsize=(10, fig_height))
-
-    y_pos = np.arange(n_samples)
-    left = np.zeros(n_samples)
-    for col, label, color in _STATS_CATEGORIES:
-        vals = stats_df[col].to_numpy(dtype=float)
-        ax.barh(y_pos, vals, left=left, height=0.7, color=color, label=label)
-        left += vals
-
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels(samples)
-    ax.invert_yaxis()
-    ax.set_xlabel("Alignments")
-    ax.set_title(title)
-    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=9)
-    fig.tight_layout()
-    fig.savefig(out_pdf)
-    plt.close(fig)
-
 
 
 def main():
@@ -151,11 +124,6 @@ def main():
     alias_motr_df.to_csv(out_matrix_motr_alias, sep="\t")
     print("Saved alias-labeled targeted-panel MOTR matrix: " + out_matrix_motr_alias)
 
-    metric_label = "assigned reads"
-    plot_outdir = os.path.dirname(args.outprefix)
-    make_gene_boxplots(cptm_df, plot_outdir, "CPTM (" + metric_label + ")", "_cptm")
-    make_gene_boxplots(motr_df, plot_outdir, "MOTR (" + metric_label + ")", "_motr")
-    print("Saved per-gene CPTM/MOTR boxplots to: " + plot_outdir)
 
     z_cptm_df, _ = compute_outlier_scores(
         cptm_df,
@@ -181,15 +149,12 @@ def main():
 
     stats_df = pd.concat([pd.read_csv(f, sep="\t") for f in args.stats_infiles], ignore_index=True)
     stats_df = stats_df.set_index("sample").reindex(samples)
-    stats_df = stats_df[["n_total"] + [col for col, _, _ in _STATS_CATEGORIES]]
+    stats_df = stats_df[["n_total"] + [col for col, _ in _STATS_CATEGORIES]]
 
     out_stats = args.outprefix + "_read_outcomes.tsv"
     stats_df.to_csv(out_stats, sep="\t")
     print("Saved per-sample assignment-outcome stats: " + out_stats)
 
-    out_stats_pdf = args.outprefix + "_read_outcomes.pdf"
-    make_assignment_summary_plot(stats_df, out_stats_pdf, args.title + " - read assignment outcomes")
-    print("Saved read-assignment outcome plot: " + out_stats_pdf)
 
 
 if __name__ == "__main__":

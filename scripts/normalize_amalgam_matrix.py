@@ -8,7 +8,6 @@ import numpy as np
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
 from expression_outliers import compute_outlier_scores
 from motr import add_motr_args, compute_size_factors
-from gene_boxplots import make_gene_boxplots
 
 
 def parse_args():
@@ -85,10 +84,6 @@ def main():
     alias_motr_df.to_csv(out_matrix_motr_alias, sep="\t")
     print("Saved alias-labeled targeted-panel MOTR matrix: " + out_matrix_motr_alias)
 
-    plot_outdir = os.path.dirname(args.outprefix)
-    make_gene_boxplots(cptm_df, plot_outdir, "CPTM (AMALGAM)", "_cptm")
-    make_gene_boxplots(motr_df, plot_outdir, "MOTR (AMALGAM)", "_motr")
-    print("Saved per-gene CPTM/MOTR boxplots to: " + plot_outdir)
 
     z_cptm_df, _ = compute_outlier_scores(
         cptm_df,

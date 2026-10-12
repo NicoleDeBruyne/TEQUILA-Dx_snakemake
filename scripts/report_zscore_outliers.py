@@ -7,9 +7,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from palette import darker
+
 _BOX_COLOR = "black"
-_POINT_COLOR = "#2c7fb8"
-_OUTLIER_COLOR = "#c0392b"
+_POINT_COLOR = "#7f7f7f"      # replaced by --color (the sample type's colour)
+_OUTLIER_COLOR = darker(_POINT_COLOR)
 
 
 def parse_args():
@@ -27,6 +29,8 @@ def parse_args():
         help="Outlier cutoff; a value counts if it is <= this threshold (default: -3.5).")
     parser.add_argument("--title", default=None,
         help="Prefix for plot titles (e.g. 'cohort1 panelA blood, MOTR'). Defaults to the input filename.")
+    parser.add_argument("--color", default=None,
+        help="Point colour (the sample type's colour); outliers are drawn in a darker shade of it.")
     parser.add_argument("--outprefix", required=True,
         help="Writes <outprefix>_by_sample.tsv, <outprefix>_by_gene.tsv, and "
              "<outprefix>_by_sample_boxplot.pdf, <outprefix>_by_gene_boxplot.pdf.")
@@ -64,7 +68,7 @@ def _plot_boxplot_with_threshold(data, threshold, ylabel, count_label, title, ou
                         s=10, alpha=0.7, zorder=3, linewidths=0)
         if is_below.any():
             ax1.scatter(i + jitter[is_below], vals[is_below], color=_OUTLIER_COLOR,
-                        s=22, zorder=4, linewidths=0)
+                        s=30, zorder=4, linewidths=0)
 
     ax1.axhline(threshold, linestyle=":", color=_BOX_COLOR, linewidth=1.2, zorder=2)
     ax1.annotate(f"z = {threshold}", xy=(1, threshold), xycoords=("axes fraction", "data"),
@@ -86,7 +90,11 @@ def _plot_boxplot_with_threshold(data, threshold, ylabel, count_label, title, ou
 
 
 def main():
+    global _POINT_COLOR, _OUTLIER_COLOR
     args = parse_args()
+    if args.color:
+        _POINT_COLOR = args.color.strip("'\"")
+        _OUTLIER_COLOR = darker(_POINT_COLOR)
     threshold = args.threshold
     label = args.title or args.zscore_matrix
 

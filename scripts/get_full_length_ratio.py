@@ -9,6 +9,10 @@ import matplotlib.pyplot as plt
 import matplotlib.colors
 import matplotlib.patches
 import seaborn as sns
+from palette import RED_WHITE_BLUE
+
+_FLR_CMAP = RED_WHITE_BLUE.copy()
+_FLR_CMAP.set_bad("#bbbbbb")      # missing values grey (white is the 0.5 midpoint)
 from matplotlib import rcParams
 
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
@@ -97,7 +101,7 @@ def _draw_heatmap_panel(fig, x0, y_top, flr_df, gene_median_reads, sample_total_
     ax_box  = fig.add_axes(rect(x0, y_box_bottom, heat_w, box_h), sharex=ax_heat)
     ax_sbar = fig.add_axes(rect(x0, y_bar_bottom, heat_w, bar_h), sharex=ax_heat)
 
-    sns.heatmap(ordered, ax=ax_heat, cmap="viridis", vmin=0, vmax=1,
+    sns.heatmap(ordered, ax=ax_heat, cmap=_FLR_CMAP, vmin=0, vmax=1,
                 cbar=True, cbar_ax=ax_cbar, cbar_kws={"label": "avgFLR"},
                 linewidths=0, yticklabels=show_gene_labels)
     if show_gene_labels:

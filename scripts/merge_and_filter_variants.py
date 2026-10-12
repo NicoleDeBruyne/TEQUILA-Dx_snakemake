@@ -64,19 +64,19 @@ def plot_variant_counts(df, plot_variant_type, outfile, title):
         'Clair3-RNA': '#ea9a9c',
         'Deepvariant': '#f8c9c6',
 
-        'longcallR,NanoTS': '#002b58',
-        'longcallR,Clair3-RNA': '#0068a9',
-        'longcallR,Deepvariant': '#4c8fca',
-        'NanoTS,Clair3-RNA': '#91c4e9',
-        'NanoTS,Deepvariant': '#a9cce6',
-        'Clair3-RNA,Deepvariant': '#c1e3fa',
+        'longcallR,NanoTS': '#005d6e',
+        'longcallR,Clair3-RNA': '#009099',
+        'longcallR,Deepvariant': '#42b4b5',
+        'NanoTS,Clair3-RNA': '#8cccce',
+        'NanoTS,Deepvariant': '#a9d8dc',
+        'Clair3-RNA,Deepvariant': '#c5e3ea',
 
-        'longcallR,NanoTS,Clair3-RNA': '#3d892e',
-        'longcallR,NanoTS,Deepvariant': '#57aa3e',
-        'longcallR,Clair3-RNA,Deepvariant': '#95c36e',
-        'NanoTS,Clair3-RNA,Deepvariant': '#d3e4be',
+        'longcallR,NanoTS,Clair3-RNA': '#9d4588',
+        'longcallR,NanoTS,Deepvariant': '#b271ab',
+        'longcallR,Clair3-RNA,Deepvariant': '#cca0ca',
+        'NanoTS,Clair3-RNA,Deepvariant': '#e8d1e6',
 
-        'longcallR,NanoTS,Clair3-RNA,Deepvariant': '#f48f3e'
+        'longcallR,NanoTS,Clair3-RNA,Deepvariant': '#c69528'
     }
 
     num_rows = len(plot_variant_type)

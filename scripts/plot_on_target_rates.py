@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib import rcParams
 rcParams['pdf.fonttype'] = 42
 
+from palette import SELECT_ORDER, default_type_colors
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve
 
 
@@ -17,6 +18,8 @@ def parse_args():
         help="Every sample's {sample}_on_target.tsv, in the desired plot order")
     parser.add_argument("--groups", nargs="*", default=[],
         help="Optional per-sample group/sample_type label (same order as --infiles) for bar coloring")
+    parser.add_argument("--colors", nargs="*", default=[],
+        help="Optional per-sample hex colour (same order as --infiles), from the sample type")
     parser.add_argument("--outprefix", required=True,
         help="Prefix for output files: <outprefix>_on_target_rates.tsv, _mapping_rates.pdf, _on_target_rates.pdf")
     parser.add_argument('--title')
@@ -32,10 +35,10 @@ def rate_label(r):
     return '100%' if r == 100 else '>99%' if r >= 99 else f"{r:.0f}%" if r >= 10 else f"{r:.1f}%" if r >= 0.1 else '<0.1%'
 
 
-def plot_mapping_figure(df, outprefix, width, title):
+def plot_mapping_figure(df, bar_colors, outprefix, width, title):
     fig, ax = plt.subplots(2, figsize=(width, 10))
 
-    ax[0].bar(range(len(df)), df['mapping_rate'], color="#FFD676")
+    ax[0].bar(range(len(df)), df['mapping_rate'], color=bar_colors)
     ax[0].bar(range(len(df)), 100 - df['mapping_rate'], bottom=df['mapping_rate'], color='#C4C4C4')
     for i, r in df.iterrows():
         ax[0].text(i, r['mapping_rate'] + 1, rate_label(r['mapping_rate']), ha='center', fontsize=8)
@@ -45,7 +48,7 @@ def plot_mapping_figure(df, outprefix, width, title):
     ax[0].set_xticks(range(len(df)))
     ax[0].set_xticklabels([])
 
-    ax[1].bar(range(len(df)), df['mapped'] / 1e6, color="#FFD676")
+    ax[1].bar(range(len(df)), df['mapped'] / 1e6, color=bar_colors)
     ax[1].bar(range(len(df)), df['unmapped'] / 1e6, bottom=df['mapped'] / 1e6, color='#C4C4C4')
     offset = df['total'].max() * 0.02
     for i, r in df.iterrows():
@@ -115,20 +118,18 @@ def main():
     df.to_csv(out_tsv, sep="\t", index=False)
     print(f"Saved TSV: {out_tsv}")
 
-    unique_groups = list(df['group'].dropna().unique())
-    colors = [
-        '#6997B9',
-        '#BB6A68',
-        '#70A677',
-        '#D48653',
-        '#A783A3',
-    ]
-    color_dict = {g: colors[i % len(colors)] for i, g in enumerate(unique_groups)} if unique_groups else {}
-    bar_colors = df['group'].map(color_dict).fillna('#6997B9')
+    # bars in each sample's sample-type colour (--colors); without it, one colour per group in
+    # the palette's select order
+    if args.colors:
+        color_by_sample = dict(zip([d['sample'].iloc[0] for d in per_sample_dfs], [c.strip("'\"") for c in args.colors]))
+        bar_colors = df['sample'].map(color_by_sample).fillna(SELECT_ORDER[0])
+    else:
+        color_dict = default_type_colors(list(df['group'].dropna().unique()))
+        bar_colors = df['group'].map(color_dict).fillna(SELECT_ORDER[0])
 
     width = max(10, 0.22 * len(df))
 
-    plot_mapping_figure(df, args.outprefix, width, args.title)
+    plot_mapping_figure(df, bar_colors, args.outprefix, width, args.title)
     plot_ontarget_figure(df, bar_colors, args.outprefix, "", width, args.title)
 
     alias_map = parse_alias_map(args.alias_map)
