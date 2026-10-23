@@ -1,5 +1,3 @@
-
-# Per-sample allele-specific expression: binomial test on hap1 vs hap2 read counts per gene
 rule _4A_detect_ase_outliers:
     input:
         infile = "{outdir}/phased_reads/{sample}_phasing_summary.tsv",
@@ -12,13 +10,13 @@ rule _4A_detect_ase_outliers:
         minor_hap_freq_thr = config["minor_haplotype_frequency_threshold"],
         phasing_thr    = config["ase_phasing_threshold"],
         outprefix      = "{outdir}/ase_analysis/{sample}_binomial",
-        script         = workflow.basedir + "/scripts/detect_ase_outliers.py",
+        script         = workflow.basedir + "/scripts/_4A_detect_ase_outliers.py",
     threads: 1
     resources:
         mem_mb     = lambda wc, attempt: attempt * 4 * 1024,
         runtime    = config["time"],
     log:
-        "{outdir}/../logs/{sample}_ase_outliers.log"
+        "{outdir}/../logs/{sample}_4A_detect_ase_outliers.log"
     shell:
         """
         python -u {params.script} \\

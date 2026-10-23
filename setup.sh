@@ -50,8 +50,7 @@ echo "  Progress: tail -f $CONDA_ENV_LOG"
         if ! "$CONDA_BIN" env create "$@"; then
             cat <<'EOF'
 
-  Environment creation failed. If the error above mentions "SOLVER_RULE_STRICT_REPO_PRIORITY" or reports unrelated packages
-  (htslib/pysam/snakemake/...) as mutually unsatisfiable, this is a known libmamba-solver bug under strict channel priority.
+  Environment creation failed.
 EOF
             return 1
         fi
@@ -128,6 +127,45 @@ log "NanoTS"
 ) || error "NanoTS step failed"
 
 ##############################################################################
+log "Container images (NanoTS, Clair3-RNA, DeepVariant)"
+##############################################################################
+# Pulled once to local .sif files so pipeline jobs never need network access to a container registry.
+CONTAINER_LOG="$RESOURCES_DIR/.setup_logs/containers.log"
+echo "  Progress: tail -f $CONTAINER_LOG"
+(
+    CONTAINER_DIR="$RESOURCES_DIR/containers"
+    mkdir -p "$CONTAINER_DIR"
+    if command -v apptainer >/dev/null 2>&1; then
+        SING=apptainer
+    elif command -v singularity >/dev/null 2>&1; then
+        SING=singularity
+    else
+        echo "  ERROR: neither apptainer nor singularity is on PATH -- load the module and rerun."
+        exit 1
+    fi
+    echo "  Using '$SING'."
+    pull_image() {
+        local uri="$1" target="$2"
+        if [ -s "$target" ]; then
+            skip "$target"
+            return
+        fi
+        echo "  Pulling $uri -> $target"
+        rm -f "$target.partial"
+        case "$uri" in
+            library://*) "$SING" pull --library https://library.sylabs.io "$target.partial" "$uri" ;;
+            *)           "$SING" pull "$target.partial" "$uri" ;;
+        esac
+        mv "$target.partial" "$target"
+    }
+    status=0
+    pull_image "library://zelinliu/nanots/nanots:1.0.0" "$CONTAINER_DIR/nanots_1.0.0.sif" || status=1
+    pull_image "docker://hkubal/clair3-rna:v0.2.2" "$CONTAINER_DIR/clair3-rna_v0.2.2.sif" || status=1
+    pull_image "docker://google/deepvariant:1.6.1" "$CONTAINER_DIR/deepvariant_1.6.1.sif" || status=1
+    exit $status
+) > "$CONTAINER_LOG" 2>&1 || error "Container image step failed (see $CONTAINER_LOG; run setup.sh on a node with internet access)"
+
+##############################################################################
 log "longcallR v1.12.0"
 ##############################################################################
 (
@@ -140,9 +178,6 @@ log "longcallR v1.12.0"
   MISSING: $LONGCALLR_BIN
 
   longcallR should have been installed via bioconda as part of the main conda_env build.
-  If conda_env built successfully but this binary still isn't here, check
-  "$CONDA_ENV_DIR/bin/" directly for what conda actually installed it as and
-  update config.yaml's longcallr_bin to match if the name differs from "longcallR".
 EOF
     fi
 ) || error "longcallR check failed"

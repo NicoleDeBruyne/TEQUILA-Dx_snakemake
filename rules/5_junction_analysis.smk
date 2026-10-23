@@ -1,6 +1,3 @@
-
-# Per-sample splice junction usage vs. GTEx: count junctions, fit GTEx as a reference distribution,
-# then test each sample's junctions against it and flag outliers
 rule _5A_get_junction_counts:
     input:
         mapping = "{outdir}/phased_reads/{sample}_gene_bam_mapping_file.tsv",
@@ -9,14 +6,14 @@ rule _5A_get_junction_counts:
         jxn_counts = "{outdir}/junction_analysis/junction_counts/{sample}_splice_junction_counts.tsv",
         jxn_matrix = "{outdir}/junction_analysis/junction_counts/{sample}_junction_count_matrix.tsv",
     params:
-        script_jxn   = workflow.basedir + "/scripts/get_splice_junction_counts_by_region.py",
-        script_matrix= workflow.basedir + "/scripts/make_junction_count_matrix.py",
+        script_jxn   = workflow.basedir + "/scripts/_5A_get_junction_counts.py",
+        script_matrix= workflow.basedir + "/scripts/_5A_make_junction_count_matrix.py",
     threads: 1
     resources:
         mem_mb     = lambda wc, attempt: max(4096, attempt * _bam_size_gb(wc) * 2 * 1024),
         runtime    = config["time"],
     log:
-        "{outdir}/../logs/{sample}_junction_counts.log"
+        "{outdir}/../logs/{sample}_5A_get_junction_counts.log"
     shell:
         """
         mkdir -p $(dirname {output.jxn_counts})
@@ -31,7 +28,6 @@ rule _5A_get_junction_counts:
         """
 
 
-# GTEx junction-count file for a tissue, used as the reference cohort for outlier calling
 def _gtex_file(tissue):
     return (str(config['gtex_data_dir']) + '/gtex_' + str(tissue) + '_jxn_counts.txt')
 
@@ -46,7 +42,6 @@ def _gtex_fit_mem(wc, threads, attempt):
     return max(4096, attempt * threads * (6 if wc.tissue == "brain" else 2) * 1024)
 
 
-# Fit a beta distribution to each junction's PSI-approx values across GTEx samples (per tissue)
 rule _5B1_fit_gtex_beta_distributions:
     input:
         gtex_file = lambda wc: _gtex_file(wc.tissue),
@@ -57,13 +52,13 @@ rule _5B1_fit_gtex_beta_distributions:
         gtex_cov  = config["gtex_coverage_threshold"],
         gtex_n    = config["gtex_n_threshold"],
         psi_tol   = config["psi_rescale_factor"],
-        script    = workflow.basedir + "/scripts/fit_gtex_beta_distributions.py",
+        script    = workflow.basedir + "/scripts/_5B1_fit_gtex_beta_distributions.py",
     threads: lambda wc: int(config.get("fit_gtex_beta_distributions_threads", config["threads"]))
     resources:
         mem_mb    = _gtex_fit_mem,
         runtime   = config["time"],
     log:
-        str(config['output_dir']) + "/gtex_beta_distributions/logs/gtex_{tissue}_fit_beta_distributions.log"
+        str(config['output_dir']) + "/gtex_beta_distributions/logs/{tissue}_5B1_fit_gtex_beta_distributions.log"
     shell:
         """
         mkdir -p $(dirname {output.beta_fits})
@@ -79,7 +74,6 @@ rule _5B1_fit_gtex_beta_distributions:
         """
 
 
-# Same as _5B1, but for junctions this sample has that aren't already in the GTEx reference
 rule _5B2_fit_novel_junction_beta_distributions:
     input:
         jxn_counts = "{outdir}/junction_analysis/junction_counts/{sample}_splice_junction_counts.tsv",
@@ -91,13 +85,13 @@ rule _5B2_fit_novel_junction_beta_distributions:
         gtex_cov  = config["gtex_coverage_threshold"],
         gtex_n    = config["gtex_n_threshold"],
         psi_tol   = config["psi_rescale_factor"],
-        script    = workflow.basedir + "/scripts/fit_novel_junction_beta_distributions.py",
+        script    = workflow.basedir + "/scripts/_5B2_fit_novel_junction_beta_distributions.py",
     threads: lambda wc: _rule_threads(wc, "fit_novel_junction_beta_distributions")
     resources:
         mem_mb    = _gtex_fit_mem,
         runtime   = config["time"],
     log:
-        "{outdir}/../logs/{sample}_{tissue}_fit_novel_junction_beta_distributions.log"
+        "{outdir}/../logs/{sample}_{tissue}_5B2_fit_novel_junction_beta_distributions.log"
     shell:
         """
         mkdir -p $(dirname {output.novel_fits})
@@ -113,7 +107,6 @@ rule _5B2_fit_novel_junction_beta_distributions:
         """
 
 
-# Test this sample's junction usage against the fitted GTEx beta distribution
 rule _5C_perform_binomial_tests:
     input:
         jxn_counts = "{outdir}/junction_analysis/junction_counts/{sample}_splice_junction_counts.tsv",
@@ -127,13 +120,14 @@ rule _5C_perform_binomial_tests:
         gtex_n     = config["gtex_n_threshold"],
         psi_tol    = config["psi_rescale_factor"],
         phasing_thr= config["jxn_phasing_threshold"],
-        script     = workflow.basedir + "/scripts/perform_splice_junction_beta_binomial_tests.py",
+        min_reads  = config["jxn_min_reads"],
+        script     = workflow.basedir + "/scripts/_5C_perform_binomial_tests.py",
     threads: lambda wc: _rule_threads(wc, "perform_binomial_tests")
     resources:
         mem_mb     = lambda wc, threads, attempt: max(4096, attempt * threads * 1024),
         runtime    = config["time"],
     log:
-        "{outdir}/../logs/{sample}_{tissue}_betabinom.log"
+        "{outdir}/../logs/{sample}_{tissue}_5C_perform_binomial_tests.log"
     shell:
         """
         mkdir -p $(dirname {output.all_jxns})
@@ -146,13 +140,13 @@ rule _5C_perform_binomial_tests:
             --gtex-n-threshold          {params.gtex_n} \\
             --PSI-rescale-factor        {params.psi_tol} \\
             --phasing-threshold         {params.phasing_thr} \\
+            --min-jxn-reads             {params.min_reads} \\
             --annotation-file           {params.annotation} \\
             --threads                   {threads} \\
         2>&1 | tee {log}
         """
 
 
-# Apply padj/delta-PSI thresholds to flag this sample's outlier junctions
 rule _5D_identify_junction_outliers:
     input:
         all_jxns = "{outdir}/junction_analysis/gtex_{tissue}/{sample}_gtex_{tissue}_all_junctions.tsv",
@@ -161,13 +155,13 @@ rule _5D_identify_junction_outliers:
     params:
         padj_thr   = config["psi_padj_threshold"],
         dpsi_thr   = config["delta_psi_threshold"],
-        script     = workflow.basedir + "/scripts/identify_splice_junction_outliers.py",
+        script     = workflow.basedir + "/scripts/_5D_identify_junction_outliers.py",
     threads: 1
     resources:
         mem_mb     = lambda wc, attempt: attempt * 4 * 1024,
         runtime    = config["time"],
     log:
-        "{outdir}/../logs/{sample}_{tissue}_jxn_outliers.log"
+        "{outdir}/../logs/{sample}_{tissue}_5D_identify_junction_outliers.log"
     shell:
         """
         python -u {params.script} \\

@@ -1,5 +1,3 @@
-
-# Merge the four callers' VCFs into one annotated table, then filter to reportable variants
 def _gnomad_vcf_list(base, mito_vcf):
     chroms = config["gnomad_chroms"]
     vcfs   = [(str(base) + '/gnomad.genomes.v4.1.sites.' + str(c) + '.vcf.bgz') for c in chroms]
@@ -15,6 +13,29 @@ def _cadd_clnsig_args(wc):
 def _spliceai_clnsig_args(wc):
     return " ".join(('"' + str(s) + '"') for s in config["spliceai_clnsig_filter"])
 
+def _has_wgs(wc):
+    return bool(SAMPLES[wc.sample].get("wgs_vcf"))
+
+def _compile_vcfs(wc):
+    if _has_wgs(wc):
+        return [str(wc.outdir) + '/variant_calling/wgs/' + str(wc.sample) + '_wgs_phased.vcf.gz']
+    return [
+        str(wc.outdir) + '/variant_calling/longcallR/' + str(wc.sample) + '_longcallR_norm.vcf.gz',
+        str(wc.outdir) + '/variant_calling/nanoTS/' + str(wc.sample) + '_nanoTS_norm.vcf.gz',
+        str(wc.outdir) + '/variant_calling/clair3_rna/' + str(wc.sample) + '_clair3_rna_norm.vcf.gz',
+        str(wc.outdir) + '/variant_calling/deepvariant/' + str(wc.sample) + '_deepvariant_norm.vcf.gz',
+    ]
+
+def _compile_vcf_names(wc):
+    callers = ["wgs"] if _has_wgs(wc) else ["longcallR", "nanoTS", "clair3_rna", "deepvariant"]
+    return " ".join(str(wc.sample) + '_' + c for c in callers)
+
+def _compile_bed_padding(wc):
+    return config.get("wgs_panel_padding", 10000) if _has_wgs(wc) else 0
+
+def _compile_vaf_flag(wc):
+    return "--VAF-from-AD" if _has_wgs(wc) else ""
+
 def _final_dp_flag(wc):
     v = config.get("final_dp_threshold", "")
     return ('--final-DP-threshold ' + str(v)) if str(v).strip() != "" else ""
@@ -24,19 +45,18 @@ def _final_af_flag(wc):
     return ('--final-AF-threshold ' + str(v)) if str(v).strip() != "" else ""
 
 
-# Merge the 4 callers' calls per sample and annotate with gnomAD/ClinVar/ANNOVAR/CADD/SpliceAI
 rule _2A_compile_variants:
     input:
-        longcallr  = "{outdir}/variant_calling/longcallR/{sample}_longcallR_norm.vcf.gz",
-        nanots     = "{outdir}/variant_calling/nanoTS/{sample}_nanoTS_norm.vcf.gz",
-        clair3     = "{outdir}/variant_calling/clair3_rna/{sample}_clair3_rna_norm.vcf.gz",
-        deepvar    = "{outdir}/variant_calling/deepvariant/{sample}_deepvariant_norm.vcf.gz",
+        vcfs       = _compile_vcfs,
         bed        = lambda wc: SAMPLES[wc.sample]["bed"],
     output:
         tsv          = "{outdir}/variant_calling/compiled_variants/{sample}_compiled_variants.tsv",
     params:
         genome      = config["genome"],
         annotation  = config["annotation"],
+        vcf_names   = _compile_vcf_names,
+        bed_padding = _compile_bed_padding,
+        vaf_flag    = _compile_vaf_flag,
         gnomad_vcf           = _gnomad_vcf_list(_resolved_gnomad_base(), _resolved_gnomad_mito_vcf()),
         gnomad_vcf_fallback  = _gnomad_vcf_list(_REMOTE_GNOMAD_BASE, _REMOTE_GNOMAD_MITO_VCF),
         clinvar_vcf          = _resolved_clinvar_vcf(),
@@ -56,32 +76,26 @@ rule _2A_compile_variants:
         spliceai_gnomad_af = config["spliceai_gnomad_af_threshold"],
         spliceai_clnsig    = _spliceai_clnsig_args,
         outprefix   = "{outdir}/variant_calling/compiled_variants/{sample}",
-        script      = workflow.basedir + "/scripts/compile_variants.py",
+        script      = workflow.basedir + "/scripts/_2A_compile_variants.py",
         conda_env_compile_variants = config["conda_env_compile_variants"],
     threads: lambda wc: _rule_threads(wc, "compile_variants")
     resources:
         mem_mb     = lambda wc, threads, attempt: max(4096, attempt * threads * 16 * 1024),
         runtime    = config["time"],
     log:
-        "{outdir}/../logs/{sample}_compile_variants.log"
+        "{outdir}/../logs/{sample}_2A_compile_variants.log"
     shell:
         """
         mkdir -p $(dirname {params.outprefix})
         export PATH="{params.conda_env_compile_variants}/bin:$PATH"
         python -u {params.script} \\
-            --vcf-files \\
-                {input.longcallr} \\
-                {input.nanots} \\
-                {input.clair3} \\
-                {input.deepvar} \\
-            --vcf-file-names \\
-                {wildcards.sample}_longcallR \\
-                {wildcards.sample}_nanoTS \\
-                {wildcards.sample}_clair3_rna \\
-                {wildcards.sample}_deepvariant \\
+            --vcf-files {input.vcfs} \\
+            --vcf-file-names {params.vcf_names} \\
             --outprefix {params.outprefix} \\
             --sample-name {wildcards.sample} \\
             --bed {input.bed} \\
+            --bed-padding {params.bed_padding} \\
+            {params.vaf_flag} \\
             --genome {params.genome} \\
             --gtf {params.annotation} \\
             --gnomad-vcf {params.gnomad_vcf} \\
@@ -108,7 +122,6 @@ rule _2A_compile_variants:
         """
 
 
-# Apply the final gnomAD AF/CLNSIG/CADD/SpliceAI/DP/AF thresholds to the compiled table
 rule _2B_filter_variants:
     input:
         tsv = "{outdir}/variant_calling/compiled_variants/{sample}_compiled_variants.tsv",
@@ -121,14 +134,14 @@ rule _2B_filter_variants:
         spliceai_thr = config["spliceai_threshold"],
         final_dp_flag = _final_dp_flag,
         final_af_flag = _final_af_flag,
-        script       = workflow.basedir + "/scripts/filter_variants.py",
+        script       = workflow.basedir + "/scripts/_2B_filter_variants.py",
         conda_env_compile_variants = config["conda_env_compile_variants"],
     threads: 1
     resources:
         mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
         runtime = config["time"],
     log:
-        "{outdir}/../logs/{sample}_filter_variants.log"
+        "{outdir}/../logs/{sample}_2B_filter_variants.log"
     shell:
         """
         export PATH="{params.conda_env_compile_variants}/bin:$PATH"

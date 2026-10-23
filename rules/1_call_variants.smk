@@ -1,12 +1,9 @@
-
-# Call variants on each sample's BAM with four independent callers, run in parallel
 def _bam(wc):
     return SAMPLES[wc.sample]["bam"]
 
 def _outdir(wc):
     return SAMPLES[wc.sample]["outdir"]
 
-# Used to scale each caller's memory request to the size of the input BAM
 def _bam_size_gb(wc):
     import os
     bam = SAMPLES[wc.sample]["bam"]
@@ -15,7 +12,6 @@ def _bam_size_gb(wc):
     except FileNotFoundError:
         return 10
 
-# Directories to mount into a caller's container (its own input/output/resource paths)
 def _bind_dirs(files=(), dirs=()):
     import os
     out = [os.path.dirname(os.path.abspath(f)) for f in files]
@@ -23,7 +19,6 @@ def _bind_dirs(files=(), dirs=()):
     return ",".join(dict.fromkeys(d for d in out if d))
 
 
-# nanoTS: nanopore-tuned variant caller (Singularity container)
 rule _1A_nanots:
     input:
         bam = _bam,
@@ -45,7 +40,7 @@ rule _1A_nanots:
         mem_mb  = lambda wc, threads, attempt: max(4096, attempt * threads * _bam_size_gb(wc) * 1 * 1024),
         runtime = config["time"],
     log:
-        "{outdir}/../logs/{sample}_nanoTS.log"
+        "{outdir}/../logs/{sample}_1A_nanots.log"
     shell:
         """
         mkdir -p {params.work_dir}
@@ -69,7 +64,6 @@ rule _1A_nanots:
         """
 
 
-# longcallR: general-purpose long-read variant caller, run natively (no container)
 rule _1B_longcallr:
     input:
         bam = _bam,
@@ -85,7 +79,7 @@ rule _1B_longcallr:
         mem_mb  = lambda wc, threads, attempt: max(4096, int(attempt * threads * _bam_size_gb(wc) * 2.5 * 1024)),
         runtime = config["time"],
     log:
-        "{outdir}/../logs/{sample}_longcallR.log"
+        "{outdir}/../logs/{sample}_1B_longcallr.log"
     shell:
         """
         mkdir -p {params.work_dir}
@@ -104,7 +98,6 @@ rule _1B_longcallr:
         """
 
 
-# Clair3-RNA: variant caller, phases reads with whatshap first (Docker container)
 rule _1C_clair3_rna:
     input:
         bam = _bam,
@@ -124,7 +117,7 @@ rule _1C_clair3_rna:
         mem_mb  = lambda wc, threads, attempt: max(4096, attempt * threads * _bam_size_gb(wc) * 1 * 1024),
         runtime = config["time"],
     log:
-        "{outdir}/../logs/{sample}_clair3_rna.log"
+        "{outdir}/../logs/{sample}_1C_clair3_rna.log"
     shell:
         """
         mkdir -p {params.work_dir}
@@ -149,7 +142,6 @@ rule _1C_clair3_rna:
         """
 
 
-# DeepVariant: Google's variant caller (Docker container)
 rule _1D_deepvariant:
     input:
         bam = _bam,
@@ -168,7 +160,7 @@ rule _1D_deepvariant:
         mem_mb  = lambda wc, threads, attempt: max(8192, attempt * threads * _bam_size_gb(wc) * 1 * 1024),
         runtime = config["time"],
     log:
-        "{outdir}/../logs/{sample}_deepvariant.log"
+        "{outdir}/../logs/{sample}_1D_deepvariant.log"
     shell:
         """
         mkdir -p {params.work_dir}
@@ -189,4 +181,61 @@ rule _1D_deepvariant:
         rm -f {params.work_dir}/make_examples.tfrecord-*.gz
         rm -f {params.work_dir}/make_examples.tfrecord-*.gz.example_info.json
         rm -f {params.work_dir}/call_variants_output-*.tfrecord.gz
+        """
+
+
+rule _1E_prepare_wgs_vcf:
+    input:
+        vcf = lambda wc: SAMPLES[wc.sample]["wgs_vcf"],
+        bed = lambda wc: SAMPLES[wc.sample]["bed"],
+    output:
+        norm_vcf  = "{outdir}/variant_calling/wgs/{sample}_wgs_norm.vcf.gz",
+        norm_tbi  = "{outdir}/variant_calling/wgs/{sample}_wgs_norm.vcf.gz.tbi",
+        panel_vcf = "{outdir}/variant_calling/wgs/{sample}_wgs_panel.vcf.gz",
+        panel_tbi = "{outdir}/variant_calling/wgs/{sample}_wgs_panel.vcf.gz.tbi",
+    params:
+        genome  = config["genome"],
+        padding = config.get("wgs_panel_padding", 10000),
+        script  = workflow.basedir + "/scripts/_1E_prepare_wgs_vcf.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
+        runtime = config["time"],
+    log:
+        "{outdir}/../logs/{sample}_1E_prepare_wgs_vcf.log"
+    shell:
+        """
+        python -u {params.script} \\
+            --vcf       {input.vcf} \\
+            --genome    {params.genome} \\
+            --bed       {input.bed} \\
+            --padding   {params.padding} \\
+            --norm-vcf  {output.norm_vcf} \\
+            --panel-vcf {output.panel_vcf} \\
+        2>&1 | tee {log}
+        """
+
+
+rule _1F_phase_wgs_variants:
+    input:
+        wgs_vcf    = "{outdir}/variant_calling/wgs/{sample}_wgs_panel.vcf.gz",
+        nanots_vcf = "{outdir}/variant_calling/nanoTS/{sample}_nanoTS_norm.vcf.gz",
+    output:
+        vcf_gz  = "{outdir}/variant_calling/wgs/{sample}_wgs_phased.vcf.gz",
+        vcf_tbi = "{outdir}/variant_calling/wgs/{sample}_wgs_phased.vcf.gz.tbi",
+    params:
+        script = workflow.basedir + "/scripts/_1F_phase_wgs_variants.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 4 * 1024,
+        runtime = config["time"],
+    log:
+        "{outdir}/../logs/{sample}_1F_phase_wgs_variants.log"
+    shell:
+        """
+        python -u {params.script} \\
+            --wgs-vcf    {input.wgs_vcf} \\
+            --nanoTS-vcf {input.nanots_vcf} \\
+            --outfile    {output.vcf_gz} \\
+        2>&1 | tee {log}
         """

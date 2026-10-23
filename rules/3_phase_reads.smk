@@ -1,11 +1,23 @@
+def _phase_vcf_inputs(wc):
+    if SAMPLES[wc.sample].get("wgs_vcf"):
+        return {"wgs": str(wc.outdir) + '/variant_calling/wgs/' + str(wc.sample) + '_wgs_phased.vcf.gz'}
+    return {
+        "nanots":  str(wc.outdir) + '/variant_calling/nanoTS/' + str(wc.sample) + '_nanoTS_norm.vcf.gz',
+        "clair3":  str(wc.outdir) + '/variant_calling/clair3_rna/' + str(wc.sample) + '_clair3_rna_norm.vcf.gz',
+        "deepvar": str(wc.outdir) + '/variant_calling/deepvariant/' + str(wc.sample) + '_deepvariant_norm.vcf.gz',
+    }
 
-# Assign reads to haplotypes per gene using trusted het variants, for use in ASE/junction analysis
+def _phase_vcf_args(wc, input):
+    if "wgs" in input.keys():
+        return "--wgs-vcf " + str(input.wgs)
+    return ("--nanoTS-vcf " + str(input.nanots) + " --clair3-vcf " + str(input.clair3)
+            + " --deepvariant-vcf " + str(input.deepvar))
+
+
 rule _3A_phase_reads:
     input:
+        unpack(_phase_vcf_inputs),
         bam     = lambda wc: SAMPLES[wc.sample]["bam"],
-        nanots  = "{outdir}/variant_calling/nanoTS/{sample}_nanoTS_norm.vcf.gz",
-        clair3  = "{outdir}/variant_calling/clair3_rna/{sample}_clair3_rna_norm.vcf.gz",
-        deepvar = "{outdir}/variant_calling/deepvariant/{sample}_deepvariant_norm.vcf.gz",
         bed     = lambda wc: SAMPLES[wc.sample]["bed"],
     output:
         ase_infile = "{outdir}/phased_reads/{sample}_phasing_summary.tsv",
@@ -18,22 +30,22 @@ rule _3A_phase_reads:
         phasing_thr         = config["phasing_threshold"],
         terminal_prop       = config["terminal_variant_proportion"],
         min_dist            = config["min_dist_from_read_end_variant_phasing"],
-        script              = workflow.basedir + "/scripts/phase_reads.py",
+        vcf_args            = _phase_vcf_args,
+        script              = workflow.basedir + "/scripts/_3A_phase_reads.py",
     threads: lambda wc: _rule_threads(wc, "phase_reads")
     resources:
         mem_mb = lambda wc, threads, attempt: max(4096, int(attempt * threads * 2 * 1024)),
         runtime    = config["time"],
     log:
-        "{outdir}/../logs/{sample}_phase_reads.log"
+        "{outdir}/../logs/{sample}_3A_phase_reads.log"
     shell:
         """
-        mkdir -p $(dirname {output.ase_infile})
+        mkdir -p {params.phased_dir}
+        find {params.phased_dir} -mindepth 1 -maxdepth 1 -type d -exec rm -rf {{}} +
         python -u {params.script} \\
             --bam        {input.bam} \\
             --bed        {input.bed} \\
-            --nanoTS-vcf       {input.nanots} \\
-            --clair3-vcf       {input.clair3} \\
-            --deepvariant-vcf  {input.deepvar} \\
+            {params.vcf_args} \\
             --min-dp     {params.min_dp} \\
             --min-af     {params.min_af} \\
             --genome     {params.genome} \\

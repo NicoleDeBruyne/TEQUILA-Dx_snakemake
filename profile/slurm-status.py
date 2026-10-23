@@ -1,43 +1,64 @@
 #!/usr/bin/env python3
-"""
-profile/slurm-status.py
-Snakemake's --cluster-status script. Called periodically as:
-    slurm-status.py <jobid>
-
-Uses `sacct` (SLURM accounting)
-"""
-
+import os
+import re
 import subprocess
 import sys
 
-RUNNING_STATES = {"PENDING", "RUNNING", "SUSPENDED", "COMPLETING", "CONFIGURING"}
+RUNNING_STATES = {
+    "PENDING", "RUNNING", "SUSPENDED", "COMPLETING", "CONFIGURING",
+    "REQUEUED", "REQUEUE_FED", "REQUEUE_HOLD", "RESIZING", "SIGNALING",
+    "STAGE_OUT", "STOPPED", "RESV_DEL_HOLD",
+}
 SUCCESS_STATES = {"COMPLETED"}
 FAILED_STATES = {
-    "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL",
-    "OUT_OF_MEMORY", "BOOT_FAIL", "DEADLINE", "PREEMPTED",
+    "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY",
+    "BOOT_FAIL", "DEADLINE", "PREEMPTED", "REVOKED", "SPECIAL_EXIT",
 }
 
-def get_job_state(job_id):
-    """Query sacct for the job's current state. Returns the raw SLURM state
-    string (e.g. 'COMPLETED', 'RUNNING', 'FAILED')."""
-    cmd = [
-        "sacct",
-        "-j", job_id,
-        "--format=JobID,State",
-        "--noheader",
-        "--parsable2",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+EXIT_CODE_DIR = os.environ.get(
+    "SNAKEMAKE_SLURM_EXIT_CODE_DIR",
+    os.path.join(os.getcwd(), ".snakemake", "slurm_exit_codes"),
+)
 
-    if result.returncode != 0 or not result.stdout.strip():
-        return "RUNNING"
 
-    for line in result.stdout.strip().splitlines():
+def _run(cmd):
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def state_from_sacct(job_id):
+    out = _run(["sacct", "-j", job_id, "--format=JobID,State", "--noheader", "--parsable2"])
+    if not out:
+        return None
+    for line in out.strip().splitlines():
         parts = line.split("|")
-        if len(parts) >= 2 and parts[0] == job_id:
-            return parts[1].split()[0]
+        if len(parts) >= 2 and parts[0] == job_id and parts[1].strip():
+            return parts[1].split()[0].rstrip("+")
+    return None
 
-    return "RUNNING"
+
+def state_from_scontrol(job_id):
+    out = _run(["scontrol", "show", "job", "-o", job_id])
+    if not out:
+        return None
+    match = re.search(r"\bJobState=(\S+)", out)
+    return match.group(1) if match else None
+
+
+def state_from_exit_code_file(job_id):
+    path = os.path.join(EXIT_CODE_DIR, job_id)
+    try:
+        with open(path) as fh:
+            code = fh.read().strip()
+    except OSError:
+        return None
+    return "COMPLETED" if code == "0" else "FAILED"
+
 
 def main():
     if len(sys.argv) != 2:
@@ -45,15 +66,23 @@ def main():
         sys.exit(1)
 
     job_id = sys.argv[1]
-    state = get_job_state(job_id)
+    state = (
+        state_from_sacct(job_id)
+        or state_from_scontrol(job_id)
+        or state_from_exit_code_file(job_id)
+    )
+
+    if state is None:
+        print("running")
+        return
 
     if state in SUCCESS_STATES:
         print("success")
     elif state in FAILED_STATES:
         print("failed")
-    elif state in RUNNING_STATES:
-        print("running")
     else:
+        if state not in RUNNING_STATES:
+            sys.stderr.write(f"slurm-status.py: unrecognised state {state!r} for job {job_id}; treating as running\n")
         print("running")
 
 

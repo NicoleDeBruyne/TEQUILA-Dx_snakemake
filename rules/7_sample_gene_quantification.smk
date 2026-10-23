@@ -1,6 +1,3 @@
-
-# Per-sample gene expression, via 4 independent metrics (count, coverage, splice-site assignment, AMALGAM)
-# Number of distinct reads overlapping each panel gene's region
 rule _7A_quantify_gene_count:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -8,13 +5,13 @@ rule _7A_quantify_gene_count:
     output:
         tsv = "{outdir}/gene_quantification/{sample}_gene_count.tsv",
     params:
-        script = workflow.basedir + "/scripts/quantify_gene_expression_sample.py",
+        script = workflow.basedir + "/scripts/_7_quantify_gene_count_coverage.py",
     threads: 1
     resources:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
         runtime = config["time"],
     log:
-        "{outdir}/../logs/{sample}_gene_count.log"
+        "{outdir}/../logs/{sample}_7A_quantify_gene_count.log"
     shell:
         """
         mkdir -p $(dirname {output.tsv}) $(dirname {log})
@@ -28,7 +25,6 @@ rule _7A_quantify_gene_count:
         """
 
 
-# Max per-base pileup depth over each panel gene's region
 rule _7B_quantify_gene_coverage:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -36,13 +32,13 @@ rule _7B_quantify_gene_coverage:
     output:
         tsv = "{outdir}/gene_quantification/{sample}_gene_coverage.tsv",
     params:
-        script = workflow.basedir + "/scripts/quantify_gene_expression_sample.py",
+        script = workflow.basedir + "/scripts/_7_quantify_gene_count_coverage.py",
     threads: 1
     resources:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 4,
         runtime = config["time"],
     log:
-        "{outdir}/../logs/{sample}_gene_coverage.log"
+        "{outdir}/../logs/{sample}_7B_quantify_gene_coverage.log"
     shell:
         """
         mkdir -p $(dirname {output.tsv}) $(dirname {log})
@@ -56,7 +52,6 @@ rule _7B_quantify_gene_coverage:
         """
 
 
-# Assign each read to a gene by splice-site/exon overlap with the annotation (more precise than raw overlap)
 rule _7C_quantify_gene_by_assignment:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -66,13 +61,13 @@ rule _7C_quantify_gene_by_assignment:
         tsv   = "{outdir}/gene_quantification/{sample}_gene_assignment.tsv",
         stats = "{outdir}/gene_quantification/{sample}_read_outcomes.tsv",
     params:
-        script = workflow.basedir + "/scripts/quantify_gene_by_assignment_sample.py",
+        script = workflow.basedir + "/scripts/_7C_quantify_gene_by_assignment.py",
     threads: 1
     resources:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
-        "{outdir}/../logs/{sample}_gene_assignment.log"
+        "{outdir}/../logs/{sample}_7C_quantify_gene_by_assignment.log"
     shell:
         """
         mkdir -p $(dirname {output.tsv}) $(dirname {log})
@@ -87,7 +82,6 @@ rule _7C_quantify_gene_by_assignment:
         """
 
 
-# Assemble transcripts with StringTie for AMALGAM-based gene quantification
 rule _7D_amalgam_stringtie:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -100,7 +94,7 @@ rule _7D_amalgam_stringtie:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
-        "{outdir}/../logs/{sample}_amalgam_stringtie.log"
+        "{outdir}/../logs/{sample}_7D_amalgam_stringtie.log"
     shell:
         """
         mkdir -p $(dirname {output.gtf}) $(dirname {log})

@@ -14,16 +14,18 @@ shell.prefix("set -euo pipefail;")
 with open(config["run"]) as fh:
     run_cfg = yaml.safe_load(fh)
 
+# Load sample names
 SAMPLES = run_cfg["samples"]
 
+# Set output directory keys
 for _key, _val in run_cfg.items():
     if _key in ("samples", "output_dir"):
         continue
     config[_key] = _val
 
+# Set top-level output directory
 if not config.get("output_dir"):
     config["output_dir"] = run_cfg.get("output_dir", "")
-
 if not config.get("output_dir"):
     raise ValueError(
         "output_dir must be set, either via --config output_dir=<path> or as a "
@@ -31,7 +33,7 @@ if not config.get("output_dir"):
         "for the pipeline to know where to write its output layout."
     )
 
-# Default each sample's own output directory if it wasn't set explicitly.
+# Default each sample's output directory if it wasn't set explicitly.
 for _sample, _entry in SAMPLES.items():
     if not _entry.get("outdir"):
         _entry["outdir"] = config["output_dir"] + "/samples/" + _sample + "/output"
@@ -44,13 +46,14 @@ _BUNDLED_PATH_KEYS = [
     "cadd_data_dir", "cadd_script", "cadd_local_prescored_snv", "cadd_local_prescored_indel",
     "gnomad_mito_vcf", "longcallr_bin",
     "nanots_model_unphased", "nanots_model_phased", "gtex_data_dir", "omim_file",
-    "spliceai_prescored_snv_vcf", "spliceai_prescored_indel_vcf",
+    "nanots_image", "clair3_rna_image", "deepvariant_image",
+    "spliceai_prescored_snv_vcf", "spliceai_prescored_indel_vcf", "hpo_obo", "softclip_alu_annotation",
 ]
 _URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
+# Set remote sentinels for gnomAD, ClinVar, etc. if necessary
 def _is_remote_sentinel(value):
     return isinstance(value, str) and value.strip().lower() == "remote"
-
 for _key in _BUNDLED_PATH_KEYS:
     _val = config.get(_key)
     if _val and not os.path.isabs(_val) and not _URL_RE.match(_val) and not _is_remote_sentinel(_val):
@@ -187,10 +190,80 @@ def _cja_thr_flag(group_id):
     d = config.get("cohort_jxn_z_delta_threshold", 0.1)
     return "--z-thresholds " + str(z) + ":" + str(d)
 
+def cja_enabled(group_id):
+    return flag("cohort_junction_analysis") and len(GROUPS[group_id]) >= config.get("cohort_jxn_zscore_n_threshold", 10)
+
 def _cja_n_threshold(group_id):
     if _cja_method_for_group(group_id) == "beta_binomial":
         return config.get("cohort_jxn_beta_n_threshold", 30)
     return config.get("cohort_jxn_zscore_n_threshold", 10)
+
+# --- Cohort transcript analysis settings ---------------
+# Runs only for groups with at least cohort_jxn_beta_min_samples (default 30) samples, using beta-binomial/Dirichlet-multinomial tests.
+
+def _ctx_dir(cohort_id, bed_id, sample_type):
+    return config["output_dir"] + "/" + str(cohort_id) + "/" + str(bed_id) + "/output/sample_types/" + str(sample_type) + "/output/cohort_transcript_analysis"
+
+
+def _ctx_method(wc):
+    return _cja_method_for_group(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))
+
+
+def _ctx_thr_label(group_id):
+    tvd = str(config.get("cohort_tx_tvd_threshold", 0.1))
+    if _cja_method_for_group(group_id) == "beta_binomial":
+        return "padj" + str(config["cohort_jxn_beta_padj_threshold"]) + "_delta" + str(config["cohort_jxn_beta_delta_threshold"]) + "_tvd" + tvd
+    return "z" + str(config.get("cohort_jxn_z_threshold", 3.5)) + "_delta" + str(config.get("cohort_jxn_z_delta_threshold", 0.1)) + "_tvd" + tvd
+
+
+def _ctx_filter_args(wc):
+    gid = _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)
+    tvd = " --tvd " + str(config.get("cohort_tx_tvd_threshold", 0.1))
+    if _cja_method_for_group(gid) == "beta_binomial":
+        return ("--padj " + str(config["cohort_jxn_beta_padj_threshold"])
+                + " --delta " + str(config["cohort_jxn_beta_delta_threshold"]) + tvd)
+    return ("--z " + str(config.get("cohort_jxn_z_threshold", 3.5))
+            + " --delta " + str(config.get("cohort_jxn_z_delta_threshold", 0.1)) + tvd)
+
+
+def ctx_enabled(group_id):
+    return (flag("gene_quantification") and flag("cohort_transcript_analysis")
+            and len(GROUPS[group_id]) >= config.get("cohort_jxn_beta_min_samples", 30))
+
+
+def ctx_files(group_id):
+    d = _ctx_dir(GROUP_COHORT_ID[group_id], GROUP_BED_ID[group_id], GROUP_SAMPLE_TYPE[group_id])
+    st = str(GROUP_SAMPLE_TYPE[group_id])
+    thr = _ctx_thr_label(group_id)
+    return dict(
+        usage_matrix=d + "/" + st + "_transcript_usage_matrix.tsv",
+        gene_status=d + "/" + st + "_transcript_usage_gene_status.tsv",
+        isoform_outliers=d + "/" + st + "_transcript_usage_outliers_" + thr + ".tsv",
+        landscape_outliers=d + "/" + st + "_gene_isoform_landscape_outliers_" + thr + ".tsv",
+        gtf=group_outdir(group_id) + "/gene_quantification/by_amalgam/annotation/filtered.gtf.gz",
+        gtf_tbi=group_outdir(group_id) + "/gene_quantification/by_amalgam/annotation/filtered.gtf.gz.tbi",
+    )
+
+
+def ctx_outputs(group_id):
+    f = ctx_files(group_id)
+    return [f["isoform_outliers"], f["landscape_outliers"]]
+
+
+def ctx_unavailable_reason(group_id):
+    if not flag("gene_quantification"):
+        return "gene quantification (AMALGAM) is turned off"
+    if not flag("cohort_transcript_analysis"):
+        return "the transcript analysis is turned off"
+    n_min = config.get("cohort_jxn_beta_min_samples", 30)
+    return ("the transcript analysis needs at least " + str(n_min) + " " + str(GROUP_SAMPLE_TYPE[group_id])
+            + " samples (this cohort has " + str(len(GROUPS[group_id])) + ")")
+
+
+def softclip_outputs(group_id):
+    d = str(group_outdir(group_id)) + "/softclip_analysis/" + str(GROUP_SAMPLE_TYPE[group_id])
+    return [d + "_softclip_outliers.tsv", d + "_softclip_clusters_all.tsv", d + "_softclip_outliers.pdf"]
+
 
 def all_bed_groups():
     groups = defaultdict(list)
@@ -269,6 +342,21 @@ def _rule_threads(wc, rule_key):
 def _group_threads(group_id, rule_key, default):
     return int(config.get("groups", {}).get(group_id, {}).get((str(rule_key) + '_threads'), default))
 
+def sample_hpo(sample):
+    terms = SAMPLES[sample].get("hpo") or []
+    if isinstance(terms, str):
+        terms = terms.split(";")
+    return [str(t).strip() for t in terms if str(t).strip()]
+
+def amelie_tsv(sample):
+    return str(SAMPLES[sample]["outdir"]) + "/phenotype/" + str(sample) + "_amelie.tsv"
+
+def hpo_terms_tsv(sample):
+    return str(SAMPLES[sample]["outdir"]) + "/phenotype/" + str(sample) + "_hpo_terms.tsv"
+
+def hpo_obo_path():
+    return config.get("hpo_obo") or os.path.join(workflow.basedir, "resources", "hpo_data", "hp.obo")
+
 # Builds the full list of target files for `rule all`,
 # i.e. every output the pipeline should produce given the enabled stages
 def all_outputs():
@@ -287,6 +375,12 @@ def all_outputs():
 
         if flag("deepvariant"):
             outs.append((str(od) + '/variant_calling/deepvariant/' + str(s) + '_deepvariant_norm.vcf.gz'))
+
+        if SAMPLES[s].get("wgs_vcf"):
+            outs.append((str(od) + '/variant_calling/wgs/' + str(s) + '_wgs_phased.vcf.gz'))
+
+        if sample_hpo(s):
+            outs.append(amelie_tsv(s))
 
         if flag("compile_variants"):
             outs.append((str(od) + '/variant_calling/compiled_variants/' + str(s) + '_filtered_variants.tsv'))
@@ -321,9 +415,6 @@ def all_outputs():
             bod = bed_outdir(cid, bid)
             for fs in _jxn_filter_sets:
                 outs.append((str(bod) + '/' + str(fs) + '/hits_upset_density.pdf'))
-                outs.append((str(bod) + '/' + str(fs) + '/merged_all_hits_simplified.tsv'))
-                if bed_has_alias(cid, bid):
-                    outs.append((str(bod) + '/' + str(fs) + '/merged_all_hits_simplified_alias.tsv'))
             # Per-sample final reports (QC page + IGV-style hit pages), default hit set only
             if flag("hit_reports"):
                 for s in bed_samples(cid, bid):
@@ -336,11 +427,16 @@ def all_outputs():
                               'genes_with_outlier_junction_barplot.pdf', 'genes_with_RNA_dysregulation_barplot.pdf'):
                     outs.append((str(god) + '/merged_hits/' + str(fs) + '/' + fname))
 
+        if flag("junction_analysis"):
+            for gid in GROUPS:
+                if cja_enabled(gid):
+                    outs.append(str(group_outdir(gid)) + '/merged_hits/default/method_comparison/'
+                                + str(GROUP_SAMPLE_TYPE[gid]) + '_method_comparison.pdf')
+
     if flag("cohort_junction_analysis"):
-        _cja_min_n = config.get("cohort_jxn_zscore_n_threshold", 10)
         for gid in GROUPS:
             god = group_outdir(gid)
-            if len(GROUPS[gid]) < _cja_min_n:
+            if not cja_enabled(gid):
                 continue  # 8A always runs; 8B (fitting) and 8C (outlier calling) require at least min_n samples
             outs.append(
                 god + "/cohort_junction_analysis/" + gid + "_" + _cja_thr_label(gid)
@@ -351,6 +447,14 @@ def all_outputs():
                     god + "/cohort_junction_analysis/" + gid + "_" + _cja_thr_label(gid)
                     + "/" + gid + "_outliers_alias.tsv"
                 )
+
+    for gid in GROUPS:
+        if ctx_enabled(gid):
+            outs.extend(ctx_outputs(gid))
+
+    if flag("softclip_analysis"):
+        for gid in GROUPS:
+            outs.extend(softclip_outputs(gid))
 
     if flag("gene_quantification"):
         # cohort-level per-gene CPTM / MOTR box plots (one PDF per gene, by sample type)
@@ -372,17 +476,6 @@ def all_outputs():
             outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_cptm.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_motr.tsv")
             outs.append(god + "/gene_quantification/by_amalgam/annotation/annotated.gtf.gz")
-            for subdir, prefix in (
-                ("by_count", "gene_count"),
-                ("by_coverage", "gene_coverage"),
-                ("by_assignment", "gene_assignment"),
-                ("by_amalgam", "gene_amalgam"),
-            ):
-                for method in ("cptm", "motr"):
-                    for suffix in ("outliers_by_sample.tsv", "outliers_by_gene.tsv",
-                                   "outliers_by_sample_boxplot.pdf", "outliers_by_gene_boxplot.pdf"):
-                        outs.append(god + "/gene_quantification/" + subdir + "/" + prefix
-                                    + "_zscores_" + method + "_" + suffix)
             if group_has_alias(gid):
                 outs.append(god + "/gene_quantification/by_count/gene_count_matrix_cptm_alias.tsv")
                 outs.append(god + "/gene_quantification/by_count/gene_count_matrix_motr_alias.tsv")
@@ -392,6 +485,12 @@ def all_outputs():
                 outs.append(god + "/gene_quantification/by_assignment/gene_assignment_matrix_motr_alias.tsv")
                 outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_cptm_alias.tsv")
                 outs.append(god + "/gene_quantification/by_amalgam/gene_amalgam_matrix_motr_alias.tsv")
+
+    for (cid, bid) in BED_GROUPS:
+        if any(SAMPLES[s].get("wgs_vcf") for s in bed_samples(cid, bid)):
+            wcd = str(bed_outdir(cid, bid)) + '/cohort_qc/wgs_concordance/' + str(bid)
+            outs.append(wcd + '_wgs_concordance_summary.tsv')
+            outs.append(wcd + '_wgs_concordance_heatmap.pdf')
 
     if flag("qc"):
         for (cid, bid) in BED_GROUPS:
@@ -430,4 +529,6 @@ include: "rules/5_junction_analysis.smk"
 include: "rules/6_sample_qc.smk"
 include: "rules/7_sample_gene_quantification.smk"
 include: "rules/8_cohort_junction_analysis.smk"
-include: "rules/9_merge_results.smk"
+include: "rules/9_cohort_transcript_analysis.smk"
+include: "rules/10_merge_results.smk"
+include: "rules/11_softclip_analysis.smk"

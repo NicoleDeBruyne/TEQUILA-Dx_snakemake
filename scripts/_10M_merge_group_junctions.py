@@ -1,0 +1,680 @@
+import argparse
+import pandas as pd
+import numpy as np
+from itertools import combinations
+from collections import defaultdict
+from scipy.stats import beta, betabinom
+import os
+import warnings
+from math import ceil
+from typing import Dict, List, Tuple
+from statsmodels.stats.multitest import multipletests
+from pandas.errors import PerformanceWarning
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from palette import SELECT_ORDER, use_fonts
+from matplotlib import rcParams
+use_fonts()
+rcParams['pdf.fonttype'] = 42
+
+warnings.filterwarnings("ignore", category=PerformanceWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*Glyph.*missing from font.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*Adding colorbar to a different Figure.*", category=UserWarning)
+
+
+def load_bed(path: str) -> Dict[str, Tuple[str, str, str]]:
+    gene_info: Dict[str, Tuple[str, str, str]] = {}
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 6:
+                print(f"[WARNING] BED line has <6 columns, skipping: {line!r}")
+                continue
+            chrom, start, end, gene, _, strand = parts[:6]
+            gene   = gene.strip()
+            strand = strand.strip()
+            region = f"{chrom.strip()}:{start.strip()}-{end.strip()}"
+            if gene in gene_info:
+                print(f"[WARNING] Gene '{gene}' appears more than once in BED. Using last entry.")
+            gene_info[gene] = (chrom.strip(), region, strand)
+    print(f"BED file loaded: {len(gene_info)} gene(s)")
+    return gene_info
+
+
+def parse_gtf_junctions(
+    gtf_path: str,
+    gene_names: List[str],
+) -> Dict[str, Dict]:
+    import gzip as _gz
+    import re as _re
+
+    gene_set = set(gene_names)
+
+    def _attr(attr_str, key):
+        m = _re.search(rf'{key}' + r'\s+"([^"]+)"', attr_str)
+        return m.group(1) if m else None
+
+    def _strip_ver(s):
+        return _re.sub(r'\.\d+$', '', s) if s else s
+
+    tx_canonical: set = set()
+    gene_exons: Dict[str, Dict[str, List[Tuple[str, int, int]]]] = defaultdict(lambda: defaultdict(list))
+
+    open_fn = _gz.open if gtf_path.endswith(".gz") else open
+
+    with open_fn(gtf_path, "rt") as fh:
+        for line in fh:
+            if line.startswith("#"): continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 9: continue
+            feat = parts[2]
+            if feat not in ("transcript", "exon"): continue
+
+            chrom = parts[0]
+            start = int(parts[3]) - 1
+            end   = int(parts[4])
+            attrs = parts[8]
+
+            gname = _attr(attrs, "gene_name") or _attr(attrs, "gene_symbol")
+            gid   = _strip_ver(_attr(attrs, "gene_id"))
+            gene_key = None
+            if gname and gname in gene_set:
+                gene_key = gname
+            elif gid and gid in gene_set:
+                gene_key = gid
+            if gene_key is None:
+                continue
+
+            tx_id = _attr(attrs, "transcript_id")
+            if tx_id is None: continue
+
+            if feat == "transcript":
+                if "Ensembl_canonical" in attrs:
+                    tx_canonical.add(tx_id)
+            elif feat == "exon":
+                gene_exons[gene_key][tx_id].append((chrom, start, end))
+
+    result: Dict[str, Dict] = {}
+    for gene_key, tx_dict in gene_exons.items():
+        canonical_jxns: set = set()
+        all_jxns_set:   set = set()
+        for tx_id, exons in tx_dict.items():
+            if len(exons) < 2: continue
+            exons_sorted = sorted(exons, key=lambda x: x[1])
+            for i in range(len(exons_sorted) - 1):
+                chrom_e, _, end_e   = exons_sorted[i]
+                chrom_n, start_n, _ = exons_sorted[i + 1]
+                if chrom_e != chrom_n: continue
+                jxn = f"{chrom_e}_{end_e + 1}_{start_n}"
+                all_jxns_set.add(jxn)
+                if tx_id in tx_canonical:
+                    canonical_jxns.add(jxn)
+        result[gene_key] = {
+            "canonical_junctions": canonical_jxns,
+            "all_junctions":       all_jxns_set,
+        }
+    return result
+
+
+EVENT_TYPES = ["exon_skipping_approx", "exon_inclusion_approx", "alt_5ss_approx", "alt_3ss_approx", "complex_approx"]
+NO_EVENT = "none"
+HAP_ASYMMETRY_MAX = 10
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Remove outlier junctions from long-read RNA-seq data.")
+    parser.add_argument("--infiles", nargs="+", required=True, help="Input TSV files (merged junctions).")
+    parser.add_argument("--outprefix", required=True, help="Prefix for output files.")
+    parser.add_argument('--jxn-coverage-threshold', default=20, type=int, help='Minimum junction coverage to be considered an outlier.')
+    parser.add_argument('--padj-threshold', default=0.05, type=float, help='Maximum adjusted p-value to be considered an outlier.')
+    parser.add_argument('--delta-PSI-threshold', default=0.1, type=float, help='Minimum abs(delta_PSI) to be considered an outlier.')
+    parser.add_argument("--delta-PSI-direction", choices=["positive", "negative"], help="If set, only keep junctions with delta PSI in specified direction.")
+    parser.add_argument("--bed", required=True, help="Panel BED (column 4 gene, column 6 strand); strand decides alt_5ss vs alt_3ss.")
+    parser.add_argument("--gtf", required=True, help="Annotation GTF; Ensembl_canonical transcripts define canonical junctions.")
+    parser.add_argument("--event-types", nargs="+", choices=EVENT_TYPES + [NO_EVENT], help="Event types to include when filtering junctions.")
+    parser.add_argument("--include-upreg-annotation-types", nargs="+", help="Annotation types to include when filtering upregulated junctions. Excludes all others.")
+    parser.add_argument("--include-downreg-annotation-types", nargs="+", help="Annotation types to include when filtering downregulated junctions. Excludes all others.")
+    parser.add_argument("--exclude-upreg-annotation-types", nargs="+", help="Annotation types to exclude when filtering upregulated junctions. Includes all others.")
+    parser.add_argument("--exclude-downreg-annotation-types", nargs="+", help="Annotation types to exclude when filtering downregulated junctions. Includes all others.")
+    parser.add_argument("--sample-number-threshold", type=int, help="Max number of samples that a junction can be an outlier in to be retained")
+    parser.add_argument("--filter-by-cohort-IQR", action="store_true", help="Require junctions to also be outliers relative to the cohort based on IQR.")
+    parser.add_argument("--fit-beta-dist-on-cohort", action="store_true", help="Fit beta distributions on cohort PSI values.")
+    parser.add_argument("--compare-PSI-to-cohort-median", action="store_true", help="Compare each sample's PSI to cohort median. Ignored if --fit-beta-dist-on-cohort is set.")
+    parser.add_argument("--delta-PSI-vs-cohort-threshold", type=float, help="Min abs(delta_PSI_vs_cohort) to filter when using cohort statistics (beta distribution or median).")
+    parser.add_argument("--plot", action="store_true", help="If set, generates plots.")
+    parser.add_argument("--title", default="Number of Genes with Outlier Junction Hits by Sample", help="Title for the plot.")
+    return parser.parse_args()
+
+
+def _sign(d):
+    return 1 if d > 0 else (-1 if d < 0 else 0)
+
+
+def define_events(df, strand_map, canonical_by_gene):
+    events = defaultdict(set)
+    parent = {}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for (sample, phasing, gene), group in df.groupby(['sample', 'phasing', 'gene'], sort=False):
+        strand = strand_map.get(gene, '+')
+        canon = canonical_by_gene.get(gene, set())
+        coords, delta = {}, {}
+        for jxn, d in zip(group['junction'], group['delta_PSI']):
+            parts = jxn.split('_')
+            coords[jxn] = (int(parts[-2]), int(parts[-1]))
+            delta[jxn] = _sign(d)
+
+        def add(label, *jxns):
+            keys = [(sample, phasing, gene, j) for j in jxns]
+            for k in keys:
+                events[k].add(label)
+                parent.setdefault(k, k)
+            for k in keys[1:]:
+                parent[find(k)] = find(keys[0])
+
+        for jxn, (ss1, ss2) in coords.items():
+            s_jxn = delta[jxn]
+            if s_jxn == 0:
+                continue
+            five, three = (ss1, ss2) if strand == '+' else (ss2, ss1)
+
+            for p, (p1, p2) in coords.items():
+                if p == jxn or delta[p] == 0 or delta[p] == s_jxn:
+                    continue
+                if jxn not in canon and p not in canon:
+                    continue
+                p_five, p_three = (p1, p2) if strand == '+' else (p2, p1)
+                if p_five == five and p_three != three:
+                    add('alt_3ss_approx', jxn, p)
+                if p_three == three and p_five != five:
+                    add('alt_5ss_approx', jxn, p)
+
+            lefts = [j for j, (a, b) in coords.items() if j != jxn and a == ss1 and b < ss2
+                     and delta[j] == -s_jxn]
+            rights = [j for j, (a, b) in coords.items() if j != jxn and b == ss2 and a > ss1
+                      and delta[j] == -s_jxn]
+            for jl in lefts:
+                for jr in rights:
+                    if not ({jxn, jl, jr} & canon):
+                        continue
+                    add('exon_skipping_approx' if s_jxn > 0 else 'exon_inclusion_approx', jxn, jl, jr)
+
+    def resolve(evs):
+        top = (evs & {'exon_skipping_approx', 'exon_inclusion_approx'}) or \
+              (evs & {'alt_5ss_approx', 'alt_3ss_approx'})
+        if not top:
+            return NO_EVENT
+        return 'complex_approx' if len(top) > 1 else next(iter(top))
+
+    members = defaultdict(list)
+    for k in parent:
+        members[find(k)].append(k)
+    phase_rank = {'bulk': 0, 'hap1': 1, 'hap2': 2}
+
+    def _start(k):
+        return int(k[3].split('_')[-2])
+    comps = sorted(members.values(),
+                   key=lambda m: (m[0][0], m[0][2], phase_rank.get(m[0][1], 3), min(_start(k) for k in m)))
+    event_id, counter = {}, defaultdict(int)
+    for m in comps:
+        counter[(m[0][0], m[0][2])] += 1
+        for k in m:
+            event_id[k] = f"E{counter[(m[0][0], m[0][2])]}"
+
+    keys = list(zip(df['sample'], df['phasing'], df['gene'], df['junction']))
+    df = df.copy()
+    df['event'] = [resolve(events.get(k, set())) for k in keys]
+    df['event_id'] = [event_id.get(k, '.') for k in keys]
+    return df
+
+
+def unreliable_haplotype_mask(full_df, outlier_df):
+    is_hap = outlier_df['phasing'].isin(['hap1', 'hap2'])
+    if not is_hap.any():
+        return pd.Series(False, index=outlier_df.index)
+    hap_jxns = set(outlier_df.loc[is_hap, 'junction'])
+    sub = full_df[full_df['junction'].isin(hap_jxns) & full_df['phasing'].isin(['bulk', 'hap1', 'hap2'])]
+    pivot = (sub.assign(_psi=pd.to_numeric(sub['rescaled_sample_PSI'], errors='coerce'))
+                .pivot_table(index=['sample', 'gene', 'junction'], columns='phasing', values='_psi', aggfunc='first'))
+    if any(c not in pivot.columns for c in ('bulk', 'hap1', 'hap2')):
+        return pd.Series(False, index=outlier_df.index)
+    pivot = pivot.dropna(subset=['bulk', 'hap1', 'hap2'])
+    b, h1, h2 = pivot['bulk'], pivot['hap1'], pivot['hap2']
+    sandwiched = ((h1 <= b) & (b <= h2)) | ((h2 <= b) & (b <= h1))
+    d1, d2 = (b - h1).abs(), (b - h2).abs()
+    dmax, dmin = np.maximum(d1, d2), np.minimum(d1, d2)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.where(dmin > 0, dmax / dmin, np.inf)
+    unreliable = set(pivot.index[~sandwiched | ~(ratio <= HAP_ASYMMETRY_MAX)])
+    keys = zip(outlier_df['sample'], outlier_df['gene'], outlier_df['junction'])
+    return is_hap & pd.Series([k in unreliable for k in keys], index=outlier_df.index)
+
+
+def fit_beta_dist(x, tol, n_threshold):
+    x = pd.to_numeric(x, errors='coerce')
+    x = x[~np.isnan(x)]
+    if len(x) < n_threshold:
+        return (len(x), "low_n", "low_n", "low_n")
+    if x.var() < tol:
+        return (len(x), x.mean() / tol, (1 - x.mean()) / tol, x.mean())
+    try:
+        alpha_value, beta_value = beta.fit(x, floc = 0, fscale = 1)[0:2]
+        expected_PSI = alpha_value / (alpha_value + beta_value)
+        return (len(x), alpha_value, beta_value, expected_PSI)
+    except:
+        return (len(x), "error", "error", "error")
+
+def beta_binomial_test(x, n, alpha_value, beta_value):
+    if any([np.isnan(val) for val in [x, n, alpha_value, beta_value]]):
+        return "n/a"
+    x = round(x)
+    n = round(n)
+    lte_x = betabinom.cdf(x, n, alpha_value, beta_value)
+    gte_x = betabinom.cdf(n - x, n, beta_value, alpha_value)
+    p_value = np.clip(2 * min(lte_x, gte_x), 0, 1)
+    if np.isnan(p_value):
+        return "error"
+    return p_value
+
+def compute_cohort_statistics(df, args):
+    print(f"    Computing cohort statistics for {len(df['junction'].unique())} junctions...")
+    jxns_interest = df['junction'].unique()
+    dfs_bulk = []
+
+    for input_file in args.infiles:
+        df_bulk = pd.read_csv(input_file, sep="\t")
+        if df_bulk.empty:
+            continue
+        df_bulk[['chr', 'ss1', 'ss2']] = df_bulk['junction'].str.split('_', n=2, expand=True)
+        missing_jxns = set(jxns_interest) - set(df_bulk['junction'])
+        if missing_jxns:
+            df_missing = pd.DataFrame({'junction': list(missing_jxns)})
+            df_missing['phasing'] = 'bulk'
+            df_missing[['chr', 'ss1', 'ss2']] = df_missing['junction'].str.split('_', n=2, expand=True)
+            ss1_sums = df_bulk.groupby('ss1')['ss1_coverage'].sum()
+            ss2_sums = df_bulk.groupby('ss2')['ss2_coverage'].sum()
+            df_missing['ss1_coverage'] = df_missing['ss1'].map(ss1_sums).fillna(0)
+            df_missing['ss2_coverage'] = df_missing['ss2'].map(ss2_sums).fillna(0)
+            df_missing['jxn_coverage'] = df_missing['ss1_coverage'] + df_missing['ss2_coverage']
+            df_missing['sample_PSI'] = 0
+            df_missing['rescaled_sample_PSI'] = 0.001
+            df_bulk = pd.concat([df_bulk, df_missing], ignore_index=True)
+        df_bulk = df_bulk[(df_bulk['junction'].isin(jxns_interest)) &
+                          (df_bulk['phasing'] == 'bulk') &
+                          (df_bulk['jxn_coverage'] >= 20)]
+        df_bulk.insert(0, "input_file", input_file)
+        df_bulk = df_bulk[['input_file', 'junction', 'sample_PSI', 'rescaled_sample_PSI']]
+        df_bulk["rescaled_sample_PSI"] = pd.to_numeric(df_bulk["rescaled_sample_PSI"], errors="coerce")
+        dfs_bulk.append(df_bulk)
+
+    if len(dfs_bulk) == 0:
+        print("    No bulk samples with sufficient coverage found; skipping cohort statistics computation.")
+        return df
+
+    all_bulk_df = pd.concat(dfs_bulk, ignore_index=True)
+    all_bulk_df = all_bulk_df.pivot_table(index='junction', columns='input_file', values='rescaled_sample_PSI', aggfunc='first')
+    
+    if args.filter_by_cohort_IQR:
+        print("    Computing cohort IQR statistics...")
+        all_bulk_numeric = all_bulk_df.apply(pd.to_numeric, errors="coerce")
+        q1 = all_bulk_numeric.quantile(0.25, axis=1)
+        q3 = all_bulk_numeric.quantile(0.75, axis=1)
+        median = all_bulk_numeric.median(axis=1)
+        fence_df = pd.DataFrame({"cohort_q1": q1, "cohort_median": median, "cohort_q3": q3})
+        df = df.merge(fence_df, left_on="junction", right_index=True, how="left")
+
+    elif args.fit_beta_dist_on_cohort:
+        print("    Fitting beta distributions on cohort bulk PSI values...")
+        all_bulk_df[['cohort_n', 'cohort_alpha', 'cohort_beta', 'cohort_expected_PSI']] = all_bulk_df.apply(
+            lambda row: pd.Series(fit_beta_dist(np.array(row), tol=1e-3, n_threshold=30)), axis=1
+        )
+        df = df.merge(all_bulk_df[['cohort_n', 'cohort_alpha', 'cohort_beta', 'cohort_expected_PSI']],
+                      left_on='junction', right_index=True, how='left')
+        df['delta_PSI_vs_cohort'] = np.where(
+            (np.isnan(pd.to_numeric(df['rescaled_sample_PSI'], errors='coerce')) |
+             np.isnan(pd.to_numeric(df['cohort_expected_PSI'], errors='coerce'))),
+            "n/a",
+            pd.to_numeric(df['cohort_expected_PSI'], errors='coerce') - pd.to_numeric(df['rescaled_sample_PSI'], errors='coerce')
+        )
+
+        print("    Calculating cohort-level p-values...")
+        df['cohort_p_value'] = df.apply(lambda row: beta_binomial_test(
+            ceil(pd.to_numeric(row['jxn_alignment_count'], errors='coerce')),
+            ceil(pd.to_numeric(row['jxn_coverage'], errors='coerce')),
+            pd.to_numeric(row['cohort_alpha'], errors='coerce'),
+            pd.to_numeric(row['cohort_beta'], errors='coerce')
+        ), axis=1)
+
+    elif args.compare_PSI_to_cohort_median:
+        print("    Calculating cohort median PSI values...")
+        all_bulk_df['cohort_median_PSI'] = all_bulk_df.median(axis=1, skipna=True)
+        df = df.merge(all_bulk_df[['cohort_median_PSI']], left_on='junction', right_index=True, how='left')
+        df['delta_PSI_vs_cohort'] = np.where(
+            (np.isnan(pd.to_numeric(df['sample_PSI'], errors='coerce')) |
+             np.isnan(pd.to_numeric(df['cohort_median_PSI'], errors='coerce'))),
+            "n/a",
+            pd.to_numeric(df['sample_PSI'], errors='coerce') - pd.to_numeric(df['cohort_median_PSI'], errors='coerce')
+        )
+
+    return df
+
+
+def plot_outlier_counts(samples, dfs, legends, suptitle, outfile):
+
+    counts_list = []
+    for df in dfs:
+        counts_list.append(df.groupby('sample')['gene'].nunique().sort_index())
+
+    sample_order = sorted(samples)
+    for i, counts in enumerate(counts_list):
+        counts_list[i] = counts.reindex(sample_order, fill_value=0)
+
+    barplot_file = os.path.splitext(outfile)[0] + "_barplot.pdf"
+    fig, axes = plt.subplots(len(dfs), 1, figsize=(max(16, len(sample_order)*0.2), max(6, len(dfs)*4)), sharex=True)
+    if len(dfs) == 1:
+        axes = [axes]
+
+    for ax, counts, (color, label) in zip(axes, counts_list, legends):
+        ax.bar(counts.index, counts.values, color=color)
+        ax.set_title(f'Average={counts.mean():.2f}, Median={counts.median()}, Range={counts.min()}–{counts.max()}')
+        ax.set_ylabel('Count')
+        ax.tick_params(axis='x', rotation=90)
+        ax.legend(handles=[mpatches.Patch(color=color, label=label)],
+                  loc='center left', bbox_to_anchor=(1.0, 0.5))
+
+    axes[-1].set_xlabel('Sample')
+    fig.suptitle(suptitle, fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(barplot_file)
+    plt.close()
+    print(f"Bar plot saved to {barplot_file}")
+
+    boxplot_file = os.path.splitext(outfile)[0] + "_boxplot.pdf"
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+
+    data = [counts.values for counts in counts_list]
+    colors = [c for c, _ in legends]
+
+    box = ax.boxplot(
+        data,
+        patch_artist=False,
+        medianprops=dict(color='black'),
+        boxprops=dict(color='black'),
+        whiskerprops=dict(color='black'),
+        capprops=dict(color='black'),
+        showfliers=False
+    )
+
+    jitter_strength = 0.08
+    for i, counts in enumerate(data):
+        x = np.full(len(counts), i + 1) + np.random.uniform(-jitter_strength, jitter_strength, len(counts))
+        ax.scatter(x, counts, color=colors[i], alpha=0.7, s=20)
+
+    ax.set_xticks(range(1, len(dfs) + 1))
+    ax.set_xticklabels([])
+
+    ax.set_ylabel('Number of genes')
+    ax.set_title(suptitle)
+
+    legend_handles = []
+    for counts, color, (_, label) in zip(counts_list, colors, legends):
+        stats_text = f"{label}\nAvg={counts.mean():.2f}, Med={counts.median()}, Range={counts.min()}–{counts.max()}"
+        legend_handles.append(mpatches.Patch(color=color, label=stats_text))
+    ax.legend(handles=legend_handles, loc='center left', bbox_to_anchor=(1.05, 0.5))
+
+    plt.tight_layout()
+    plt.savefig(boxplot_file, bbox_inches='tight')
+    plt.close()
+    print(f"Box plot saved to {boxplot_file}")
+
+def main():
+    args = parse_args()
+
+    if args.include_upreg_annotation_types and args.exclude_upreg_annotation_types:
+        raise ValueError("--include-upreg-annotation-types and --exclude-upreg-annotation-types are mutually exclusive")
+    if args.include_downreg_annotation_types and args.exclude_downreg_annotation_types:
+        raise ValueError( "--include-downreg-annotation-types and --exclude-downreg-annotation-types are mutually exclusive")
+
+    print(f"Preparing to filter for junctions with coverage >= {args.jxn_coverage_threshold}, padj <= {args.padj_threshold}, and abs(delta_PSI) >= {args.delta_PSI_threshold}.")
+    if args.delta_PSI_direction:
+        print(f"Will keep an additional file with only outlier junctions with delta_PSI direction: {args.delta_PSI_direction}")
+    if args.event_types:
+        print(f"Will keep an additional file with only outlier junctions with event types: {', '.join(args.event_types)}")
+    if args.include_upreg_annotation_types or args.exclude_upreg_annotation_types:
+        if args.delta_PSI_direction and args.delta_PSI_direciton=="negative":
+            print(f"User specified negative delta_PSI_direction, so upregulated junctions cannot be filtered by annotation type.")
+        elif args.include_upreg_annotation_types:
+            print(f"Will keep an additional file with upregulated outlier junctions only with annotation types: {', '.join(args.include_upreg_annotation_types)}")
+        else:
+            print(f"Will keep an additional file excluding upregulated outlier junctions with annotation types: {', '.join(args.exclude_upreg_annotation_types)}")
+    if args.include_downreg_annotation_types or args.exclude_downreg_annotation_types:
+        if args.delta_PSI_direction and args.delta_PSI_direciton=="positive":
+            print(f"User specified positive delta_PSI_direction, so downregulation junctions cannot be filtered by annotation type.")
+        elif args.include_upreg_annotation_types or args.exclude_upreg_annotation_types:
+            if args.include_downreg_annotation_types:
+                print(f"    and will keep only downregulated outlier junctions with annotation types: {', '.join(args.include_downreg_annotation_types)}")
+            else:
+                print(f"    and excluding downregulated outlier junctions with annotation types: {', '.join(args.exclude_downreg_annotation_types)}")
+        else:
+            if args.include_downreg_annotation_types:
+                print(f"Will keep an additional file with only downregulated outlier junctions with annotation types: {', '.join(args.include_downreg_annotation_types)}")
+            else:
+                print(f"Will keep an additional file excluding downregulated outlier junctions with annotation types: {', '.join(args.exclude_downreg_annotation_types)}")
+    if (args.filter_by_cohort_IQR or ((args.fit_beta_dist_on_cohort or args.compare_PSI_to_cohort_median) and args.delta_PSI_vs_cohort_threshold)):
+        if args.filter_by_cohort_IQR:
+            print(f"Will keep an additional file with only junctions which are IQR outliers.")
+        elif args.fit_beta_dist_on_cohort:
+            print(f"Will fit beta distributions on cohort PSI values and keep an additional file with only junctions where abs(delta_PSI_vs_cohort) >= {args.delta_PSI_vs_cohort_threshold}.")
+        elif args.compare_PSI_to_cohort_median:
+            print(f"Will compore PSI value to the cohort median and keep an additional file with only junctions where abs(delta_PSI_vs_cohort) >= {args.delta_PSI_vs_cohort_threshold}.")
+    if args.sample_number_threshold:
+        print(f"Will keep an additional file with only events (all their junctions) in which at least one junction is an outlier in <= {args.sample_number_threshold} samples.")
+
+    if len(args.infiles) == 0:
+        raise ValueError("No input files provided.")
+    for input_file in args.infiles:
+        if not os.path.isfile(input_file):
+            raise FileNotFoundError(f"Input file {input_file} not found.")
+
+    gene_info = load_bed(args.bed)
+    strand_map = {g: info[2] for g, info in gene_info.items()}
+    print(f"Parsing GTF for canonical junctions: {args.gtf}")
+    gtf_junctions = parse_gtf_junctions(args.gtf, list(gene_info))
+    canonical_by_gene = {g: info['canonical_junctions'] for g, info in gtf_junctions.items()}
+    print(f"    canonical junctions found for {len(canonical_by_gene)}/{len(gene_info)} gene(s)")
+
+    print(f"\nReading in {len(args.infiles)} input files...")
+    dfs = []
+    samples = set()
+    n_unreliable_hap = 0
+    for input_file in args.infiles:
+        df = pd.read_csv(input_file, sep="\t", usecols=['sample', 'phasing', 'gene', 'junction', 'jxn_alignment_count', 'jxn_coverage', 
+                                                            'sample_PSI', 'rescaled_sample_PSI', 'padj', 'delta_PSI', 'annotation'])
+        if df.empty:
+            print(f"WARNING: Input file {input_file} is empty.")
+            continue
+        samples.add(df['sample'].iloc[0])
+        delta_num = pd.to_numeric(df['delta_PSI'], errors='coerce')
+        mask = (df['jxn_coverage'] >= args.jxn_coverage_threshold) & \
+            (df['padj'] <= args.padj_threshold) & \
+            (delta_num.abs() >= args.delta_PSI_threshold)
+        full_df = df
+        df = df.loc[mask].copy()
+        df['delta_PSI'] = delta_num.loc[mask]
+        if df.empty:
+            continue
+        bad_hap = unreliable_haplotype_mask(full_df, df)
+        n_unreliable_hap += int(bad_hap.sum())
+        df = df.loc[~bad_hap]
+        del full_df
+        if df.empty:
+            continue
+        df.insert(0, "input_file", input_file)
+        dfs.append(df)
+    if len(dfs) == 0:
+        raise RuntimeError("No data after primary filtering.")
+    outlier_df = pd.concat(dfs, ignore_index=True)
+    jxns = outlier_df['junction'].unique()
+    print(f"Filtered for junctions with junction coverage >= {args.jxn_coverage_threshold}, padj <= {args.padj_threshold}, and abs(delta PSI) >= {args.delta_PSI_threshold}, "
+        f"after removing {n_unreliable_hap} unreliable haplotype outlier row(s) (bulk not between hap1 and hap2, or gaps > {HAP_ASYMMETRY_MAX}x lopsided):\n"
+        f"    {len(outlier_df)} total hits ({len(outlier_df['junction'].unique())} unique junctions) in {len(outlier_df['sample'].unique())} samples."
+    )
+
+    outlier_df = define_events(outlier_df, strand_map, canonical_by_gene)
+    print(f"Event types: {outlier_df['event'].value_counts().to_dict()}")
+
+    outlier_df['sample_count'] = outlier_df.groupby('junction')['sample'].transform('nunique')
+
+    if len(samples) >= 8 and (args.filter_by_cohort_IQR or ((args.fit_beta_dist_on_cohort or args.compare_PSI_to_cohort_median) and args.delta_PSI_vs_cohort_threshold)):
+        print(f"\nComputing cohort-level statistics...")
+        outlier_df = compute_cohort_statistics(outlier_df, args)
+    elif args.filter_by_cohort_IQR or ((args.fit_beta_dist_on_cohort or args.compare_PSI_to_cohort_median) and args.delta_PSI_vs_cohort_threshold):
+        if len(samples) < 8:
+            print("WARNING: Fewer than 8 samples were provided. Skipping cohort statistics computation.")
+            args.filter_by_cohort_IQR = False
+            args.fit_beta_dist_on_cohort = False
+            args.compare_PSI_to_cohort_median = False
+            args.delta_PSI_vs_cohort_threshold = None
+
+    os.makedirs(os.path.dirname(args.outprefix), exist_ok=True)
+    outfile_stage1 = f"{args.outprefix}_{args.jxn_coverage_threshold}jxncov_{args.padj_threshold}padj_{args.delta_PSI_threshold}deltaPSI.tsv"
+    outlier_df.to_csv(outfile_stage1, sep="\t", index=False)
+
+    if args.delta_PSI_direction:
+        df_stage2 = outlier_df.copy()
+        if args.delta_PSI_direction == "positive":
+            df_stage2 = df_stage2[df_stage2['delta_PSI'] > 0]
+        else:
+            df_stage2 = df_stage2[df_stage2['delta_PSI'] < 0]
+        outfile_stage2 = outfile_stage1.replace(".tsv", f"_{args.delta_PSI_direction}.tsv")
+        df_stage2.to_csv(outfile_stage2, sep="\t", index=False)
+        print(f"After delta-PSI-direction filtering: {len(df_stage2)} rows ({len(df_stage2['junction'].unique())} unique junctions).")
+
+    if args.event_types:
+        df_stage3 = df_stage2.copy() if "df_stage2" in locals() else outlier_df.copy()
+        df_stage3 = df_stage3[df_stage3['event'].apply(lambda x: any(evt in x.split(';') for evt in args.event_types))]
+        outfile_stage3 = (outfile_stage2 if "outfile_stage2" in locals() else
+                          outfile_stage1).replace(".tsv", f"_event.tsv")
+        df_stage3.to_csv(outfile_stage3, sep="\t", index=False)
+        print(f"After event-type filtering: {len(df_stage3)} rows ({len(df_stage3['junction'].unique())} unique junctions).")
+
+    if args.include_upreg_annotation_types or args.include_downreg_annotation_types:
+        df_stage4 = df_stage3.copy() if "df_stage3" in locals() else (
+            df_stage2.copy() if "df_stage2" in locals() else outlier_df.copy()
+        )
+        mask = pd.Series(False, index=df_stage4.index)
+        if args.include_upreg_annotation_types and args.include_downreg_annotation_types:
+            mask = (
+                ((df_stage4["delta_PSI"] > 0) & df_stage4["annotation"].isin(args.include_upreg_annotation_types)) |
+                ((df_stage4["delta_PSI"] < 0) & df_stage4["annotation"].isin(args.include_downreg_annotation_types))
+            )
+        elif args.include_upreg_annotation_types:
+            mask = (
+                ((df_stage4["delta_PSI"] > 0) & df_stage4["annotation"].isin(args.include_upreg_annotation_types)) |
+                (df_stage4["delta_PSI"] < 0)
+            )
+        elif args.include_downreg_annotation_types:
+            mask = (
+                ((df_stage4["delta_PSI"] < 0) & df_stage4["annotation"].isin(args.include_downreg_annotation_types)) |
+                (df_stage4["delta_PSI"] > 0)
+            )
+        df_stage4 = df_stage4[mask]
+        outfile_stage4 = (outfile_stage3 if "outfile_stage3" in locals() else
+                          outfile_stage2 if "outfile_stage2" in locals() else
+                          outfile_stage1).replace(".tsv", "_annotation.tsv")
+        df_stage4.to_csv(outfile_stage4, sep="\t", index=False)
+        print(f"After annotation-type filtering: {len(df_stage4)} rows ({len(df_stage4['junction'].unique())} unique junctions).")
+
+    if args.filter_by_cohort_IQR or ((args.fit_beta_dist_on_cohort or args.compare_PSI_to_cohort_median) and args.delta_PSI_vs_cohort_threshold):
+        df_stage5 = df_stage4.copy() if "df_stage4" in locals() else (
+            df_stage3.copy() if "df_stage3" in locals() else (
+                df_stage2.copy() if "df_stage2" in locals() else outlier_df.copy()
+            )
+        )
+        
+        if args.filter_by_cohort_IQR and 'cohort_q1' in df_stage5.columns and 'cohort_q3' in df_stage5.columns:
+            iqr = df_stage5['cohort_q3'] - df_stage5['cohort_q1']
+            lower_fence = df_stage5['cohort_q1'] - 1.5 * iqr
+            upper_fence = df_stage5['cohort_q3'] + 1.5 * iqr
+            sample_psi = pd.to_numeric(df_stage5["sample_PSI"], errors="coerce")
+            is_outlier = (sample_psi < lower_fence) | (sample_psi > upper_fence)
+            df_stage5 = df_stage5[is_outlier]
+        elif args.delta_PSI_vs_cohort_threshold and 'delta_PSI_vs_cohort' in df_stage5.columns:
+            delta_psi_cohort = pd.to_numeric(df_stage5['delta_PSI_vs_cohort'], errors='coerce')
+            df_stage5 = df_stage5[delta_psi_cohort.abs() >= args.delta_PSI_vs_cohort_threshold]
+
+        outfile_stage5 = (outfile_stage4 if "outfile_stage4" in locals() else
+                          outfile_stage3 if "outfile_stage3" in locals() else
+                          outfile_stage2 if "outfile_stage2" in locals() else
+                          outfile_stage1).replace(".tsv", "_cohortIQR.tsv" if args.filter_by_cohort_IQR else f"_{args.delta_PSI_vs_cohort_threshold}deltaPSIvsCohort.tsv")
+        df_stage5.to_csv(outfile_stage5, sep="\t", index=False)
+        print(f"    After cohort-level filtering: {len(df_stage5)} rows ({len(df_stage5['junction'].unique())} unique junctions).")
+
+    if args.sample_number_threshold:
+        df_stage6 = df_stage5.copy() if "df_stage5" in locals() else (
+            df_stage4.copy() if "df_stage4" in locals() else (
+                df_stage3.copy() if "df_stage3" in locals() else (
+                    df_stage2.copy() if "df_stage2" in locals() else outlier_df.copy()
+                )
+            )
+        )
+        ev_key = np.where(df_stage6['event_id'] != '.',
+                          df_stage6['sample'].astype(str) + '|' + df_stage6['phasing'].astype(str) + '|'
+                          + df_stage6['gene'].astype(str) + '|' + df_stage6['event_id'].astype(str),
+                          'row' + df_stage6.index.astype(str))
+        min_count = df_stage6['sample_count'].groupby(ev_key).transform('min')
+        df_stage6 = df_stage6[min_count <= args.sample_number_threshold]
+        outfile_stage6 = (outfile_stage5 if "outfile_stage5" in locals() else
+                        outfile_stage4 if "outfile_stage4" in locals() else
+                        outfile_stage3 if "outfile_stage3" in locals() else
+                        outfile_stage2 if "outfile_stage2" in locals() else
+                        outfile_stage1).replace(".tsv", f"_{args.sample_number_threshold}samples.tsv")
+        df_stage6.to_csv(outfile_stage6, sep="\t", index=False)
+        print(f"After sample-number filtering: {len(df_stage6)} rows ({len(df_stage6['junction'].unique())} unique junctions).")
+
+    if args.plot:
+        dfs_for_plot = []
+        legends = []
+        if 'outlier_df' in locals() and not outlier_df.empty:
+            dfs_for_plot.append(outlier_df)
+            legends.append((SELECT_ORDER[0], f'coverage ≥ {args.jxn_coverage_threshold}, abs(ΔPSI) ≥ {args.delta_PSI_threshold}, and padj ≤ {args.padj_threshold}'))
+        if 'df_stage2' in locals() and not df_stage2.empty:
+            dfs_for_plot.append(df_stage2)
+            legends.append((SELECT_ORDER[1], f"+ upregulated junctions (delta PSI > 0)" if args.delta_PSI_direction == "positive" else f"+ downregulated junctions (delta PSI < 0)"))
+        if 'df_stage3' in locals() and not df_stage3.empty:
+            dfs_for_plot.append(df_stage3)
+            legends.append((SELECT_ORDER[2], f"+ event types: \n        " + ',\n        '.join(args.event_types)))
+        if 'df_stage4' in locals() and not df_stage4.empty:
+            dfs_for_plot.append(df_stage4)
+            legend_parts = []
+            if args.include_upreg_annotation_types:
+                legend_parts.append("+ upregulated junctions with annotation:\n        " + ",\n        ".join(args.include_upreg_annotation_types))
+            elif args.exclude_upreg_annotation_types:
+                legend_parts.append("- upregulated junctions with annotation:\n        " + ",\n        ".join(args.exclude_upreg_annotation_types))
+            else:
+                legend_parts.append("+ all upregulated junctions")
+            if args.include_downreg_annotation_types:
+                legend_parts.append("+ downregulated junctions with annotation:\n        " + ",\n        ".join(args.include_downreg_annotation_types))
+            elif args.exclude_downreg_annotation_types:
+                legend_parts.append("- downregulated junctions with annotation:\n        " + ",\n        ".join(args.exclude_downreg_annotation_types))
+            else:
+                legend_parts.append("+ all downregulated junctions")
+            legends.append((SELECT_ORDER[3], "\n".join(legend_parts)))
+        if 'df_stage5' in locals() and not df_stage5.empty:
+            dfs_for_plot.append(df_stage5)
+            legends.append((SELECT_ORDER[4], '+ IQR outlier' if args.filter_by_cohort_IQR else f'+ abs(ΔPSI_vs_cohort) ≥ {args.delta_PSI_vs_cohort_threshold}'))
+        if 'df_stage6' in locals() and not df_stage6.empty:
+            dfs_for_plot.append(df_stage6)
+            legends.append((SELECT_ORDER[5], f'+ event with a junction that is an outlier in ≤ {args.sample_number_threshold} samples'))
+        plot_outlier_counts(samples, dfs_for_plot, legends, args.title, f"{args.outprefix}_counts.pdf")
+
+if __name__ == "__main__":
+    main()

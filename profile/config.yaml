@@ -1,9 +1,6 @@
-# profile/config.yaml
-# Standard Snakemake 7 cluster-profile configuration. Invoked via:
-#   snakemake --profile profile/
-
 cluster: "slurm-submit.py"
 cluster-status: "slurm-status.py"
+cluster-cancel: "scancel"
 jobscript: "slurm-jobscript.sh"
 
 jobs: 50

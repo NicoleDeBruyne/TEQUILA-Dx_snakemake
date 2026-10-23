@@ -10,10 +10,12 @@ phase_reads: true
 ase_analysis: true
 junction_analysis: true
 cohort_junction_analysis: true
+cohort_transcript_analysis: true
 merge_results: true
+softclip_analysis: false   # temporary step 11: unexplained soft-clip clusters (needs untrimmed reads)
 qc: true
 gene_quantification: true
-hit_reports: true           # per-sample final report PDF: QC page + IGV-style candidate-gene pages (rule _9O)
+hit_reports: true           # per-sample final report PDF + HTML review page (rule _10Q)
 
 # Path to envs created by setup.sh
 conda_env: "envs/conda_env"
@@ -28,11 +30,11 @@ annotation: "resources/gencode_data/gencode.v44.primary_assembly.annotation.gtf"
 
 # Variant callers
 longcallr_bin: "envs/conda_env/bin/longcallR"
-nanots_image: "library://zelinliu/nanots/nanots:1.0.0"
+nanots_image: "resources/containers/nanots_1.0.0.sif"
 nanots_model_unphased: "resources/NanoTS/model/unphased_cDNA_nanopore_R104_HG002.pth"
 nanots_model_phased: "resources/NanoTS/model/phased_cDNA_nanopore_R104_HG002.pth"
-clair3_rna_image: "docker://hkubal/clair3-rna:v0.2.2"
-deepvariant_image: "docker://google/deepvariant:1.6.1"
+clair3_rna_image: "resources/containers/clair3-rna_v0.2.2.sif"
+deepvariant_image: "resources/containers/deepvariant_1.6.1.sif"
 
 # Resources for variant annotation (set to "remote" to fetch gnomAD/ClinVar from the web instead of a local copy)
 gnomad_base: "resources/gnomad_data"
@@ -118,6 +120,7 @@ gtex_data_dir: "resources/gtex_data"
 gtex_coverage_threshold: 20    # only calculate PSI-approx for junctions with at least this coverage (PSI-approx denom)
 jxn_phasing_threshold: 0.5    # only calculate hap1/hap2 PSI-approx values when phased coverage is at least this proportion of bulk coverage
 gtex_n_threshold: 100    # only fit beta distribution for junctions with at least this many PSI-approx values in GTEx
+jxn_min_reads: 20    # minimum bulk reads supporting a junction: GTEx tests a junction absent from the GTEx matrix only if the sample has this many; the cohort analysis keeps a junction only if at least one sample has this many
 psi_rescale_factor: 0.001    # rescale PSI-approx values away from 0 and 1 for beta distribution fitting
 psi_padj_threshold: 0.01    # for calling significance
 delta_psi_threshold: 0.1    # difference between the sample's PSI-approx and the 1st/99th percentile of GTEx PSI-approx values; for calling significance
@@ -158,7 +161,15 @@ cohort_jxn_beta_delta_threshold: 0.1    # significance threshold for beta-binomi
 cohort_jxn_z_threshold: 3.5    # significance threshold for modified_zscore method
 cohort_jxn_z_delta_threshold: 0.1    # significance threshold for modified_zscore method
 cohort_jxn_phasing_threshold: 0.5    # only calculate hap1/hap2 values when phased coverage is at least this proportion of bulk coverage
-cohort_jxn_min_reads: 20    # minimum bulk read count for a junction to be included in the analysis (at least one sample must have this many reads supporting junction)
+# Each sample's delta is measured against the range of the other samples: their min/max when fewer than 30 samples have a value,
+# otherwise after trimming ceil(1% of the other samples) from each end. Applies to the cohort junction and transcript analyses.
+
+# Cohort-level transcript (isoform) analysis (AMALGAM); runs only for groups with at least cohort_jxn_beta_min_samples samples and uses the beta-binomial padj and delta thresholds above
+cohort_tx_min_gene_reads: 100    # a sample is used for a gene only if it has at least this many reads on the gene (sum of its AMALGAM transcript counts)
+cohort_tx_min_usage: 0.05    # an isoform is tested if, in at least one used sample, it has at least this usage...
+cohort_tx_min_reads: 10    # ...and at least this many reads; all other isoforms of the gene are pooled into 'other'
+cohort_tx_tvd_threshold: 0.1    # isoform-mix outliers need at least this total variation distance (TVD) to the nearest other sample (same trimming as delta)
+cohort_tx_dm_simulations: 10000    # Dirichlet-multinomial simulations per sample and gene (beta_binomial method)
 
 # QC / plotting: reference tissues and colors used in sample-type plots
 validate_ref_tissues: ["fibroblasts", "lymphocytes", "wholeblood"]    # GTEx tissues to plot alongside samples in the sample-type validation heatmap
@@ -175,11 +186,6 @@ cohort_qc_title: "Cohort QC"    # title prefix used on cohort QC plots
 coverage_heatmap_center: 50    # canonical-transcript coverage heatmaps: depth drawn white (red below -> 0, blue above -> max)
 gene_quant_title: null    # title override for gene-quantification plots; defaults to an auto-generated title if null
 
-# Gene-level expression analysis
-gene_outlier_pseudocount: 1.0    # added to normalized CPTM or MOTR before log2-transforming
-gene_outlier_shrinkage_k: 10.0    # shrinkage constant: weight on a gene's own MAD vs. the cohort-wide trend is n/(n+k)
-gene_outlier_min_mad: 0.1    # floor on the shrunk MAD, so a near-zero-variance gene can't produce an absurd z-score
-
 # OMIM gene/phenotype data merged into the final hit tables
 omim_file: "resources/omim_data/OMIM.tsv"  
 
@@ -187,7 +193,16 @@ omim_file: "resources/omim_data/OMIM.tsv"
 threads: 8    # 8 threads for multi-threaded jobs (some jobs are single-threaded)
 time: 1440    # 24 hours
 
-# --- Per-sample final reports (_9O_sample_final_report) ---
+# --- Per-sample final reports (_10Q_make_final_report) ---
 hit_report_top_n: 0          # top-ranked hit genes per sample; 0 = every hit
 hit_report_max_tier: 5       # leave out genes with a higher (weaker) tier
 hit_report_max_reads: 500    # reads drawn per alignment track (coverage always uses all reads)
+softclip_genes: []    # only analyse these panel genes; [] for every panel gene
+softclip_alu_annotation: ""    # optional Alu annotation (BED or GTF); oligo(dT) artifacts inside an Alu become "alu-polyA" (treated as real ends)
+softclip_min_clip: 50    # only soft clips the read-end classifier labels "unknown" and at least this long are clustered (exact breakpoint)
+softclip_consensus_len: 50    # clipped bases next to the breakpoint used for the abPOA consensus (requires pyabpoa)
+softclip_min_reads: 10    # an outlier cluster needs at least this many clipped reads...
+softclip_min_fraction: 0.2    # ...at least this fraction of the gene's reads aligned at that base clipped...
+softclip_min_identity: 0.75    # ...and a median identity of clips to their consensus of at least this
+softclip_present_fraction: 0.05    # a sample "has" a site (same gene, side, exact base) when at least 2 reads and this clipped fraction
+softclip_sample_fraction: 0.05    # outliers: fewer than this fraction of the group's samples, other than the sample itself, have the site
