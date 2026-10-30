@@ -1,3 +1,6 @@
+# step 5 - junction counts per sample and outlier testing against GTEx
+
+# 5A counts (bulk + each haplotype) and the sample count matrix
 rule _5A_get_junction_counts:
     input:
         mapping = "{outdir}/phased_reads/{sample}_gene_bam_mapping_file.tsv",
@@ -38,10 +41,12 @@ _GTEX_BETA_FITS_TEMPLATE = (
     '_tol' + str(config['psi_rescale_factor']) + '.tsv'
 )
 
+# brain has way more GTEx samples so it needs more memory
 def _gtex_fit_mem(wc, threads, attempt):
     return max(4096, attempt * threads * (6 if wc.tissue == "brain" else 2) * 1024)
 
 
+# 5B1 GTEx beta fits per tissue. shared across the cohort and cached, it's slow
 rule _5B1_fit_gtex_beta_distributions:
     input:
         gtex_file = lambda wc: _gtex_file(wc.tissue),
@@ -74,6 +79,7 @@ rule _5B1_fit_gtex_beta_distributions:
         """
 
 
+# 5B2 background fits for junctions GTEx doesn't have
 rule _5B2_fit_novel_junction_beta_distributions:
     input:
         jxn_counts = "{outdir}/junction_analysis/junction_counts/{sample}_splice_junction_counts.tsv",
@@ -107,6 +113,7 @@ rule _5B2_fit_novel_junction_beta_distributions:
         """
 
 
+# 5C test each junction vs GTEx
 rule _5C_perform_binomial_tests:
     input:
         jxn_counts = "{outdir}/junction_analysis/junction_counts/{sample}_splice_junction_counts.tsv",
@@ -147,6 +154,7 @@ rule _5C_perform_binomial_tests:
         """
 
 
+# 5D coverage/padj/delta-PSI cutoffs
 rule _5D_identify_junction_outliers:
     input:
         all_jxns = "{outdir}/junction_analysis/gtex_{tissue}/{sample}_gtex_{tissue}_all_junctions.tsv",

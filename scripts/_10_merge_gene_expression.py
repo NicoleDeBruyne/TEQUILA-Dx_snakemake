@@ -1,8 +1,8 @@
+# 10F/10G - merge gene counts (or coverage) into cohort matrices: raw, CPTM and MOTR
+
 import argparse
-import os
 
 import pandas as pd
-import numpy as np
 
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
 from motr import add_motr_args, compute_size_factors
@@ -36,6 +36,7 @@ def main():
 
     raw_col = "raw_count" if args.metric == "count" else "raw_coverage"
 
+    # long per-sample tables -> gene x sample
     per_sample_dfs = [pd.read_csv(f, sep="\t") for f in args.infiles]
     samples = [d['sample'].iloc[0] for d in per_sample_dfs if not d.empty]
     long_df = pd.concat(per_sample_dfs, ignore_index=True)
@@ -63,6 +64,7 @@ def main():
     raw_df.to_csv(out_raw, sep="\t")
     print("Saved raw-value matrix: " + out_raw)
 
+    # MOTR has to come from the raw counts, not CPTM
     size_factors = compute_size_factors(raw_df, max_zero_fraction=args.motr_max_zero_fraction)
     motr_df = raw_df.div(size_factors, axis=1)
     motr_df.index.name = "gene"

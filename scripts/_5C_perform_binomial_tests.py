@@ -1,10 +1,11 @@
+# 5C - test every sample junction (bulk + each haplotype) against the GTEx beta fits, beta-binomial test
+
 import os, argparse, warnings, traceback
 import pandas as pd
 import numpy as np
 from collections import defaultdict
 from scipy.stats import betabinom
 from pandas.errors import PerformanceWarning
-from math import ceil
 import concurrent.futures
 from statsmodels.stats.multitest import multipletests
 import time
@@ -41,6 +42,7 @@ def parse_args():
     return parser.parse_args()
 
 
+# annotated junctions, so we can tell novel from annotated
 def parse_gtf_splice_junctions(gtf_file):
 
     transcripts = defaultdict(list)
@@ -117,6 +119,7 @@ def parse_gtf_splice_junctions(gtf_file):
     return junction_annotation
 
 
+# coverage = reads using either splice site of the junction
 def calculate_coverage(df, col_prefix=''):
     try:
         jxn_col = col_prefix + 'jxn_alignment_count'
@@ -151,6 +154,7 @@ def calculate_PSI(df, PSI_rescale_factor, col_prefix=''):
         traceback.print_exc()
 
 
+# two-sided
 def beta_binomial_test_vectorized(x, n, alpha_value, beta_value):
     x = np.asarray(x, dtype=float)
     n = np.asarray(n, dtype=float)
@@ -229,6 +233,7 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
             _add_ss(hap1_df)
             _add_ss(hap2_df)
 
+        # GTEx junctions the sample doesn't have still need testing (as 0 reads)
         bulk_df_full = pd.DataFrame()
         for sample in bulk_df['sample'].unique():
             bulk_df_sample = bulk_df[bulk_df['sample'] == sample]
@@ -294,21 +299,21 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
         report_file.write(f"There are {len(bulk_df_full)} total junctions to analyze.\n\n")
 
 
-        report_file.write(f"Calculating coverage...\n")
+        report_file.write("Calculating coverage...\n")
         calculate_coverage(bulk_df_full)
         if haplotype_specific:
             calculate_coverage(hap1_df_full)
             calculate_coverage(hap2_df_full)
 
 
-        report_file.write(f"Calculating PSI values...\n")
+        report_file.write("Calculating PSI values...\n")
         calculate_PSI(bulk_df_full, PSI_rescale_factor)
         if haplotype_specific:
             calculate_PSI(hap1_df_full, PSI_rescale_factor)
             calculate_PSI(hap2_df_full, PSI_rescale_factor)
 
 
-        report_file.write(f"Merging precomputed GTEx beta fits...\n")
+        report_file.write("Merging precomputed GTEx beta fits...\n")
         fit_cols = ['num_gtex_samples_with_good_coverage', 'alpha', 'beta', 'expected_PSI',
                     'p1_PSI', 'p99_PSI', 'in_gtex_matrix']
         final_df = bulk_df_full.merge(
@@ -335,6 +340,8 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
         else:
             report_file.write(f"Running beta-binomial tests for {len(final_df)} junctions.\n")
 
+        # p-values + delta-PSI. delta-PSI is how far outside the GTEx 1st-99th percentile we are,
+        # so anything inside that range is 0
         jxn_num = pd.to_numeric(final_df['jxn_alignment_count'], errors='coerce')
         cov_num = pd.to_numeric(final_df['jxn_coverage'], errors='coerce')
         alpha_num = pd.to_numeric(final_df['alpha'], errors='coerce')
@@ -357,6 +364,7 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
         final_df['delta_PSI'] = delta_PSI
 
 
+        # flags explain why a junction ended up untestable
         final_df['flag'] = ""
         final_df['flag'] = np.where(
             pd.to_numeric(final_df['jxn_alignment_count'], errors='coerce') == 0,
@@ -402,9 +410,9 @@ def process_region(jxn_info_df_filtered, gtex_fits_filtered, region, sample_cove
 
 def main():
 
-    print(f"\n\n\n******************************************************************************************")
-    print(f"Testing splice junction usage against precomputed GTEx beta fits...")
-    print(f"******************************************************************************************\n")
+    print("\n\n\n******************************************************************************************")
+    print("Testing splice junction usage against precomputed GTEx beta fits...")
+    print("******************************************************************************************\n")
 
     args = parse_args()
 
@@ -487,6 +495,7 @@ def main():
 
     df = pd.concat(results, ignore_index=True)
 
+    # testable = enough GTEx samples, enough coverage here, and enough reads if it's novel
     mask = (
         (pd.to_numeric(df['num_gtex_samples_with_good_coverage'], errors='coerce') >= args.gtex_n_threshold) &
         (pd.to_numeric(df['jxn_coverage'], errors='coerce') >= args.sample_coverage_threshold) &
@@ -504,6 +513,7 @@ def main():
           f'{args.min_jxn_reads} bulk reads in this sample.')
     mask = mask & supported
 
+    # BH only over the testable ones
     print('Correcting for multiple testing...')
     col_idx = df.columns.get_loc("p_value")
     df.insert(col_idx + 1, "padj", "n/a")

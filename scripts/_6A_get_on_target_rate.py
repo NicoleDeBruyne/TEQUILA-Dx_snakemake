@@ -1,3 +1,5 @@
+# 6A - total / mapped / on-target read counts for one sample
+
 import argparse
 
 import pandas as pd
@@ -13,6 +15,7 @@ def parse_args():
     return parser.parse_args()
 
 
+# count read names, not alignments, so supplementary hits don't inflate it
 def count_reads(bam, bed):
     ids = set()
     with pysam.AlignmentFile(bam, "rb") as f:

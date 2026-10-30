@@ -1,3 +1,5 @@
+# step 2 - merge the caller VCFs, annotate, filter down to candidate variants
+
 def _gnomad_vcf_list(base, mito_vcf):
     chroms = config["gnomad_chroms"]
     vcfs   = [(str(base) + '/gnomad.genomes.v4.1.sites.' + str(c) + '.vcf.bgz') for c in chroms]
@@ -13,6 +15,7 @@ def _cadd_clnsig_args(wc):
 def _spliceai_clnsig_args(wc):
     return " ".join(('"' + str(s) + '"') for s in config["spliceai_clnsig_filter"])
 
+# WGS VCF replaces the RNA callers when we have one
 def _has_wgs(wc):
     return bool(SAMPLES[wc.sample].get("wgs_vcf"))
 
@@ -36,6 +39,7 @@ def _compile_bed_padding(wc):
 def _compile_vaf_flag(wc):
     return "--VAF-from-AD" if _has_wgs(wc) else ""
 
+# blank in the config = don't pass the flag at all
 def _final_dp_flag(wc):
     v = config.get("final_dp_threshold", "")
     return ('--final-DP-threshold ' + str(v)) if str(v).strip() != "" else ""
@@ -45,6 +49,7 @@ def _final_af_flag(wc):
     return ('--final-AF-threshold ' + str(v)) if str(v).strip() != "" else ""
 
 
+# 2A merge + annotate (gnomAD, ClinVar, CADD, SpliceAI)
 rule _2A_compile_variants:
     input:
         vcfs       = _compile_vcfs,
@@ -122,6 +127,7 @@ rule _2A_compile_variants:
         """
 
 
+# 2B keep rare, potentially damaging stuff
 rule _2B_filter_variants:
     input:
         tsv = "{outdir}/variant_calling/compiled_variants/{sample}_compiled_variants.tsv",

@@ -1,3 +1,5 @@
+# fonts + colours so all the plots look the same
+
 import os
 
 from matplotlib import font_manager, rcParams
@@ -6,6 +8,7 @@ from matplotlib.colors import LinearSegmentedColormap, to_hex, to_rgb
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 
 
+# registers the bundled Liberation fonts, otherwise matplotlib falls back to DejaVu
 def use_fonts(narrow=False):
     if os.path.isdir(FONT_DIR):
         for name in sorted(os.listdir(FONT_DIR)):
@@ -39,6 +42,7 @@ def select(n):
     return [SELECT_ORDER[i % len(SELECT_ORDER)] for i in range(n)]
 
 
+# configured colours win, anything left over gets the next palette colour
 def default_type_colors(names, configured=None):
     configured = {k: v for k, v in (configured or {}).items() if v}
     used = {c.lower() for c in configured.values()}

@@ -1,10 +1,11 @@
+# 10N1 - the per-sample gene hit table. pulls together variants, ASE, GTEx + cohort junction outliers,
+# isoform outliers, OMIM, expression and AMELIE, then tiers and ranks the genes
+
 import argparse
 import os
 import re
 import sys
 import warnings
-from collections import defaultdict
-from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -12,84 +13,11 @@ from pandas.errors import PerformanceWarning
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tier_rules
+from transcript_outliers import QC_FAIL, QC_PASS
+from gtf_utils import parse_gtf_junctions
 
 warnings.filterwarnings("ignore", category=PerformanceWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
-
-
-def parse_gtf_junctions(
-    gtf_path: str,
-    gene_names: List[str],
-) -> Dict[str, Dict]:
-    import gzip as _gz
-    import re as _re
-
-    gene_set = set(gene_names)
-
-    def _attr(attr_str, key):
-        m = _re.search(rf'{key}' + r'\s+"([^"]+)"', attr_str)
-        return m.group(1) if m else None
-
-    def _strip_ver(s):
-        return _re.sub(r'\.\d+$', '', s) if s else s
-
-    tx_canonical: set = set()
-    gene_exons: Dict[str, Dict[str, List[Tuple[str, int, int]]]] = defaultdict(lambda: defaultdict(list))
-
-    open_fn = _gz.open if gtf_path.endswith(".gz") else open
-
-    with open_fn(gtf_path, "rt") as fh:
-        for line in fh:
-            if line.startswith("#"): continue
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 9: continue
-            feat = parts[2]
-            if feat not in ("transcript", "exon"): continue
-
-            chrom = parts[0]
-            start = int(parts[3]) - 1
-            end   = int(parts[4])
-            attrs = parts[8]
-
-            gname = _attr(attrs, "gene_name") or _attr(attrs, "gene_symbol")
-            gid   = _strip_ver(_attr(attrs, "gene_id"))
-            gene_key = None
-            if gname and gname in gene_set:
-                gene_key = gname
-            elif gid and gid in gene_set:
-                gene_key = gid
-            if gene_key is None:
-                continue
-
-            tx_id = _attr(attrs, "transcript_id")
-            if tx_id is None: continue
-
-            if feat == "transcript":
-                if "Ensembl_canonical" in attrs:
-                    tx_canonical.add(tx_id)
-            elif feat == "exon":
-                gene_exons[gene_key][tx_id].append((chrom, start, end))
-
-    result: Dict[str, Dict] = {}
-    for gene_key, tx_dict in gene_exons.items():
-        canonical_jxns: set = set()
-        all_jxns_set:   set = set()
-        for tx_id, exons in tx_dict.items():
-            if len(exons) < 2: continue
-            exons_sorted = sorted(exons, key=lambda x: x[1])
-            for i in range(len(exons_sorted) - 1):
-                chrom_e, _, end_e   = exons_sorted[i]
-                chrom_n, start_n, _ = exons_sorted[i + 1]
-                if chrom_e != chrom_n: continue
-                jxn = f"{chrom_e}_{end_e + 1}_{start_n}"
-                all_jxns_set.add(jxn)
-                if tx_id in tx_canonical:
-                    canonical_jxns.add(jxn)
-        result[gene_key] = {
-            "canonical_junctions": canonical_jxns,
-            "all_junctions":       all_jxns_set,
-        }
-    return result
 
 
 _DELTA_COL_TO_SUFFIX = {
@@ -109,6 +37,7 @@ _DELTA_SUFFIXES_BY_PREFIX = {
 _CALLER_PHASE_PRIORITY = ('wgs', 'nanoTS', 'clair3_rna', 'longcallR')
 
 
+# genotype per caller, and whether two variants are in cis or trans
 def _caller_from_name(name):
     for caller in _CALLER_PHASE_PRIORITY + ('deepvariant',):
         if name.endswith('_' + caller):
@@ -250,6 +179,7 @@ def _join_items(values, sep=_ITEM_SEP):
     return sep.join(_cell(v) for v in values)
 
 
+# one row per gene with bulk/hap1/hap2 columns side by side
 def build_phased_junction_df(df, prefix, delta_cols=('delta_PSI',)):
     has_tissue = 'gtex_tissue' in df.columns
     tiers = {}
@@ -320,6 +250,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
 
     gt_by_caller = _build_gt_by_caller(variant_df)
     gt_caller_cols = [f'variant_GT_{suffix}' for suffix in _CALLER_GT_DISPLAY.values()]
+    # variants -> one row per gene. everything is joined in the same order so the columns still line up
     mod_variant_df = (
         variant_df
             .sort_values(['gene', 'variant_ID'])
@@ -358,6 +289,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     else:
         mod_cohort_junction_df = None
 
+    # outer join all the evidence on gene, then tack on OMIM
     hit_df = pd.merge(mod_variant_df, ase_df, on='gene', how='outer')
     hit_df = pd.merge(hit_df, mod_junction_df, on='gene', how='outer')
     if mod_cohort_junction_df is not None:
@@ -393,6 +325,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
 
     _FLOAT_TOKEN_RE = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
 
+    # junction strength comes from the biggest delta-PSI in bulk or either haplotype
     def max_deltas(row, prefix=''):
         def parse_vals(s):
             if not pd.notna(s):
@@ -442,6 +375,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     def _clean_inheritance(s):
         return str(s).strip().strip('"') if pd.notna(s) else ''
 
+    # how many P/LP and VUS, homozygous, in trans, etc.
     def _classify_gene_variants(gene_variant_rows):
         empty = dict(
             n_pathogenic_variants=0, has_pathogenic=False, has_vus=False,
@@ -515,6 +449,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
         has_2_vus_trans=False, has_2_vus_unclear=False, has_variants_in_trans=False,
     )
 
+    # actual rules are in tier_rules.py
     def _assign_tier(row):
         vc = variant_class_by_gene.get(row['gene'], _empty_variant_class)
         return tier_rules.assign_tier(
@@ -535,6 +470,7 @@ def build_hit_table(variant_df, ase_df, junction_df, cohort_junction_df, sample_
     )
     hit_df['_tb_variants'] = hit_df['variant']
 
+    # tie-breakers for ordering genes inside a tier
     def _max_bulk_delta(row):
         a = max_deltas(row, '')[0]
         b = max_deltas(row, 'cohort_')[0]
@@ -655,6 +591,9 @@ def parse_args():
              "whether this group used the beta_binomial or modified_zscore method) -- normalized to "
              "merge_hits.load_cohort_junction_df's schema here. If omitted/missing, every sample's "
              "cohort_* columns are filled with '.' (merge_hits.build_hit_table's existing fallback).")
+    parser.add_argument("--drop-cohort-events", nargs="*", default=[],
+        help="Cohort event labels to remove before merging (e.g. 5ss_IR 3ss_IR). A junction left with no event "
+             "is dropped, so those calls add no evidence and play no part in tiering.")
     parser.add_argument("--samples", nargs="+", required=True, help="Every sample name in this group.")
     parser.add_argument("--omim", required=False, default=None,
         help="Path to OMIM data. If omitted, phenotypes/inheritance_patterns/haploinsufficient are filled with '.'/False.")
@@ -705,7 +644,9 @@ def parse_args():
         help="This group's transcript usage outlier files from rule _9G (individual isoform outliers and "
              "isoform mix outliers). Every sample/gene in either file is a hit and counts as RNA dysregulation, "
              "with the same weight as a weak outlier splicing event when tiering; isoform_outlier is TRUE for "
-             "those genes and FALSE otherwise. Without these files the column is '.'.")
+             "those genes and FALSE otherwise. Calls from samples that failed 9F's isoform sample QC (qc column "
+             "'fail') are not used for tiering and are marked isoform_outlier 'fail'; isoform_qc gives each "
+             "sample's QC result. Without these files both columns are '.'.")
     args = parser.parse_args()
     if len(args.tissues) != len(args.junction_files):
         parser.error("--tissues and --junction-files must have the same number of entries")
@@ -765,20 +706,35 @@ def _load_amelie(files):
 
 
 def _load_isoform_outliers(files):
-    pairs = set()
+    pairs, failed_pairs, failed = set(), set(), set()
     for path in files:
         if not os.path.isfile(path):
             print(f"WARNING: isoform outlier file missing: {path}")
             continue
-        df = pd.read_csv(path, sep='\t', dtype=str, usecols=['sample', 'gene'])
-        pairs.update(zip(df['sample'].astype(str), df['gene'].astype(str)))
-    return pairs
+        df = pd.read_csv(path, sep='\t', dtype=str)
+        qc = df['qc'].astype(str).str.lower() if 'qc' in df.columns else pd.Series(QC_PASS, index=df.index)
+        bad = qc.eq(QC_FAIL)
+        pairs.update(zip(df.loc[~bad, 'sample'].astype(str), df.loc[~bad, 'gene'].astype(str)))
+        failed_pairs.update(zip(df.loc[bad, 'sample'].astype(str), df.loc[bad, 'gene'].astype(str)))
+        failed.update(df.loc[bad, 'sample'].astype(str))
+    if failed:
+        print(f"Isoform sample QC: outliers of {len(failed)} failed sample(s) are not used for tiering: "
+              + ", ".join(sorted(failed)))
+    return pairs, failed_pairs, failed
 
 
-def add_isoform_outlier(hit_df, sample, pairs, available):
+# respects the isoform sample QC, failed samples don't get isoform hits
+def add_isoform_outlier(hit_df, sample, pairs, failed_pairs, failed, available):
     at = list(hit_df.columns).index('hit') + 1 if 'hit' in hit_df.columns else len(hit_df.columns)
-    values = [('TRUE' if (str(sample), str(g)) in pairs else 'FALSE') if available else '.' for g in hit_df['gene']]
-    hit_df.insert(at, 'isoform_outlier', values)
+    def value(g):
+        if not available:
+            return '.'
+        if (str(sample), str(g)) in pairs:
+            return 'TRUE'
+        return QC_FAIL if (str(sample), str(g)) in failed_pairs else 'FALSE'
+    hit_df.insert(at, 'isoform_outlier', [value(g) for g in hit_df['gene']])
+    qc = (QC_FAIL if str(sample) in failed else QC_PASS) if available else '.'
+    hit_df.insert(at + 1, 'isoform_qc', qc)
     return hit_df
 
 
@@ -794,6 +750,7 @@ def _numeric_mask(series):
     return pd.to_numeric(series, errors='coerce').notna()
 
 
+# canonical junctions GTEx or the cohort analysis actually managed to test
 def _tested_canonical_junctions(canonical, samples, gtex_files, cohort_dir):
     canonical_all = set().union(*canonical.values()) if canonical else set()
     samples = {str(s) for s in samples}
@@ -832,6 +789,7 @@ def _fmt(v):
     return '.' if v is None or (isinstance(v, float) and pd.isna(v)) else v
 
 
+# panel genes without hits still go in, so you can see whether they were even testable
 def add_testability_and_non_hits(hit_df, sample, panel_genes, omim_df, coverage, canonical, tested):
     hit_df = hit_df.copy()
     hit_df['hit'] = 'TRUE'
@@ -866,6 +824,7 @@ def add_testability_and_non_hits(hit_df, sample, panel_genes, omim_df, coverage,
     return hit_df[_LEAD_COLS + ['hit'] + _TESTABILITY_COLS + rest]
 
 
+# reshape the 8C outliers so they look like the GTEx junction table
 def normalize_cohort_junction_df(df):
     out = pd.DataFrame()
     out['sample'] = df['sample']
@@ -913,6 +872,19 @@ def normalize_cohort_junction_df(df):
     return out
 
 
+# e.g. the default filter set throws out the 5'/3' IR events
+def drop_cohort_events(df, drop):
+    def keep(text):
+        labels = [e.strip() for e in str(text).split(',') if e.strip() and e.strip() not in drop]
+        return ','.join(labels) if labels else 'none'
+    n_before = len(df)
+    df = df.assign(event_type=df['event_type'].fillna('').apply(keep))
+    df = df[df['event_type'] != 'none'].reset_index(drop=True)
+    print(f"Removed cohort event label(s) {', '.join(sorted(drop))}: {n_before - len(df)} of {n_before} cohort "
+          f"junction row(s) had no other event and were dropped")
+    return df
+
+
 _EMPTY_JUNCTION_COLS = ['sample', 'gene', 'phasing', 'junction', 'jxn_coverage', 'delta_PSI', 'sample_count', 'annotation', 'event']
 
 
@@ -941,6 +913,8 @@ def main():
     if args.cohort_junction_tsv and os.path.isfile(args.cohort_junction_tsv):
         _required_cols = {'sample', 'phasing', 'gene', 'junction'}
         raw_cohort_df = pd.read_csv(args.cohort_junction_tsv, sep='\t', dtype=str)
+        if args.drop_cohort_events and 'event_type' in raw_cohort_df.columns:
+            raw_cohort_df = drop_cohort_events(raw_cohort_df, set(args.drop_cohort_events))
         if _required_cols.issubset(raw_cohort_df.columns) and not raw_cohort_df.empty:
             cohort_junction_df = normalize_cohort_junction_df(raw_cohort_df)
 
@@ -956,7 +930,8 @@ def main():
 
     panel_genes = _load_bed_genes(args.bed) if args.bed else None
     coverage = _load_coverage(args.samples, args.avg_coverage_files) if args.avg_coverage_files else {}
-    isoform_pairs = _load_isoform_outliers(args.isoform_outlier_files)
+    isoform_pairs, isoform_failed_pairs, isoform_failed = _load_isoform_outliers(args.isoform_outlier_files)
+    # one table per sample
     hit_dfs = []
     for sample in args.samples:
         sample_variant_df = variant_df[variant_df['sample'].astype(str) == str(sample)]
@@ -995,6 +970,7 @@ def main():
 
         hit_dfs.append((sample, hit_df))
 
+    # testability, the non-hit genes and AMELIE ranks
     canonical = {}
     if args.gtf:
         genes_for_gtf = list(dict.fromkeys(
@@ -1013,7 +989,8 @@ def main():
         hit_df = add_testability_and_non_hits(hit_df, sample, panel_genes, omim_df,
                                               coverage, canonical, tested)
         hit_df = add_amelie(hit_df, sample, amelie)
-        hit_df = add_isoform_outlier(hit_df, sample, isoform_pairs, bool(args.isoform_outlier_files))
+        hit_df = add_isoform_outlier(hit_df, sample, isoform_pairs, isoform_failed_pairs, isoform_failed,
+                                     bool(args.isoform_outlier_files))
         out_dfs.append(hit_df)
         print(f"  {sample}: {n_hits} gene(s) with hits, {len(hit_df)} row(s) total")
     hit_dfs = out_dfs

@@ -1,3 +1,5 @@
+# 1E: check the WGS VCF matches our genome build, normalize it, and pull out the panel regions
+
 import argparse
 import os
 import re
@@ -30,12 +32,13 @@ def parse_args():
     return parser.parse_args()
 
 
-def fail(message):
-    print(f"\nERROR: {message}", file=sys.stderr)
+def fail(msg):
+    print(f"\nERROR: {msg}", file=sys.stderr)
     sys.exit(1)
 
 
 def run(cmd):
+    # pipefail, otherwise a bcftools error mid-pipe still exits 0
     if subprocess.run(["bash", "-o", "pipefail", "-c", cmd]).returncode != 0:
         fail(f"command failed (see bcftools messages above; a reference allele mismatch means the VCF "
              f"is not from the pipeline's genome build):\n  {cmd}")
@@ -45,78 +48,82 @@ def capture(args):
     return subprocess.run(args, stdout=subprocess.PIPE, universal_newlines=True, check=True).stdout
 
 
-def read_fai(genome):
-    fai = genome + ".fai"
-    if not os.path.isfile(fai):
-        fail(f"FASTA index {fai} not found. Create it with: samtools faidx {genome}")
-    lengths = {}
-    with open(fai) as fh:
-        for line in fh:
-            fields = line.rstrip("\n").split("\t")
-            lengths[fields[0]] = int(fields[1])
-    return lengths
+def n_records(vcf):
+    return int(capture(["bcftools", "index", "-n", vcf]).strip())
 
 
-def header_contig_lengths(vcf):
+def write_bed(path, intervals):
+    with open(path, "w") as fh:
+        fh.writelines(f"{c}\t{s}\t{e}\n" for c, s, e in intervals)
+
+
+# header lines, contig lengths from the header, and the single sample name
+def read_header(vcf):
+    lines = capture(["bcftools", "view", "-h", vcf]).splitlines()
     lengths = {}
-    for line in capture(["bcftools", "view", "-h", vcf]).splitlines():
+    for line in lines:
         m = HEADER_CONTIG.match(line)
         if not m:
             continue
+        # contig lines look like ##contig=<ID=chr1,length=248956422,assembly=...>, just grab the key=value bits
         attrs = dict(kv.split("=", 1) for kv in re.findall(r"[A-Za-z_]+=[^,>]+", m.group(1)))
         if "ID" in attrs and "length" in attrs:
             lengths[attrs["ID"]] = int(attrs["length"])
-    return lengths
+
+    # last header line is #CHROM..., anything after FORMAT is a sample name
+    samples = lines[-1].split("\t")[9:]
+    if len(samples) != 1:
+        fail(f"{vcf} contains {len(samples)} samples ({', '.join(samples) or 'none'}). "
+             f"WGS VCFs must contain exactly one sample.")
+    print(f"WGS sample in VCF: {samples[0]}")
+    return lines, lengths
 
 
 def scan_records(vcf):
-    counts = Counter()
-    filters = set()
+    counts, filters = Counter(), set()
+    # streaming this on purpose, WGS VCFs can be millions of records
     proc = subprocess.Popen(["bcftools", "query", "-f", "%CHROM\t%FILTER\n", vcf],
                             stdout=subprocess.PIPE, universal_newlines=True)
     for line in proc.stdout:
         chrom, _, filt = line.rstrip("\n").partition("\t")
         counts[chrom] += 1
+        # non-PASS filters used in records need a ##FILTER line or bcftools complains later
         filters.update(f for f in filt.split(";") if f not in ("", ".", "PASS"))
     if proc.wait() != 0:
         fail(f"bcftools could not read {vcf}. If it is bgzipped, check it is complete with: bgzip -t {vcf}")
     return counts, filters
 
 
-def check_single_sample(vcf):
-    samples = [s for s in capture(["bcftools", "query", "-l", vcf]).splitlines() if s]
-    if len(samples) != 1:
-        fail(f"{vcf} contains {len(samples)} samples ({', '.join(samples) or 'none'}). "
-             f"WGS VCFs must contain exactly one sample.")
-    print(f"WGS sample in VCF: {samples[0]}")
+# match up VCF contigs with FASTA contigs, and bail if it looks like the wrong build
+def resolve_contigs(vcf, fai, counts, header_lengths):
+    def key(name):  # chr1 == 1, chrM == MT
+        k = re.sub(r"^chr", "", name, flags=re.IGNORECASE).upper()
+        return "M" if k == "MT" else k
 
-
-def contig_key(name):
-    key = re.sub(r"^chr", "", name, flags=re.IGNORECASE).upper()
-    return "M" if key == "MT" else key
-
-
-def resolve_contigs(vcf, fai_lengths, record_counts, header_lengths):
-    fasta_main = {contig_key(c): c for c in fai_lengths if MAIN_CONTIG.match(c)}
+    fasta_main = {key(c): c for c in fai if MAIN_CONTIG.match(c)}
     mapping, missing = {}, []
-    for c in record_counts:
-        if c in fai_lengths:
+    for c in counts:
+        if c in fai:
             mapping[c] = c
         elif MAIN_CONTIG.match(c):
-            if contig_key(c) in fasta_main:
-                mapping[c] = fasta_main[contig_key(c)]
+            if key(c) in fasta_main:
+                mapping[c] = fasta_main[key(c)]
             else:
                 missing.append(c)
+        # decoys/alts/unplaced not in the FASTA are dropped, not an error
+
     errors = []
-    targets = Counter(mapping.values())
-    collisions = sorted(c for c, f in mapping.items() if targets[f] > 1)
+    hits = Counter(mapping.values())
+    # e.g. a VCF with both chr1 and 1 in it, no way to know which one we're supposed to use
+    collisions = sorted(c for c, f in mapping.items() if hits[f] > 1)
     if collisions:
         errors.append(f"contigs {', '.join(collisions)} in the VCF all map to the same genome FASTA contig")
     if missing:
         errors.append(f"main chromosome(s) {', '.join(sorted(missing))} in the VCF have no counterpart in the genome FASTA")
-    mismatched = [f"{c} (VCF {header_lengths[c]}, FASTA {mapping[c]} {fai_lengths[mapping[c]]})"
-                  for c in sorted(mapping)
-                  if c in header_lengths and header_lengths[c] != fai_lengths[mapping[c]]]
+    # a length mismatch is how a hg19 VCF shows up against hg38
+    mismatched = [f"{c} (VCF {header_lengths[c]}, FASTA {f} {fai[f]})"
+                  for c, f in sorted(mapping.items())
+                  if c in header_lengths and header_lengths[c] != fai[f]]
     if mismatched:
         errors.append(f"chromosome length(s) differ from the genome FASTA, so the VCF is likely from "
                       f"a different genome build: {'; '.join(mismatched)}")
@@ -124,6 +131,7 @@ def resolve_contigs(vcf, fai_lengths, record_counts, header_lengths):
         errors.append("no main chromosome in the VCF matches the genome FASTA")
     if errors:
         fail(f"{vcf} does not match the genome:\n  - " + "\n  - ".join(errors))
+
     renamed = {c: f for c, f in mapping.items() if c != f}
     if renamed:
         print(f"Renaming {len(renamed)} contig(s) to match the genome FASTA: "
@@ -135,117 +143,112 @@ def resolve_contigs(vcf, fai_lengths, record_counts, header_lengths):
     return mapping
 
 
-def write_header(vcf, path, contigs, other_contigs, record_filters):
-    lines = [l for l in capture(["bcftools", "view", "-h", vcf]).splitlines() if not l.startswith("##contig=")]
-    defined_filters = {m.group(1) for l in lines for m in [re.match(r"^##FILTER=<ID=([^,>]+)", l)] if m}
-    filter_lines = [f'##FILTER=<ID={f},Description="{f}">' for f in sorted(record_filters - defined_filters)]
-    contig_lines = [f"##contig=<ID={c},length={n}>" for c, n in contigs] + [f"##contig=<ID={c}>" for c in other_contigs]
-    with open(path, "w") as fh:
-        fh.write("\n".join(lines[:-1] + filter_lines + contig_lines + lines[-1:]) + "\n")
-
-
-def write_bed(path, intervals):
-    with open(path, "w") as fh:
-        for chrom, start, end in intervals:
-            fh.write(f"{chrom}\t{start}\t{end}\n")
-
-
-def padded_panel_intervals(bed, padding, fai_lengths):
-    by_chrom = {}
-    skipped = set()
+# panel BED -> padded, merged regions to pull out of the normalized VCF
+def panel_intervals(bed, padding, fai):
+    by_chrom, skipped = {}, set()
     with open(bed) as fh:
         for line in fh:
             if not line.strip() or line.startswith(("#", "track", "browser")):
                 continue
-            fields = line.rstrip("\n").split("\t")
-            chrom, start, end = fields[0], int(fields[1]), int(fields[2])
-            if chrom not in fai_lengths:
+            chrom, start, end = line.rstrip("\n").split("\t")[:3]
+            if chrom not in fai:
                 skipped.add(chrom)
                 continue
-            by_chrom.setdefault(chrom, []).append(
-                (max(0, start - padding), min(fai_lengths[chrom], end + padding)))
+            # clip at 0 and the contig end, padding can run off either end for genes near telomeres
+            by_chrom.setdefault(chrom, []).append((max(0, int(start) - padding), min(fai[chrom], int(end) + padding)))
     if skipped:
         print(f"WARNING: panel BED contig(s) not in the genome FASTA were skipped: {', '.join(sorted(skipped))}")
-    order = {c: i for i, c in enumerate(fai_lengths)}
+
+    order = {c: i for i, c in enumerate(fai)}
     merged = []
     for chrom in sorted(by_chrom, key=order.get):
-        cur_start, cur_end = None, None
-        for start, end in sorted(by_chrom[chrom]):
-            if cur_end is not None and start <= cur_end:
-                cur_end = max(cur_end, end)
-                continue
-            if cur_end is not None:
-                merged.append((chrom, cur_start, cur_end))
-            cur_start, cur_end = start, end
-        if cur_end is not None:
-            merged.append((chrom, cur_start, cur_end))
+        for s, e in sorted(by_chrom[chrom]):
+            if merged and merged[-1][0] == chrom and s <= merged[-1][2]:
+                merged[-1][2] = max(merged[-1][2], e)
+            else:
+                merged.append([chrom, s, e])
     return merged
 
 
-def count_records(vcf):
-    return int(capture(["bcftools", "index", "-n", vcf]).strip())
-
-
 def main():
-    print(f"\n\n\n******************************************************************************************")
-    print(f"Preparing WGS VCF...")
-    print(f"******************************************************************************************\n")
+    print("\n\n\n******************************************************************************************")
+    print("Preparing WGS VCF...")
+    print("******************************************************************************************\n")
 
     args = parse_args()
+    # basic checks on the input before anything slow
     if not os.path.isfile(args.vcf):
         fail(f"WGS VCF {args.vcf} not found.")
-
+    # big WGS files often arrive partially copied; catch that before bcftools gives a cryptic error
     if args.vcf.endswith((".gz", ".bgz")):
         print("Checking the compressed VCF is complete...")
-        if subprocess.run(["bgzip", "-t", args.vcf], stderr=subprocess.PIPE, universal_newlines=True).returncode != 0:
+        if subprocess.run(["bgzip", "-t", args.vcf], stderr=subprocess.PIPE).returncode != 0:
             fail(f"{args.vcf} is truncated or corrupted (bgzip -t failed). Re-copy or re-download it.")
-    check_single_sample(args.vcf)
-    fai_lengths = read_fai(args.genome)
-    record_counts, filters = scan_records(args.vcf)
-    header_lengths = header_contig_lengths(args.vcf)
-    mapping = resolve_contigs(args.vcf, fai_lengths, record_counts, header_lengths)
 
-    dropped = {c: n for c, n in record_counts.items() if c not in mapping}
+    # load everything we need and line the contigs up (this is where a wrong-build VCF dies)
+    header_lines, header_lengths = read_header(args.vcf)
+    if not os.path.isfile(args.genome + ".fai"):
+        fail(f"FASTA index {args.genome}.fai not found. Create it with: samtools faidx {args.genome}")
+    with open(args.genome + ".fai") as fh:
+        fai = {f[0]: int(f[1]) for f in (line.split("\t") for line in fh)}
+    counts, filters = scan_records(args.vcf)
+    mapping = resolve_contigs(args.vcf, fai, counts, header_lengths)
+
+    dropped = sorted(c for c in counts if c not in mapping)
     if dropped:
-        print(f"Dropping {sum(dropped.values())} record(s) on {len(dropped)} contig(s) not in the genome FASTA: "
-              f"{', '.join(sorted(dropped))}")
+        print(f"Dropping {sum(counts[c] for c in dropped)} record(s) on {len(dropped)} contig(s) "
+              f"not in the genome FASTA: {', '.join(dropped)}")
     else:
         print("No records on contigs outside the genome FASTA.")
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.norm_vcf)), exist_ok=True)
-    os.makedirs(os.path.dirname(os.path.abspath(args.panel_vcf)), exist_ok=True)
+    for path in (args.norm_vcf, args.panel_vcf):
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+
+    q = shlex.quote
+    # intermediate files go in a temp dir next to the output and clean themselves up
     with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(args.norm_vcf))) as tmp:
-        order = {c: i for i, c in enumerate(fai_lengths)}
+        order = {c: i for i, c in enumerate(fai)}
+        # keep contigs in FASTA order, bcftools sort follows the header order so this keeps everything consistent
         kept = sorted(mapping, key=lambda c: order[mapping[c]])
         keep_bed = os.path.join(tmp, "genome_contigs.bed")
-        write_bed(keep_bed, [(c, 0, fai_lengths[mapping[c]]) for c in kept])
-        header = os.path.join(tmp, "header.txt")
-        write_header(args.vcf, header, [(c, fai_lengths[mapping[c]]) for c in kept],
-                     sorted(c for c in record_counts if c not in mapping), filters)
-        rename_file = os.path.join(tmp, "rename_chrs.txt")
-        with open(rename_file, "w") as fh:
-            for c in kept:
-                fh.write(f"{c}\t{mapping[c]}\n")
+        # whole-contig intervals, so -T below basically means 'only these contigs'
+        write_bed(keep_bed, [(c, 0, fai[mapping[c]]) for c in kept])
+        with open(os.path.join(tmp, "rename_chrs.txt"), "w") as fh:
+            fh.writelines(f"{c}\t{mapping[c]}\n" for c in kept)
 
+        # genome contig lines replace the originals; dropped contigs stay declared so bcftools can read
+        # their records before -T filters them out
+        header = [l for l in header_lines if not l.startswith("##contig=")]
+        defined = {m.group(1) for m in (re.match(r"^##FILTER=<ID=([^,>]+)", l) for l in header) if m}
+        extra = [f'##FILTER=<ID={f},Description="{f}">' for f in sorted(filters - defined)]
+        extra += [f"##contig=<ID={c},length={fai[mapping[c]]}>" for c in kept]
+        extra += [f"##contig=<ID={c}>" for c in dropped]
+        with open(os.path.join(tmp, "header.txt"), "w") as fh:
+            fh.write("\n".join(header[:-1] + extra + header[-1:]) + "\n")
+
+        # step 1: whole-genome normalized VCF
         print(f"\nNormalizing against {args.genome} and keeping only variant genotypes...")
-        run(f"bcftools reheader -h {shlex.quote(header)} {shlex.quote(args.vcf)}"
-            f" | bcftools view -T {shlex.quote(keep_bed)} -i 'GT=\"alt\"' -Ou"
-            f" | bcftools annotate --rename-chrs {shlex.quote(rename_file)} -Ou"
-            f" | bcftools sort -T {shlex.quote(os.path.join(tmp, 'sort'))} -Ou"
-            f" | bcftools norm -f {shlex.quote(args.genome)} -m -both -Ou"
-            f" | bcftools view -i 'GT=\"alt\" && ALT!=\"<NON_REF>\" && ALT!=\"<*>\"' -Oz -o {shlex.quote(args.norm_vcf)}")
-        run(f"tabix -f -p vcf {shlex.quote(args.norm_vcf)}")
-        print(f"Normalized VCF: {args.norm_vcf} ({count_records(args.norm_vcf)} records)")
+        # GT="alt" is applied twice: early to shrink the work, and again because splitting
+        # multiallelics leaves records where the sample only has the other alt
+        run(f"bcftools reheader -h {q(os.path.join(tmp, 'header.txt'))} {q(args.vcf)}"
+            f" | bcftools view -T {q(keep_bed)} -i 'GT=\"alt\"' -Ou"
+            f" | bcftools annotate --rename-chrs {q(os.path.join(tmp, 'rename_chrs.txt'))} -Ou"
+            f" | bcftools sort -T {q(os.path.join(tmp, 'sort'))} -Ou"
+            f" | bcftools norm -f {q(args.genome)} -m -both -Ou"
+            f" | bcftools view -i 'GT=\"alt\" && ALT!=\"<NON_REF>\" && ALT!=\"<*>\"' -Oz -o {q(args.norm_vcf)}")
+        run(f"tabix -f -p vcf {q(args.norm_vcf)}")
+        print(f"Normalized VCF: {args.norm_vcf} ({n_records(args.norm_vcf)} records)")
 
-        panel_bed = os.path.join(tmp, "panel_padded.bed")
-        intervals = padded_panel_intervals(args.bed, args.padding, fai_lengths)
+        # step 2: cut that down to the panel
+        intervals = panel_intervals(args.bed, args.padding, fai)
         if not intervals:
             fail(f"no panel BED regions in {args.bed} are on contigs in the genome FASTA.")
+        panel_bed = os.path.join(tmp, "panel_padded.bed")
         write_bed(panel_bed, intervals)
         print(f"\nRestricting to {len(intervals)} panel region(s) padded by {args.padding} bp...")
-        run(f"bcftools view -R {shlex.quote(panel_bed)} -Oz -o {shlex.quote(args.panel_vcf)} {shlex.quote(args.norm_vcf)}")
-        run(f"tabix -f -p vcf {shlex.quote(args.panel_vcf)}")
-        print(f"Panel VCF: {args.panel_vcf} ({count_records(args.panel_vcf)} records)")
+        run(f"bcftools view -R {q(panel_bed)} -Oz -o {q(args.panel_vcf)} {q(args.norm_vcf)}")
+        run(f"tabix -f -p vcf {q(args.panel_vcf)}")
+        print(f"Panel VCF: {args.panel_vcf} ({n_records(args.panel_vcf)} records)")
 
     print("\nDone.")
 

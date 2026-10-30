@@ -1,3 +1,5 @@
+# 4A - allele-specific expression test per gene from the haplotype read counts
+
 import argparse
 import pandas as pd
 import numpy as np
@@ -22,11 +24,13 @@ def parse_args():
     parser.add_argument('--outprefix', required=True, type=str, help='Prefix for final output files (i.e. prefix_ase_results.tsv and prefix_ase_outliers.tsv)')
     return parser.parse_args()
 
+# one-sided: is the minor haplotype count lower than you'd expect at 0.5?
 def binomial_test(hap1_count, hap2_count):
     n = int(hap1_count) + int(hap2_count)
     minor_count = int(min(hap1_count, hap2_count))
     return stats.binomtest(k=minor_count, n=n, p=0.5, alternative='less').pvalue
 
+# skip genes without enough phased reads, the test is meaningless there
 def process_gene(hap1_count, hap2_count, max_coverage, max_phased_coverage,
                  phasing_threshold, sample_coverage_threshold):
 
@@ -66,9 +70,9 @@ def plot_volcano(df, outprefix, padj_threshold, minor_haplotype_frequency_thresh
 
 def main():
 
-    print(f"\n\n\n******************************************************************************************")
-    print(f"Detecting ASE outliers...")
-    print(f"******************************************************************************************\n")
+    print("\n\n\n******************************************************************************************")
+    print("Detecting ASE outliers...")
+    print("******************************************************************************************\n")
 
     args = parse_args()
 
@@ -117,6 +121,7 @@ def main():
         'max_coverage', 'max_phased_coverage', 'ratio', 'diff', 'p_value'
     ])
 
+    # BH, but only over genes we could actually test
     print('Correcting for multiple testing...')
     df['padj'] = 'n/a'
     df['padj'] = df['padj'].astype(object)

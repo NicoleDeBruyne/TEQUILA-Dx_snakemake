@@ -1,3 +1,5 @@
+# 5A - junction counts per gene region, for the sample BAM and both haplotype BAMs
+
 import os, argparse, warnings, pysam, traceback
 import pandas as pd
 from pandas.errors import PerformanceWarning
@@ -20,6 +22,7 @@ def parse_args():
         help='Number of threads to use for parallel processing. Default: 1')
     return parser.parse_args()
 
+# N ops in the CIGAR are the introns
 def get_splice_junctions_from_CIGAR(cigar, start, region_chrom, region_start, region_end):
     pos = start
     sj_list = []
@@ -80,6 +83,7 @@ def _build_df(sj_dict, sample_id, phasing, region, gene, gene_alignment_count):
     df['gene_alignment_count'] = gene_alignment_count
     return df[['sample', 'phasing', 'region', 'gene', 'gene_alignment_count', 'junction', 'jxn_alignment_count']]
 
+# if a junction is missing on one haplotype it's 0 there, not NA
 def process_region(sample_id, gene, region, bamfile, report_outdir, hap1file=None, hap2file=None):
 
     report = os.path.join(report_outdir,

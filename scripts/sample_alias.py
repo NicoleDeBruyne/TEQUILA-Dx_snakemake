@@ -1,3 +1,5 @@
+# sample ID -> display alias, for anything that puts sample names on a plot
+
 import argparse
 
 
@@ -32,6 +34,7 @@ def parse_alias_map(pairs):
     return alias_map
 
 
+# no alias -> just use the ID
 def resolve(sample, alias_map):
     return alias_map.get(sample, sample)
 

@@ -1,3 +1,6 @@
+# 3A - for each gene: pick het variants we trust, split reads into haplotypes (WhatsHap haplotag or just
+# looking at which allele each read carries), and write hap1/hap2 BAMs + counts for the ASE step
+
 import argparse
 import os
 import sys
@@ -81,6 +84,7 @@ def write_variant_list(report_file, variants):
         report_file.write(f"    {format_variant(key)}\n")
 
 
+# can also drop monoexonic reads, they don't tell us anything about splicing
 def filter_bam_by_region(inbam, outbam, region, threads):
     subprocess.run(
         [
@@ -154,6 +158,7 @@ def _load_ignore_positions(ignore_variants_bed):
     return positions
 
 
+# bare-bones VCF read/write for the per-gene variant sets, WhatsHap doesn't need much
 def write_variants_vcf(outfile, variants, sample_name, contigs):
     if outfile.endswith(".gz"):
         outfile = outfile[:-3]
@@ -286,6 +291,7 @@ def read_nanoTS_vcf(vcf_path):
     return variants
 
 
+# trusted NanoTS hets in the gene, plus any that share a phase block with one
 def select_nanoTS_variants_for_gene(
     nanoTS_vcf_path,
     chrom,
@@ -482,6 +488,7 @@ def select_wgs_variants_for_gene(
     return variants
 
 
+# indels are noisy in long reads, so only take ones both Clair3 and DeepVariant called
 def select_candidate_indels_for_gene(
     clair3_vcf_path,
     deepvariant_vcf_path,
@@ -551,6 +558,7 @@ def select_candidate_indels_for_gene(
     }
 
 
+# variants that keep showing up near read ends are usually alignment junk
 def remove_end_variants(
     invcf,
     outvcf,
@@ -971,6 +979,7 @@ def _query_position_at(aln, pos0):
     return _NOT_COVERED
 
 
+# allele support and the read-end check in one pass over the reads
 def evaluate_snv(
     bam_path,
     variant,
@@ -1114,6 +1123,7 @@ def write_direct_haplotag(
     return haplotag_outfile
 
 
+# compare bulk vs hap coverage to see how much of the gene actually got phased
 def get_phased_coverage(
     bam_path,
     hap1_bam_path,
@@ -1409,6 +1419,7 @@ def finalize_haplotype_bams(
     return report_message, summary_row
 
 
+# this does the actual work for one gene
 def phase_reads(
     bam,
     gene,
@@ -1549,6 +1560,7 @@ def phase_reads(
 
         if wgs_vcf:
 
+            # WGS mode uses the WGS hets, RNA mode (below) uses the trusted NanoTS ones
             nanoTS_variants = select_wgs_variants_for_gene(
                 wgs_vcf,
                 chrom,
@@ -1630,6 +1642,7 @@ def phase_reads(
             report_file.flush()
 
 
+        # read-end filter only makes sense in RNA mode, WGS calls don't have that problem
         end_filter_enabled = (
             min_distance_from_read_end > 0
             and terminal_variant_proportion < 1
@@ -1794,6 +1807,7 @@ def phase_reads(
         report_file.flush()
 
 
+        # count REF/ALT reads for everything that's left and keep the best supported variant
         pool_keys = (
             list(nanoTS_variants.keys()) +
             list(candidate_indels.keys())
@@ -1887,6 +1901,7 @@ def phase_reads(
             best_dp = 0
 
 
+        # nothing usable, give up on this gene
         if best_key is None:
 
             report_file.write(
@@ -1932,6 +1947,9 @@ def phase_reads(
         )
 
 
+        # if the variants are in a phase block use WhatsHap haplotag. if haplotag ends up assigning
+        # fewer reads than direct assignment would, go with direct assignment instead.
+        # no phase block -> assign reads by the best variant's allele
         ps_counts = {}
 
         for _, phased_flag, PS, _ in nanoTS_variants.values():
@@ -2118,7 +2136,7 @@ def phase_reads(
 
 
         report_file.write(
-            f"\n\nCreating haplotype-specific BAM files..."
+            "\n\nCreating haplotype-specific BAM files..."
         )
 
         report_file.flush()
@@ -2278,6 +2296,7 @@ def main():
         args.snvs_only
     )
 
+    # run every gene (in parallel when we've got a BED panel)
     summary_rows = []
 
     if args.bed:
@@ -2396,6 +2415,7 @@ def main():
             summary_rows.append(row)
 
 
+    # haplotype read counts per gene, step 4 reads this
     ase_infile = os.path.join(
         args.outdir,
         f"{args.name}_phasing_summary.tsv"
@@ -2444,6 +2464,7 @@ def main():
 
     if args.bed:
 
+        # gene -> bulk/hap1/hap2 BAM, so later steps know where everything is
         mapping_file = os.path.join(
             args.outdir,
             f"{args.name}_gene_bam_mapping_file.tsv"

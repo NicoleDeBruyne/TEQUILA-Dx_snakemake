@@ -1,25 +1,27 @@
+# step 10 - merge everything into cohort/group tables and plots, then the per-sample reports
+
 from math import ceil
 
 _cohort_outdir  = config["output_dir"] + "/{cohort_id}"
-_JXN_FILTER_SETS = ["default", "stringent"]
+_JXN_FILTER_SETS = ["default", "with_ss_IR"]
+_SS_IR_EVENTS = ["5ss_IR", "3ss_IR"]
 
 _variant_tsv = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_variant_calling/{filter_set}/all_candidate_variants.tsv"
 _ase_tsv     = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_ase_analysis/{filter_set}/outlier_ase.tsv"
 
+# max fraction of the group a variant/ASE/junction hit can be in before we call it recurrent
 def _variant_sample_fraction(filter_set):
-    if filter_set == "stringent":
-        return config.get("merge_variant_sample_fraction_stringent", 0.01)
     return config["merge_variant_sample_fraction"]
 
 def _ase_sample_fraction(filter_set):
-    if filter_set == "stringent":
-        return config.get("merge_ase_sample_fraction_stringent", 0.01)
     return config["merge_ase_sample_fraction"]
 
 def _jxn_sample_fraction(filter_set):
-    if filter_set == "stringent":
-        return config.get("merge_jxn_sample_fraction_stringent", 0.01)
     return config["merge_jxn_sample_fraction"]
+
+# fill in a template for the default filter set
+def _shared_path(template, wc):
+    return template.format(cohort_id=wc.cohort_id, bed_id=wc.bed_id, sample_type=wc.sample_type, filter_set="default")
 
 _junction_final = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_junction_analysis/{filter_set}/gtex_{tissue}/outlier_junctions_gtex_{tissue}_final.tsv"
 _junction_significant = (_cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_junction_analysis/{filter_set}/gtex_{tissue}/outlier_junctions_gtex_{tissue}_"
@@ -53,6 +55,7 @@ def _group_junction_significant_path(group_id, tissue, filter_set):
             + str(float(config['merge_jxn_padj_threshold'])) + 'padj_'
             + str(float(config['merge_delta_psi_threshold'])) + 'deltaPSI.tsv')
 
+# 10M writes one table per event type, this globs them
 def _group_junction_source_glob(group_id, tissue, filter_set):
     n_tissue_samples = len(_group_tissue_samples(group_id, tissue))
     n = ceil(n_tissue_samples * _jxn_sample_fraction(filter_set))
@@ -70,6 +73,7 @@ def _bed_qc_files(cohort_id, bed_id, name):
     return [_sample_qc_file(s, name) for s in bed_samples(cohort_id, bed_id)]
 
 
+# 10A-10B cohort QC tables / plots
 rule _10A_merge_on_target_rates:
     input:
         infiles = lambda wc: _bed_qc_files(wc.cohort_id, wc.bed_id, "on_target"),
@@ -140,6 +144,7 @@ def _group_junction_matrix_inputs(group_id):
             for s in GROUPS[group_id]]
 
 
+# 10C1/10C2 group junction matrix, and the check that samples are the tissue they claim to be
 rule _10C1_build_group_junction_matrix:
     input:
         matrices = lambda wc: _group_junction_matrix_inputs(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
@@ -212,6 +217,7 @@ rule _10C2_validate_sample_types:
         """
 
 
+# 10D-10E coverage and full-length ratio
 _AVG_COV_DIR = _cohort_outdir + "/{bed_id}/output/cohort_qc/avg_coverage/{bed_id}"
 
 rule _10D_merge_avg_coverage:
@@ -307,6 +313,7 @@ def _group_quant_files(group_id, name):
     return [_sample_quant_file(s, name) for s in GROUPS[group_id]]
 
 
+# 10F-10J gene expression matrices + boxplots
 rule _10F_merge_gene_count:
     input:
         infiles = lambda wc: _group_quant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "gene_count"),
@@ -492,7 +499,10 @@ rule _10J_gene_quantification_boxplots:
         """
 
 
+# 10K-10M merge variants, ASE and junction outliers across the group
 rule _10K_merge_group_variants:
+    wildcard_constraints:
+        filter_set = "default",
     input:
         variant_files = lambda wc: _group_variant_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
     output:
@@ -536,6 +546,8 @@ rule _10K_merge_group_variants:
 
 
 rule _10L_merge_group_ase:
+    wildcard_constraints:
+        filter_set = "default",
     input:
         ase_files = lambda wc: _group_ase_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
     output:
@@ -572,6 +584,8 @@ rule _10L_merge_group_ase:
 
 
 rule _10M_merge_group_junctions:
+    wildcard_constraints:
+        filter_set = "default",
     input:
         junction_files = lambda wc: _group_tissue_junction_files(
             _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.tissue),
@@ -641,7 +655,10 @@ def _group_cohort_results_dir(group_id):
 def _group_cohort_scoring_sentinel(cohort_id, bed_id, sample_type):
     return _cja_scoring_sentinel.format(cohort_id=cohort_id, bed_id=bed_id, sample_type=sample_type)
 
+# 10N1 all the evidence -> per-gene hits and tiers
 rule _10N1_merge_group_hits:
+    wildcard_constraints:
+        filter_set = "|".join(_JXN_FILTER_SETS),
     input:
         bed            = lambda wc: bed_path(wc.cohort_id, wc.bed_id),
         gtf            = config["annotation"],
@@ -654,10 +671,10 @@ rule _10N1_merge_group_hits:
         cohort_scoring_sentinel = lambda wc: (
             _group_cohort_scoring_sentinel(wc.cohort_id, wc.bed_id, wc.sample_type)
         ) if cja_enabled(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)) else [],
-        variant_tsv    = _variant_tsv,
-        ase_tsv        = _ase_tsv,
+        variant_tsv    = lambda wc: _shared_path(_variant_tsv, wc),
+        ase_tsv        = lambda wc: _shared_path(_ase_tsv, wc),
         junction_files = lambda wc: [
-            _group_junction_final_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), t, wc.filter_set)
+            _group_junction_final_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), t, "default")
             for t in group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))
         ],
         cohort_junction_tsv = lambda wc: (
@@ -703,6 +720,7 @@ rule _10N1_merge_group_hits:
         amelie_flag  = lambda wc, input: ("--amelie-files " + " ".join(input.amelie_files)) if input.amelie_files else "",
         isoform_flag = lambda wc, input: (
             "--isoform-outlier-files " + " ".join(input.isoform_outlier_files)) if input.isoform_outlier_files else "",
+        drop_events_flag = lambda wc: ("--drop-cohort-events " + " ".join(_SS_IR_EVENTS)) if wc.filter_set == "default" else "",
         script       = workflow.basedir + "/scripts/_10N1_merge_group_hits.py",
     threads: 1
     resources:
@@ -731,11 +749,14 @@ rule _10N1_merge_group_hits:
             {params.cohort_results_flag} \\
             {params.amelie_flag} \\
             {params.isoform_flag} \\
+            {params.drop_events_flag} \\
         2>&1 | tee {log}
         """
 
 
 rule _10N2_plot_group_hits:
+    wildcard_constraints:
+        filter_set = "|".join(_JXN_FILTER_SETS),
     input:
         all_hits = lambda wc: _group_all_hits_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.filter_set),
     output:
@@ -761,86 +782,63 @@ rule _10N2_plot_group_hits:
         """
 
 
-def _method_comparison_dir(group_id, filter_set):
-    return str(group_outdir(group_id)) + "/merged_hits/" + str(filter_set) + "/method_comparison"
+def _group_sample_gtex_files(sample):
+    return [(t, str(SAMPLES[sample]['outdir']) + '/junction_analysis/gtex_' + str(t) + '/' + str(sample)
+             + '_gtex_' + str(t) + '_all_junctions.tsv') for t in sample_tissues(sample)]
 
-def _method_comparison_gtex_inputs(group_id):
-    return [(s, t, str(SAMPLES[s]['outdir']) + '/junction_analysis/gtex_' + str(t) + '/' + str(s)
-             + '_gtex_' + str(t) + '_all_junctions.tsv')
-            for s in GROUPS[group_id] for t in sample_tissues(s)]
+def _report_cmp_available(wc):
+    return flag("junction_analysis") and cja_enabled(_report_group(wc))
 
-rule _10N3_compare_junction_methods:
-    input:
-        bed               = lambda wc: bed_path(wc.cohort_id, wc.bed_id),
-        gtex_final        = lambda wc: [_group_junction_final_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), t, wc.filter_set)
-                                        for t in group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))],
-        gtex_significant  = lambda wc: [_group_junction_significant_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), t, wc.filter_set)
-                                        for t in group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))],
-        gtex_all          = lambda wc: [x[2] for x in _method_comparison_gtex_inputs(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))],
-        cohort_sentinel   = lambda wc: _group_cohort_scoring_sentinel(wc.cohort_id, wc.bed_id, wc.sample_type),
-        cohort_outliers   = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)).replace("_outliers_filtered.tsv", "_outliers.tsv"),
-        cohort_filtered   = lambda wc: _cja_outliers_filtered_path(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-        isoform_outliers  = lambda wc: (
-            ctx_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))["isoform_outliers"]
-        ) if ctx_enabled(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)) else [],
-        landscape_outliers = lambda wc: (
-            ctx_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))["landscape_outliers"]
-        ) if ctx_enabled(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)) else [],
-    output:
-        pdf   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/method_comparison/{sample_type}_method_comparison.pdf",
-        genes = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/method_comparison/{sample_type}_gene_hits_by_method.tsv",
-        jxns  = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/merged_hits/{filter_set}/method_comparison/{sample_type}_junction_status.tsv.gz",
-    params:
-        group_id   = lambda wc: _group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type),
-        samples    = lambda wc: GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)],
-        tissues    = lambda wc: group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-        thresholds = lambda wc: [ceil(len(_group_tissue_samples(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), t))
-                                      * _jxn_sample_fraction(wc.filter_set))
-                                 for t in group_tissues(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))],
-        all_samples = lambda wc: [x[0] for x in _method_comparison_gtex_inputs(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))],
-        all_tissues = lambda wc: [x[1] for x in _method_comparison_gtex_inputs(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type))],
-        results_dir = lambda wc: _group_cohort_results_dir(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-        iso_flag   = lambda wc, input: ("--isoform-outliers " + str(input.isoform_outliers)
-                                        + " --landscape-outliers " + str(input.landscape_outliers)) if input.isoform_outliers else "",
-        outdir     = lambda wc: _method_comparison_dir(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), wc.filter_set),
-        min_reads  = config["jxn_min_reads"],
-        cov_thr    = config["sample_coverage_threshold"],
-        n_thr      = lambda wc: _cja_n_threshold(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
-        script     = workflow.basedir + "/scripts/_10N3_compare_junction_methods.py",
-    threads: 1
-    resources:
-        mem_mb  = lambda wc, attempt: attempt * 1024 * max(8, len(GROUPS[_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)]) // 4),
-        runtime = config["time"],
-    log:
-        _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/logs/{sample_type}_{filter_set}_10N3_compare_junction_methods.log"
-    shell:
-        """
-        mkdir -p {params.outdir} $(dirname {log})
-        python -u {params.script} \\
-            --samples                   {params.samples} \\
-            --bed                       {input.bed} \\
-            --tissues                   {params.tissues} \\
-            --gtex-final-files          {input.gtex_final} \\
-            --gtex-significant-files    {input.gtex_significant} \\
-            --gtex-sample-thresholds    {params.thresholds} \\
-            --gtex-all-junction-files   {input.gtex_all} \\
-            --gtex-all-junction-samples {params.all_samples} \\
-            --gtex-all-junction-tissues {params.all_tissues} \\
-            --cohort-results-dir        {params.results_dir} \\
-            --cohort-outliers           {input.cohort_outliers} \\
-            --cohort-outliers-filtered  {input.cohort_filtered} \\
-            {params.iso_flag} \\
-            --min-jxn-reads             {params.min_reads} \\
-            --coverage-threshold        {params.cov_thr} \\
-            --n-threshold               {params.n_thr} \\
-            --title                     "{params.group_id} ({wildcards.filter_set})" \\
-            --outdir                    {params.outdir} \\
-            --prefix                    {wildcards.sample_type} \\
-        2>&1 | tee {log}
-        """
+def _report_cmp_files(wc):
+    if not _report_cmp_available(wc):
+        return []
+    gid = _report_group(wc)
+    tissues = group_tissues(gid)
+    return ([_group_junction_final_path(gid, t, "default") for t in tissues]
+            + [_group_junction_significant_path(gid, t, "default") for t in tissues]
+            + [p for _, p in _group_sample_gtex_files(wc.sample)]
+            + [_cja_scoring_sentinel.format(cohort_id=wc.cohort_id, bed_id=wc.bed_id,
+                                            sample_type=SAMPLES[wc.sample]["sample_type"]),
+               _cja_outliers_filtered_path(gid).replace("_outliers_filtered.tsv", "_outliers.tsv"),
+               _cja_outliers_filtered_path(gid)])
+
+def _report_cmp_args(wc):
+    gid = _report_group(wc)
+    if not flag("junction_analysis"):
+        return "--cmp-unavailable " + _quoted(["the GTEx junction analysis is turned off"])[0]
+    if not cja_enabled(gid):
+        return "--cmp-unavailable " + _quoted(["the in-house junction analysis needs at least "
+                                               + str(config.get("cohort_jxn_zscore_n_threshold", 10)) + " "
+                                               + str(GROUP_SAMPLE_TYPE[gid]) + " samples (this cohort has "
+                                               + str(len(GROUPS[gid])) + ")"])[0]
+    tissues = group_tissues(gid)
+    gtex = _group_sample_gtex_files(wc.sample)
+    filtered = _cja_outliers_filtered_path(gid)
+    args = [
+        "--cmp-tissues " + " ".join(tissues),
+        "--cmp-gtex-final-files " + " ".join(_group_junction_final_path(gid, t, "default") for t in tissues),
+        "--cmp-gtex-significant-files " + " ".join(_group_junction_significant_path(gid, t, "default") for t in tissues),
+        "--cmp-gtex-sample-thresholds " + " ".join(str(ceil(len(_group_tissue_samples(gid, t)) * _jxn_sample_fraction("default")))
+                                                   for t in tissues),
+        "--cmp-cohort-results-dir " + _group_cohort_results_dir(gid),
+        "--cmp-cohort-outliers " + filtered.replace("_outliers_filtered.tsv", "_outliers.tsv"),
+        "--cmp-cohort-outliers-filtered " + filtered,
+        "--cmp-min-jxn-reads " + str(config["jxn_min_reads"]),
+        "--cmp-coverage-threshold " + str(config["sample_coverage_threshold"]),
+        "--cmp-n-threshold " + str(_cja_n_threshold(gid)),
+    ]
+    if gtex:
+        args.append("--cmp-gtex-all-junction-files " + " ".join(p for _, p in gtex))
+        args.append("--cmp-gtex-all-junction-tissues " + " ".join(t for t, _ in gtex))
+    if wc.filter_set == "default":
+        args.append("--cmp-drop-events " + " ".join(_SS_IR_EVENTS))
+    return " ".join(args)
 
 
+# 10O1 every group's hits for the panel in one table
 rule _10O1_final_merge:
+    wildcard_constraints:
+        filter_set = "|".join(_JXN_FILTER_SETS),
     input:
         all_hits = lambda wc: [_group_all_hits_path(gid, wc.filter_set) for gid in BED_GROUPS[(wc.cohort_id, wc.bed_id)]],
     output:
@@ -860,6 +858,8 @@ rule _10O1_final_merge:
 
 
 rule _10O2_plot_hits_upset:
+    wildcard_constraints:
+        filter_set = "|".join(_JXN_FILTER_SETS),
     input:
         all_hits = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits.tsv",
     output:
@@ -924,6 +924,7 @@ def _cohort_qc_file(wc, rel):
     return str(bed_outdir(wc.cohort_id, wc.bed_id)) + "/cohort_qc/" + rel.format(b=wc.bed_id)
 
 
+# WGS concordance only when some samples have a WGS VCF
 def _bed_wgs_samples(cohort_id, bed_id):
     return [s for s in bed_samples(cohort_id, bed_id) if SAMPLES[s].get("wgs_vcf")]
 
@@ -980,6 +981,40 @@ rule _10P_check_wgs_concordance:
         """
 
 
+def _phasing_vs_wgs_tables(wc):
+    return [str(SAMPLES[s]['outdir']) + '/phasing_vs_wgs/' + str(s) + '_phasing_vs_wgs_genes.tsv'
+            for s in _bed_wgs_samples(wc.cohort_id, wc.bed_id)]
+
+
+# panel-level summary of the 3C phasing checks (WGS samples only)
+rule _10R_merge_phasing_vs_wgs:
+    input:
+        tables = _phasing_vs_wgs_tables,
+    output:
+        summary = _cohort_outdir + "/{bed_id}/output/cohort_qc/phasing_concordance/{bed_id}_phasing_concordance_summary.tsv",
+        genes   = _cohort_outdir + "/{bed_id}/output/cohort_qc/phasing_concordance/{bed_id}_phasing_concordance_genes.tsv",
+        plot    = _cohort_outdir + "/{bed_id}/output/cohort_qc/phasing_concordance/{bed_id}_phasing_concordance_summary.pdf",
+    params:
+        alias_args = lambda wc: _quoted(alias_map_args(_bed_wgs_samples(wc.cohort_id, wc.bed_id))),
+        outprefix  = lambda wc, output: output.summary[:-len("_summary.tsv")],
+        script     = workflow.basedir + "/scripts/_10R_merge_phasing_vs_wgs.py",
+    threads: 1
+    resources:
+        mem_mb  = lambda wc, attempt: attempt * 2 * 1024,
+        runtime = config["time"],
+    log:
+        _cohort_outdir + "/{bed_id}/logs/{bed_id}_10R_merge_phasing_vs_wgs.log"
+    shell:
+        """
+        mkdir -p $(dirname {output.summary}) $(dirname {log})
+        python -u {params.script} \\
+            --gene-tables {input.tables} \\
+            --outprefix   {params.outprefix} \\
+            --alias-map   {params.alias_args} \\
+        2>&1 | tee {log}
+        """
+
+
 def _report_group(wc):
     return _group_id_from_ids(wc.cohort_id, wc.bed_id, SAMPLES[wc.sample]["sample_type"])
 
@@ -994,6 +1029,7 @@ def _report_tx_args(wc):
         "--tx-gene-status " + f["gene_status"],
         "--tx-isoform-outliers " + f["isoform_outliers"],
         "--tx-landscape-outliers " + f["landscape_outliers"],
+        "--tx-sample-qc " + f["sample_qc"],
         "--tx-gtf " + f["gtf"],
         "--tx-method " + _cja_method_for_group(gid),
         "--tx-n-threshold " + str(_cja_n_threshold(gid)),
@@ -1003,9 +1039,12 @@ def _report_tx_args(wc):
     ])
 
 
+# 10Q the report (+ review page)
 rule _10Q_make_final_report:
+    wildcard_constraints:
+        filter_set = "|".join(_JXN_FILTER_SETS),
     input:
-        merged_hits   = _cohort_outdir + "/{bed_id}/output/default/merged_all_hits.tsv",
+        merged_hits   = _cohort_outdir + "/{bed_id}/output/{filter_set}/merged_all_hits.tsv",
         bam           = lambda wc: SAMPLES[wc.sample]["bam"],
         mapping       = lambda wc: _sample_gene_bam_mapping(wc.sample) if flag("phase_reads") else [],
         bed           = lambda wc: bed_path(wc.cohort_id, wc.bed_id),
@@ -1022,9 +1061,10 @@ rule _10Q_make_final_report:
         hpo_terms     = lambda wc: hpo_terms_tsv(wc.sample) if sample_hpo(wc.sample) else [],
         tx_files      = lambda wc: (
             list(ctx_files(_report_group(wc)).values()) if ctx_enabled(_report_group(wc)) else []),
+        cmp_files     = _report_cmp_files,
     output:
-        pdf = _cohort_outdir + "/{bed_id}/output/default/final_reports/{sample}_report.pdf",
-        html = _cohort_outdir + "/{bed_id}/output/default/final_reports/{sample}_review.html",
+        pdf = _cohort_outdir + "/{bed_id}/output/{filter_set}/final_reports/{sample}_report.pdf",
+        html = _cohort_outdir + "/{bed_id}/output/{filter_set}/final_reports/{sample}_review.html",
     params:
         genome           = config["genome"],
         mapping_arg      = lambda wc, input: ("--gene-bam-mapping " + str(input.mapping)) if input.mapping else "",
@@ -1050,16 +1090,21 @@ rule _10Q_make_final_report:
         max_reads        = config.get("hit_report_max_reads", 1000),
         hpo_arg          = lambda wc, input: ("--hpo-terms-tsv " + str(input.hpo_terms)) if input.hpo_terms else "",
         tx_args          = _report_tx_args,
+        cmp_args         = _report_cmp_args,
+        default_reviews  = _cohort_outdir + "/{bed_id}/output/default/final_reports/{sample}_reviews.tsv",
+        label_arg        = lambda wc: "--hit-set-label \"including 5'/3' ss IR\"" if wc.filter_set == "with_ss_IR" else "",
         script           = workflow.basedir + "/scripts/_10Q_make_final_report.py",
     threads: 1
     resources:
         mem_mb  = lambda wc, attempt: attempt * 1024 * 8,
         runtime = config["time"],
     log:
-        _cohort_outdir + "/{bed_id}/logs/final_reports/{sample}_10Q_make_final_report.log"
+        _cohort_outdir + "/{bed_id}/logs/final_reports/{filter_set}/{sample}_10Q_make_final_report.log"
     shell:
         """
         mkdir -p $(dirname {output.pdf}) $(dirname {log})
+        PREV="$(dirname {output.html})/{wildcards.sample}_reviews.tsv"
+        [ -f "$PREV" ] || PREV="{params.default_reviews}"
         python -u {params.script} \\
             --sample             {wildcards.sample} \\
             --hits-tsv           {input.merged_hits} \\
@@ -1068,6 +1113,7 @@ rule _10Q_make_final_report:
             {params.qc_args} \\
             {params.hpo_arg} \\
             {params.tx_args} \\
+            {params.cmp_args} \\
             --bed                {input.bed} \\
             --gtf                {input.gtf} \\
             --genome             {params.genome} \\
@@ -1083,6 +1129,7 @@ rule _10Q_make_final_report:
             --max-reads          {params.max_reads} \\
             --outfile            {output.pdf} \\
             --html-out           {output.html} \\
-            --previous-reviews   "$(dirname {output.html})/{wildcards.sample}_reviews.tsv" \\
+            --previous-reviews   "$PREV" \\
+            {params.label_arg} \\
         2>&1 | tee {log}
         """

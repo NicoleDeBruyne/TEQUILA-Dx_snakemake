@@ -1,19 +1,20 @@
+# 10M - merge GTEx junction outliers across the group, turn them into splice events, and write tables that get
+# filtered a bit more at each stage (direction, event type, annotation, cohort, recurrence)
+
 import argparse
 import pandas as pd
 import numpy as np
-from itertools import combinations
 from collections import defaultdict
 from scipy.stats import beta, betabinom
 import os
 import warnings
 from math import ceil
-from typing import Dict, List, Tuple
-from statsmodels.stats.multitest import multipletests
 from pandas.errors import PerformanceWarning
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 from palette import SELECT_ORDER, use_fonts
 from matplotlib import rcParams
+from bed_utils import load_bed
+from gtf_utils import parse_gtf_junctions
+from plot_utils import plot_outlier_counts
 use_fonts()
 rcParams['pdf.fonttype'] = 42
 
@@ -21,103 +22,6 @@ warnings.filterwarnings("ignore", category=PerformanceWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*Glyph.*missing from font.*", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*Adding colorbar to a different Figure.*", category=UserWarning)
-
-
-def load_bed(path: str) -> Dict[str, Tuple[str, str, str]]:
-    gene_info: Dict[str, Tuple[str, str, str]] = {}
-    with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 6:
-                print(f"[WARNING] BED line has <6 columns, skipping: {line!r}")
-                continue
-            chrom, start, end, gene, _, strand = parts[:6]
-            gene   = gene.strip()
-            strand = strand.strip()
-            region = f"{chrom.strip()}:{start.strip()}-{end.strip()}"
-            if gene in gene_info:
-                print(f"[WARNING] Gene '{gene}' appears more than once in BED. Using last entry.")
-            gene_info[gene] = (chrom.strip(), region, strand)
-    print(f"BED file loaded: {len(gene_info)} gene(s)")
-    return gene_info
-
-
-def parse_gtf_junctions(
-    gtf_path: str,
-    gene_names: List[str],
-) -> Dict[str, Dict]:
-    import gzip as _gz
-    import re as _re
-
-    gene_set = set(gene_names)
-
-    def _attr(attr_str, key):
-        m = _re.search(rf'{key}' + r'\s+"([^"]+)"', attr_str)
-        return m.group(1) if m else None
-
-    def _strip_ver(s):
-        return _re.sub(r'\.\d+$', '', s) if s else s
-
-    tx_canonical: set = set()
-    gene_exons: Dict[str, Dict[str, List[Tuple[str, int, int]]]] = defaultdict(lambda: defaultdict(list))
-
-    open_fn = _gz.open if gtf_path.endswith(".gz") else open
-
-    with open_fn(gtf_path, "rt") as fh:
-        for line in fh:
-            if line.startswith("#"): continue
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 9: continue
-            feat = parts[2]
-            if feat not in ("transcript", "exon"): continue
-
-            chrom = parts[0]
-            start = int(parts[3]) - 1
-            end   = int(parts[4])
-            attrs = parts[8]
-
-            gname = _attr(attrs, "gene_name") or _attr(attrs, "gene_symbol")
-            gid   = _strip_ver(_attr(attrs, "gene_id"))
-            gene_key = None
-            if gname and gname in gene_set:
-                gene_key = gname
-            elif gid and gid in gene_set:
-                gene_key = gid
-            if gene_key is None:
-                continue
-
-            tx_id = _attr(attrs, "transcript_id")
-            if tx_id is None: continue
-
-            if feat == "transcript":
-                if "Ensembl_canonical" in attrs:
-                    tx_canonical.add(tx_id)
-            elif feat == "exon":
-                gene_exons[gene_key][tx_id].append((chrom, start, end))
-
-    result: Dict[str, Dict] = {}
-    for gene_key, tx_dict in gene_exons.items():
-        canonical_jxns: set = set()
-        all_jxns_set:   set = set()
-        for tx_id, exons in tx_dict.items():
-            if len(exons) < 2: continue
-            exons_sorted = sorted(exons, key=lambda x: x[1])
-            for i in range(len(exons_sorted) - 1):
-                chrom_e, _, end_e   = exons_sorted[i]
-                chrom_n, start_n, _ = exons_sorted[i + 1]
-                if chrom_e != chrom_n: continue
-                jxn = f"{chrom_e}_{end_e + 1}_{start_n}"
-                all_jxns_set.add(jxn)
-                if tx_id in tx_canonical:
-                    canonical_jxns.add(jxn)
-        result[gene_key] = {
-            "canonical_junctions": canonical_jxns,
-            "all_junctions":       all_jxns_set,
-        }
-    return result
 
 
 EVENT_TYPES = ["exon_skipping_approx", "exon_inclusion_approx", "alt_5ss_approx", "alt_3ss_approx", "complex_approx"]
@@ -153,6 +57,8 @@ def _sign(d):
     return 1 if d > 0 else (-1 if d < 0 else 0)
 
 
+# group outlier junctions into events per sample/haplotype/gene.
+# opposite-direction junctions sharing a splice site -> alt 5'/3' SS, skip/inclusion triplets -> exon skipping/inclusion
 def define_events(df, strand_map, canonical_by_gene):
     events = defaultdict(set)
     parent = {}
@@ -207,6 +113,7 @@ def define_events(df, strand_map, canonical_by_gene):
                         continue
                     add('exon_skipping_approx' if s_jxn > 0 else 'exon_inclusion_approx', jxn, jl, jr)
 
+    # one label per junction. exon-level events win, more than one -> complex
     def resolve(evs):
         top = (evs & {'exon_skipping_approx', 'exon_inclusion_approx'}) or \
               (evs & {'alt_5ss_approx', 'alt_3ss_approx'})
@@ -236,6 +143,7 @@ def define_events(df, strand_map, canonical_by_gene):
     return df
 
 
+# bulk PSI should sit between the two haplotypes. if it doesn't, the phasing is probably off
 def unreliable_haplotype_mask(full_df, outlier_df):
     is_hap = outlier_df['phasing'].isin(['hap1', 'hap2'])
     if not is_hap.any():
@@ -258,6 +166,7 @@ def unreliable_haplotype_mask(full_df, outlier_df):
     return is_hap & pd.Series([k in unreliable for k in keys], index=outlier_df.index)
 
 
+# optional cohort comparison: IQR fences, beta fit, or just the cohort median
 def fit_beta_dist(x, tol, n_threshold):
     x = pd.to_numeric(x, errors='coerce')
     x = x[~np.isnan(x)]
@@ -367,74 +276,6 @@ def compute_cohort_statistics(df, args):
     return df
 
 
-def plot_outlier_counts(samples, dfs, legends, suptitle, outfile):
-
-    counts_list = []
-    for df in dfs:
-        counts_list.append(df.groupby('sample')['gene'].nunique().sort_index())
-
-    sample_order = sorted(samples)
-    for i, counts in enumerate(counts_list):
-        counts_list[i] = counts.reindex(sample_order, fill_value=0)
-
-    barplot_file = os.path.splitext(outfile)[0] + "_barplot.pdf"
-    fig, axes = plt.subplots(len(dfs), 1, figsize=(max(16, len(sample_order)*0.2), max(6, len(dfs)*4)), sharex=True)
-    if len(dfs) == 1:
-        axes = [axes]
-
-    for ax, counts, (color, label) in zip(axes, counts_list, legends):
-        ax.bar(counts.index, counts.values, color=color)
-        ax.set_title(f'Average={counts.mean():.2f}, Median={counts.median()}, Range={counts.min()}–{counts.max()}')
-        ax.set_ylabel('Count')
-        ax.tick_params(axis='x', rotation=90)
-        ax.legend(handles=[mpatches.Patch(color=color, label=label)],
-                  loc='center left', bbox_to_anchor=(1.0, 0.5))
-
-    axes[-1].set_xlabel('Sample')
-    fig.suptitle(suptitle, fontsize=16)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(barplot_file)
-    plt.close()
-    print(f"Bar plot saved to {barplot_file}")
-
-    boxplot_file = os.path.splitext(outfile)[0] + "_boxplot.pdf"
-    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-
-    data = [counts.values for counts in counts_list]
-    colors = [c for c, _ in legends]
-
-    box = ax.boxplot(
-        data,
-        patch_artist=False,
-        medianprops=dict(color='black'),
-        boxprops=dict(color='black'),
-        whiskerprops=dict(color='black'),
-        capprops=dict(color='black'),
-        showfliers=False
-    )
-
-    jitter_strength = 0.08
-    for i, counts in enumerate(data):
-        x = np.full(len(counts), i + 1) + np.random.uniform(-jitter_strength, jitter_strength, len(counts))
-        ax.scatter(x, counts, color=colors[i], alpha=0.7, s=20)
-
-    ax.set_xticks(range(1, len(dfs) + 1))
-    ax.set_xticklabels([])
-
-    ax.set_ylabel('Number of genes')
-    ax.set_title(suptitle)
-
-    legend_handles = []
-    for counts, color, (_, label) in zip(counts_list, colors, legends):
-        stats_text = f"{label}\nAvg={counts.mean():.2f}, Med={counts.median()}, Range={counts.min()}–{counts.max()}"
-        legend_handles.append(mpatches.Patch(color=color, label=stats_text))
-    ax.legend(handles=legend_handles, loc='center left', bbox_to_anchor=(1.05, 0.5))
-
-    plt.tight_layout()
-    plt.savefig(boxplot_file, bbox_inches='tight')
-    plt.close()
-    print(f"Box plot saved to {boxplot_file}")
-
 def main():
     args = parse_args()
 
@@ -450,14 +291,14 @@ def main():
         print(f"Will keep an additional file with only outlier junctions with event types: {', '.join(args.event_types)}")
     if args.include_upreg_annotation_types or args.exclude_upreg_annotation_types:
         if args.delta_PSI_direction and args.delta_PSI_direciton=="negative":
-            print(f"User specified negative delta_PSI_direction, so upregulated junctions cannot be filtered by annotation type.")
+            print("User specified negative delta_PSI_direction, so upregulated junctions cannot be filtered by annotation type.")
         elif args.include_upreg_annotation_types:
             print(f"Will keep an additional file with upregulated outlier junctions only with annotation types: {', '.join(args.include_upreg_annotation_types)}")
         else:
             print(f"Will keep an additional file excluding upregulated outlier junctions with annotation types: {', '.join(args.exclude_upreg_annotation_types)}")
     if args.include_downreg_annotation_types or args.exclude_downreg_annotation_types:
         if args.delta_PSI_direction and args.delta_PSI_direciton=="positive":
-            print(f"User specified positive delta_PSI_direction, so downregulation junctions cannot be filtered by annotation type.")
+            print("User specified positive delta_PSI_direction, so downregulation junctions cannot be filtered by annotation type.")
         elif args.include_upreg_annotation_types or args.exclude_upreg_annotation_types:
             if args.include_downreg_annotation_types:
                 print(f"    and will keep only downregulated outlier junctions with annotation types: {', '.join(args.include_downreg_annotation_types)}")
@@ -470,7 +311,7 @@ def main():
                 print(f"Will keep an additional file excluding downregulated outlier junctions with annotation types: {', '.join(args.exclude_downreg_annotation_types)}")
     if (args.filter_by_cohort_IQR or ((args.fit_beta_dist_on_cohort or args.compare_PSI_to_cohort_median) and args.delta_PSI_vs_cohort_threshold)):
         if args.filter_by_cohort_IQR:
-            print(f"Will keep an additional file with only junctions which are IQR outliers.")
+            print("Will keep an additional file with only junctions which are IQR outliers.")
         elif args.fit_beta_dist_on_cohort:
             print(f"Will fit beta distributions on cohort PSI values and keep an additional file with only junctions where abs(delta_PSI_vs_cohort) >= {args.delta_PSI_vs_cohort_threshold}.")
         elif args.compare_PSI_to_cohort_median:
@@ -528,13 +369,14 @@ def main():
         f"    {len(outlier_df)} total hits ({len(outlier_df['junction'].unique())} unique junctions) in {len(outlier_df['sample'].unique())} samples."
     )
 
+    # events, recurrence, and the optional cohort stats
     outlier_df = define_events(outlier_df, strand_map, canonical_by_gene)
     print(f"Event types: {outlier_df['event'].value_counts().to_dict()}")
 
     outlier_df['sample_count'] = outlier_df.groupby('junction')['sample'].transform('nunique')
 
     if len(samples) >= 8 and (args.filter_by_cohort_IQR or ((args.fit_beta_dist_on_cohort or args.compare_PSI_to_cohort_median) and args.delta_PSI_vs_cohort_threshold)):
-        print(f"\nComputing cohort-level statistics...")
+        print("\nComputing cohort-level statistics...")
         outlier_df = compute_cohort_statistics(outlier_df, args)
     elif args.filter_by_cohort_IQR or ((args.fit_beta_dist_on_cohort or args.compare_PSI_to_cohort_median) and args.delta_PSI_vs_cohort_threshold):
         if len(samples) < 8:
@@ -545,6 +387,7 @@ def main():
             args.delta_PSI_vs_cohort_threshold = None
 
     os.makedirs(os.path.dirname(args.outprefix), exist_ok=True)
+    # stage 1 = coverage/padj/delta-PSI outliers. each later stage adds one of the optional filters
     outfile_stage1 = f"{args.outprefix}_{args.jxn_coverage_threshold}jxncov_{args.padj_threshold}padj_{args.delta_PSI_threshold}deltaPSI.tsv"
     outlier_df.to_csv(outfile_stage1, sep="\t", index=False)
 
@@ -562,7 +405,7 @@ def main():
         df_stage3 = df_stage2.copy() if "df_stage2" in locals() else outlier_df.copy()
         df_stage3 = df_stage3[df_stage3['event'].apply(lambda x: any(evt in x.split(';') for evt in args.event_types))]
         outfile_stage3 = (outfile_stage2 if "outfile_stage2" in locals() else
-                          outfile_stage1).replace(".tsv", f"_event.tsv")
+                          outfile_stage1).replace(".tsv", "_event.tsv")
         df_stage3.to_csv(outfile_stage3, sep="\t", index=False)
         print(f"After event-type filtering: {len(df_stage3)} rows ({len(df_stage3['junction'].unique())} unique junctions).")
 
@@ -648,10 +491,10 @@ def main():
             legends.append((SELECT_ORDER[0], f'coverage ≥ {args.jxn_coverage_threshold}, abs(ΔPSI) ≥ {args.delta_PSI_threshold}, and padj ≤ {args.padj_threshold}'))
         if 'df_stage2' in locals() and not df_stage2.empty:
             dfs_for_plot.append(df_stage2)
-            legends.append((SELECT_ORDER[1], f"+ upregulated junctions (delta PSI > 0)" if args.delta_PSI_direction == "positive" else f"+ downregulated junctions (delta PSI < 0)"))
+            legends.append((SELECT_ORDER[1], "+ upregulated junctions (delta PSI > 0)" if args.delta_PSI_direction == "positive" else "+ downregulated junctions (delta PSI < 0)"))
         if 'df_stage3' in locals() and not df_stage3.empty:
             dfs_for_plot.append(df_stage3)
-            legends.append((SELECT_ORDER[2], f"+ event types: \n        " + ',\n        '.join(args.event_types)))
+            legends.append((SELECT_ORDER[2], "+ event types: \n        " + ',\n        '.join(args.event_types)))
         if 'df_stage4' in locals() and not df_stage4.empty:
             dfs_for_plot.append(df_stage4)
             legend_parts = []

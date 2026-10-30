@@ -1,5 +1,6 @@
+# 10I - CPTM and MOTR normalized versions of the AMALGAM gene matrix
+
 import argparse
-import os
 
 import pandas as pd
 import numpy as np
@@ -36,6 +37,7 @@ def main():
 
     alias_map = parse_alias_map(args.alias_map)
 
+    # CPTM = counts per ten million panel reads
     col_sums = raw_df.sum(axis=0)
     cptm_df = raw_df.div(col_sums.replace(0, np.nan), axis=1).fillna(0) * 1e6
     cptm_df.index.name = "gene"

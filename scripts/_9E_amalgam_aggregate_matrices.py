@@ -1,27 +1,13 @@
+# 9E - combine the per-sample AMALGAM transcript counts into transcript and gene matrices (all genes + panel only)
+
 import argparse
 import gzip
-import re
 
 import numpy as np
 import pandas as pd
 
-from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
-
-
-_ATTR_RE_CACHE = {}
-
-
-def _attr(attr_str, key):
-    rx = _ATTR_RE_CACHE.get(key)
-    if rx is None:
-        rx = re.compile(key + r'\s+"([^"]+)"')
-        _ATTR_RE_CACHE[key] = rx
-    m = rx.search(attr_str)
-    return m.group(1) if m else None
-
-
-def _strip_ver(s):
-    return re.sub(r'\.\d+$', '', s) if s else s
+from sample_alias import add_alias_map_arg
+from gtf_utils import get_attr, strip_version
 
 
 def load_gene_id_to_symbol(gtf_path):
@@ -35,8 +21,8 @@ def load_gene_id_to_symbol(gtf_path):
             if len(parts) < 9:
                 continue
             attrs = parts[8]
-            gid = _strip_ver(_attr(attrs, "gene_id"))
-            gname = _attr(attrs, "gene_name") or _attr(attrs, "gene_symbol")
+            gid = strip_version(get_attr(attrs, "gene_id"))
+            gname = get_attr(attrs, "gene_name") or get_attr(attrs, "gene_symbol")
             if gid and gname:
                 mapping[gid] = gname
     return mapping
@@ -87,12 +73,14 @@ def main():
 
     KEY = ['transcript_id', 'gene_id']
 
+    # union of transcripts over all samples
     tx_index = None
     for f in args.infiles:
         ids = pd.read_csv(f, sep='\t', usecols=KEY)[KEY]
         idx = pd.MultiIndex.from_frame(ids)
         tx_index = idx.unique() if tx_index is None else tx_index.union(idx, sort=False)
 
+    # gene counts are just the transcript counts summed
     transcript_matrix = pd.DataFrame(index=tx_index)
     gene_tables = []
     for sample, f in zip(args.samples, args.infiles):
@@ -109,10 +97,11 @@ def main():
     transcript_matrix = transcript_matrix.fillna(0).reset_index()
     gene_matrix_gid = pd.concat(gene_tables, axis=1).fillna(0)
 
+    # swap Ensembl IDs for symbols, then cut down to the panel
     gid_to_symbol = load_gene_id_to_symbol(args.gtf)
     targeted_genes = load_targeted_genes(args.bed)
 
-    symbol_index = [gid_to_symbol.get(_strip_ver(gid), gid) for gid in gene_matrix_gid.index]
+    symbol_index = [gid_to_symbol.get(strip_version(gid), gid) for gid in gene_matrix_gid.index]
     gene_matrix_all = gene_matrix_gid.copy()
     gene_matrix_all.index = symbol_index
     gene_matrix_all.index.name = "gene"
@@ -123,7 +112,7 @@ def main():
 
     transcript_matrix_all = transcript_matrix.copy()
     transcript_matrix_all['gene_id'] = [
-        gid_to_symbol.get(_strip_ver(gid), gid)
+        gid_to_symbol.get(strip_version(gid), gid)
         for gid in transcript_matrix_all['gene_id']
     ]
 

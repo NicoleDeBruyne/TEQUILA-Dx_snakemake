@@ -1,3 +1,6 @@
+# 11A - label both ends of every panel-gene read (TSO, oligo-dT, priming artifacts, Alu polyA, unknown)
+# and cluster the soft clips we can't explain by position, with a consensus clip sequence for each
+
 import argparse
 import gzip
 import importlib.util
@@ -55,6 +58,7 @@ def _complement(s):
     return s.translate(str.maketrans("ATCGatcg", "TAGCtagc"))
 
 
+# TSO / oligo-dT matching has to allow a mismatch or two, nanopore reads aren't that clean
 def _variants_1mm(m):
     b = "ATCG"
     n = len(m)
@@ -151,6 +155,7 @@ def _in_alu(chrom, pos0, alu):
     return i >= 0 and pos0 < ends[i]
 
 
+# decide what one read end is from its soft clip + the genome right next to it
 def classify_end(sc, g, leading, P, chrom, pos0, alu):
     lab = _oligo_dt(sc, g, leading)
     if lab:
@@ -239,6 +244,7 @@ def load_gene_models(gtf, wanted):
     return genes
 
 
+# read goes to the gene it shares the most introns with, then exon overlap as a tiebreak
 def read_blocks_introns(r):
     rp = r.reference_start
     blocks, introns = [], set()
@@ -291,6 +297,7 @@ def location(pos0, gene):
     return "outside gene"
 
 
+# consensus clip (POA) and the median identity of clips to it
 def levenshtein(a, b):
     prev = list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
@@ -329,6 +336,7 @@ def haplotype_reads(mapping, gene):
 _W = {}
 
 
+# per-worker state, so we don't re-load annotations for every gene
 def _init_worker(genes, args):
     _W.update(genes=genes, args=args, P=build_tso_patterns(args.nta_nuc, args.fwd_tso_seq),
               alu=load_alu(args.alu) if args.alu else None)
@@ -383,6 +391,7 @@ def process_gene(g):
         n_clips = sum(len(v) for v in events.values())
         clusters = [(k, v) for k, v in events.items() if len(v) >= a.min_cluster_reads]
         haps = haplotype_reads(a.gene_bam_mapping, g) if clusters else {}
+        # per cluster: depth, clipped fraction, consensus, which haplotypes
         for (side, base), group in sorted(clusters):
             depth = int(np.sum(bam.count_coverage(chrom, base, base + 1, quality_threshold=0,
                                                   read_callback=lambda x: x.query_name in assigned
@@ -400,6 +409,7 @@ def process_gene(g):
                              consensus=cons[::-1] if side == "left" else cons, consensus_identity=ident,
                              null_identity="", _site=(g, side, base), hap1_clipped=hc.get("hap1", 0), hap2_clipped=hc.get("hap2", 0),
                              unphased_clipped=hc.get("unphased", 0), location=location(base, d)))
+    # unknown clips from all sites go into a pool for the null distribution
     pool = [((g, side, b), [e["seq"] for e in v]) for (side, b), v in events.items()]
     return g, counts, rows, len(assigned), n_clips, pool
 
@@ -436,6 +446,8 @@ def main():
         n_reads += n
         n_clips += k
         pool.extend(pl)
+    # null = identity you'd get from the same number of clips drawn from other sites.
+    # real clusters should be a lot more similar than that
     rng = np.random.default_rng(a.seed)
     for row in rows:
         site = row.pop("_site")

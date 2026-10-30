@@ -1,3 +1,5 @@
+# step 8 - in-house cohort junction analysis: every sample vs the rest of its sample-type group
+
 _cohort_outdir = config["output_dir"] + "/{cohort_id}"
 
 def _group_gene_bam_mapping_files(group_id):
@@ -7,6 +9,7 @@ def _group_gene_bam_mapping_files(group_id):
 _cja_manifest_path = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{bed_id}_{sample_type}_gene_manifest.tsv"
 
 
+# beta-binomial if thresholds are set in the config, otherwise modified z
 def _cja_method(group_id):
     flag = _cja_thr_flag(group_id)
     if "--bb-thresholds" in flag:
@@ -14,6 +17,7 @@ def _cja_method(group_id):
     return "modified_zscore"
 
 
+# 8A per-gene junction tables across the group
 rule _8A_cohort_junction_analysis:
     input:
         mapping_files = lambda wc: _group_gene_bam_mapping_files(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type)),
@@ -60,8 +64,10 @@ rule _8A_cohort_junction_analysis:
         """
 
 
+# 8B writes lots of files, downstream rules just wait on this one
 _cja_scoring_sentinel = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_junction_analysis/{cohort_id}_{bed_id}_{sample_type}_scoring.done"
 
+# 8B fit across the group and score everyone
 rule _8B_fit_and_score_cohort_junctions:
     input:
         manifest = _cja_manifest_path,
@@ -99,6 +105,7 @@ rule _8B_fit_and_score_cohort_junctions:
         """
 
 
+# 8C call outliers per threshold set + classify events
 rule _8C_identify_cohort_junction_outliers:
     input:
         scored_sentinel = _cja_scoring_sentinel,

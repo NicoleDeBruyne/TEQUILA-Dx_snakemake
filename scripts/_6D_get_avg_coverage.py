@@ -1,127 +1,12 @@
+# 6D - depth summary per gene (median/mean/SD/breadth) over the canonical exons
+
 import argparse
-import gzip
 import os
 
 import numpy as np
 import pandas as pd
 import pysam
-
-
-_REF_CONSUMING_NON_N = {0, 2, 7, 8}
-
-
-def _open_maybe_gz(path):
-    return gzip.open(path, "rt") if path.endswith(".gz") else open(path, "r")
-
-
-def _gtf_attr(attr_str, key):
-    for field in attr_str.strip().split(";"):
-        field = field.strip()
-        if not field:
-            continue
-        parts = field.split(" ", 1)
-        if len(parts) != 2:
-            continue
-        k, v = parts
-        if k == key:
-            return v.strip().strip('"')
-    return None
-
-
-def load_gene_list(bed):
-    genes = []
-    seen = set()
-    with open(bed) as b:
-        for line in b:
-            if not line.strip() or line.startswith('#'):
-                continue
-            gene = line.strip().split('\t')[3]
-            if gene not in seen:
-                seen.add(gene)
-                genes.append(gene)
-    return genes
-
-
-def load_canonical_transcripts(gtf_path, genes):
-    genes = set(genes)
-
-    transcripts = {}
-
-    with _open_maybe_gz(gtf_path) as fh:
-        for line in fh:
-            if not line or line.startswith("#"):
-                continue
-            fields = line.rstrip("\n").split("\t")
-            if len(fields) < 9:
-                continue
-            chrom, _, feature, start, end, _, strand, _, attrs = fields[:9]
-            if feature not in ("transcript", "exon"):
-                continue
-            gene_name = _gtf_attr(attrs, "gene_name") or _gtf_attr(attrs, "gene_id")
-            if gene_name not in genes:
-                continue
-            transcript_id = _gtf_attr(attrs, "transcript_id")
-            if transcript_id is None:
-                continue
-
-            if feature == "transcript":
-                is_canonical = 'tag "Ensembl_canonical"' in attrs
-                t = transcripts.setdefault(transcript_id, {
-                    "gene": gene_name, "chrom": chrom, "strand": strand,
-                    "canonical": False, "exons": [],
-                })
-                t["canonical"] = t["canonical"] or is_canonical
-            else:
-                t = transcripts.setdefault(transcript_id, {
-                    "gene": gene_name, "chrom": chrom, "strand": strand,
-                    "canonical": False, "exons": [],
-                })
-                t["exons"].append((int(start) - 1, int(end)))
-
-    by_gene = {}
-    for tid, t in transcripts.items():
-        if not t["exons"]:
-            continue
-        by_gene.setdefault(t["gene"], []).append(t)
-
-    result = {}
-    for gene, cands in by_gene.items():
-        canonical_cands = [c for c in cands if c["canonical"]]
-        pool = canonical_cands if canonical_cands else cands
-        best = max(pool, key=lambda c: sum(e - s for s, e in c["exons"]))
-        exons = sorted(best["exons"])
-        merged = []
-        for s, e in exons:
-            if merged and s <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
-            else:
-                merged.append((s, e))
-        exonic_length = sum(e - s for s, e in merged)
-        span_start = merged[0][0]
-        span_end = merged[-1][1]
-        result[gene] = (best["chrom"], span_start, span_end, merged, exonic_length)
-
-    return result
-
-
-def _read_ref_blocks(read):
-    blocks = []
-    pos = read.reference_start
-    block_start = None
-    for op, length in read.cigartuples or []:
-        if op in _REF_CONSUMING_NON_N:
-            if block_start is None:
-                block_start = pos
-            pos += length
-        else:
-            if block_start is not None:
-                blocks.append((block_start, pos))
-                block_start = None
-            if op == 3:
-                pos += length
-    if block_start is not None:
-        blocks.append((block_start, pos))
-    return blocks
+from gtf_utils import ref_blocks, load_canonical_transcripts, load_gene_list
 
 
 def parse_args():
@@ -138,13 +23,14 @@ def parse_args():
     return parser.parse_args()
 
 
+# difference array instead of a real pileup, way faster and good enough for depth
 def exonic_depth(bam_handle, chrom, span_start, span_end, exons):
     span_len = span_end - span_start
     diff = np.zeros(span_len + 1, dtype=np.int64)
     for read in bam_handle.fetch(chrom, span_start, span_end):
         if read.is_unmapped or read.is_secondary or read.is_supplementary:
             continue
-        for b_start, b_end in _read_ref_blocks(read):
+        for b_start, b_end in ref_blocks(read):
             lo = max(b_start, span_start) - span_start
             hi = min(b_end, span_end) - span_start
             if lo < hi:

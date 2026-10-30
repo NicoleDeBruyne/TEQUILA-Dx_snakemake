@@ -1,3 +1,5 @@
+# 5A - every junction in the whole BAM, as a one-column matrix
+
 import os, argparse, warnings, pysam
 import pandas as pd
 from pandas.errors import PerformanceWarning
@@ -19,6 +21,7 @@ def parse_args():
     return parser.parse_args()
 
 
+# N ops in the CIGAR are the introns
 def get_splice_junctions_from_CIGAR(cigar, chrom, start):
     pos = start
     sj_list = []

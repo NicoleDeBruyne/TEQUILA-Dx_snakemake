@@ -240,6 +240,7 @@ def ctx_files(group_id):
         gene_status=d + "/" + st + "_transcript_usage_gene_status.tsv",
         isoform_outliers=d + "/" + st + "_transcript_usage_outliers_" + thr + ".tsv",
         landscape_outliers=d + "/" + st + "_gene_isoform_landscape_outliers_" + thr + ".tsv",
+        sample_qc=d + "/" + st + "_transcript_usage_sample_qc.tsv",
         gtf=group_outdir(group_id) + "/gene_quantification/by_amalgam/annotation/filtered.gtf.gz",
         gtf_tbi=group_outdir(group_id) + "/gene_quantification/by_amalgam/annotation/filtered.gtf.gz.tbi",
     )
@@ -387,6 +388,9 @@ def all_outputs():
 
         if flag("phase_reads"):
             outs.append((str(od) + '/phased_reads/' + str(s) + '_phasing_summary.tsv'))
+            # WGS samples also get an RNA-only phasing run, checked against the WGS phase
+            if SAMPLES[s].get("wgs_vcf"):
+                outs.append((str(od) + '/phasing_vs_wgs/' + str(s) + '_phasing_vs_wgs_genes.tsv'))
 
         if flag("ase_analysis"):
             outs.append((str(od) + '/ase_analysis/' + str(s) + '_binomial_ase_results.tsv'))
@@ -409,17 +413,18 @@ def all_outputs():
             outs.append((str(od) + '/gene_quantification/' + str(s) + '_gene_assignment.tsv'))
 
     if flag("merge_results"):
-        # Junction-derived outputs run for each filter set ("default" and "stringent")
-        _jxn_filter_sets = ["default", "stringent"]
+        # Hit outputs are made twice: "default" leaves out in-house 5ss_IR/3ss_IR calls, "with_ss_IR" keeps them
+        _jxn_filter_sets = ["default", "with_ss_IR"]
         for (cid, bid) in BED_GROUPS:
             bod = bed_outdir(cid, bid)
             for fs in _jxn_filter_sets:
                 outs.append((str(bod) + '/' + str(fs) + '/hits_upset_density.pdf'))
-            # Per-sample final reports (QC page + IGV-style hit pages), default hit set only
+            # Per-sample final reports (QC page + IGV-style hit pages) for each hit set
             if flag("hit_reports"):
-                for s in bed_samples(cid, bid):
-                    outs.append((str(bod) + '/default/final_reports/' + str(s) + '_report.pdf'))
-                    outs.append((str(bod) + '/default/final_reports/' + str(s) + '_review.html'))
+                for fs in _jxn_filter_sets:
+                    for s in bed_samples(cid, bid):
+                        outs.append((str(bod) + '/' + str(fs) + '/final_reports/' + str(s) + '_report.pdf'))
+                        outs.append((str(bod) + '/' + str(fs) + '/final_reports/' + str(s) + '_review.html'))
         for gid in GROUPS:
             god = group_outdir(gid)
             for fs in _jxn_filter_sets:
@@ -427,11 +432,6 @@ def all_outputs():
                               'genes_with_outlier_junction_barplot.pdf', 'genes_with_RNA_dysregulation_barplot.pdf'):
                     outs.append((str(god) + '/merged_hits/' + str(fs) + '/' + fname))
 
-        if flag("junction_analysis"):
-            for gid in GROUPS:
-                if cja_enabled(gid):
-                    outs.append(str(group_outdir(gid)) + '/merged_hits/default/method_comparison/'
-                                + str(GROUP_SAMPLE_TYPE[gid]) + '_method_comparison.pdf')
 
     if flag("cohort_junction_analysis"):
         for gid in GROUPS:
@@ -491,6 +491,9 @@ def all_outputs():
             wcd = str(bed_outdir(cid, bid)) + '/cohort_qc/wgs_concordance/' + str(bid)
             outs.append(wcd + '_wgs_concordance_summary.tsv')
             outs.append(wcd + '_wgs_concordance_heatmap.pdf')
+            if flag("phase_reads"):
+                pcd = str(bed_outdir(cid, bid)) + '/cohort_qc/phasing_concordance/' + str(bid)
+                outs.append(pcd + '_phasing_concordance_summary.tsv')
 
     if flag("qc"):
         for (cid, bid) in BED_GROUPS:

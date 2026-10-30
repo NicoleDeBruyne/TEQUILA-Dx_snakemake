@@ -130,25 +130,23 @@ merge_min_dp_snv: 50    # DP filter applied at merge step
 merge_min_dp_indel: 50    # DP filter applied at merge step
 merge_num_callers_threshold_snv: 2    # SNVs must be called by at least this many tools
 merge_num_callers_threshold_indel: 2    # indels must be called by at least this many tools
-merge_variant_sample_fraction: 0.05           # default: variants present in >= 5% of samples are filtered out
-merge_variant_sample_fraction_stringent: 0.01 # stringent: variants present in >= 1% of samples are filtered out
+merge_variant_sample_fraction: 0.05           # variants present in >= 5% of samples are filtered out
 
 # Merging ASE results samples
 merge_min_haplotype_ratio: 0.1    # ignore genes with minor haplotype frequency < 10%
 merge_ase_padj_threshold: 0.01    # similar to padj_threshold but applied at the merge step
 merge_minor_haplotype_frequency_threshold: 0.3    # similar to minor_haplotype_frequency_threshold but applied at the merge step
-merge_ase_sample_fraction: 0.05           # default: genes with ASE in >= 5% of samples are filtered out
-merge_ase_sample_fraction_stringent: 0.01 # stringent: genes with ASE in >= 1% of samples are filtered out
+merge_ase_sample_fraction: 0.05           # genes with ASE in >= 5% of samples are filtered out
 
 # Merging junction results samples
-# Two filter sets are run in parallel: "default" and "stringent".
-# Results are written to merged_junction_analysis/{default,stringent}/,
-# merged_hits/{default,stringent}/, and output/{default,stringent}/ at the BED level.
-merge_jxn_coverage_threshold: 50    # similar to gtex_coverage_threshold but applied at the merge step (shared by both filter sets)
+# Variants, ASE and GTEx junctions are merged once, into merged_variant_calling/default/, merged_ase_analysis/default/
+# and merged_junction_analysis/default/. Hits are then built twice: merged_hits/default/ and output/default/ leave out
+# in-house 5ss_IR and 3ss_IR calls (no evidence, no tiering); merged_hits/with_ss_IR/ and output/with_ss_IR/ keep them.
+# Final reports are made for both; a with_ss_IR report starts from its own exported reviews, or default's if it has none.
+merge_jxn_coverage_threshold: 50    # similar to gtex_coverage_threshold but applied at the merge step
 merge_jxn_padj_threshold: 0.01    # similar to padj_threshold but applied at the merge step
 merge_delta_psi_threshold: 0.1    # similar to delta_psi_threshold but applied at the merge step
-merge_jxn_sample_fraction: 0.05           # default: junctions in >= 5% of samples are filtered out
-merge_jxn_sample_fraction_stringent: 0.01 # stringent: junctions in >= 1% of samples are filtered out
+merge_jxn_sample_fraction: 0.05           # junctions in >= 5% of samples are filtered out
 
 # Cohort-level junction analysis (beta-binomial for larger groups, modified z-score for smaller ones)
 cohort_jxn_min_samples: 10    # skip cohort junction analysis entirely for groups smaller than this
@@ -170,6 +168,7 @@ cohort_tx_min_usage: 0.05    # an isoform is tested if, in at least one used sam
 cohort_tx_min_reads: 10    # ...and at least this many reads; all other isoforms of the gene are pooled into 'other'
 cohort_tx_tvd_threshold: 0.1    # isoform-mix outliers need at least this total variation distance (TVD) to the nearest other sample (same trimming as delta)
 cohort_tx_dm_simulations: 10000    # Dirichlet-multinomial simulations per sample and gene (beta_binomial method)
+cohort_tx_qc_mad_multiplier: 5    # isoform sample QC: a sample whose number of genes with an isoform outlier exceeds the group median + this x MAD (MAD floored at 1) fails QC: it is left out of the reference distributions and its isoform outliers are not used for tiering; 0 turns the QC off
 
 # QC / plotting: reference tissues and colors used in sample-type plots
 validate_ref_tissues: ["fibroblasts", "lymphocytes", "wholeblood"]    # GTEx tissues to plot alongside samples in the sample-type validation heatmap

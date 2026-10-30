@@ -1,5 +1,6 @@
+# 10O2 - UpSet-style plot of hit genes per sample for every combination of evidence types, plus tier counts
+
 import argparse
-import io
 import itertools
 import os
 
@@ -9,6 +10,7 @@ import pandas as pd
 from matplotlib import rcParams
 
 from palette import default_type_colors, use_fonts
+from common import read_hit_rows
 use_fonts()
 
 rcParams['pdf.fonttype'] = 42
@@ -19,22 +21,6 @@ rcParams['xtick.labelsize'] = 11
 rcParams['ytick.labelsize'] = 11
 rcParams['legend.fontsize'] = 11
 rcParams['legend.title_fontsize'] = 12
-
-
-HIT_COL = "hit"
-
-
-def is_hit(values):
-    return values.astype(str).str.strip().str.upper() == "TRUE"
-
-
-def read_hit_rows(path, **read_csv_kwargs):
-    raw = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
-    if HIT_COL in raw.columns:
-        raw = raw[is_hit(raw[HIT_COL])]
-    buf = io.StringIO(raw.to_csv(sep="\t", index=False))
-    read_csv_kwargs.setdefault("sep", "\t")
-    return pd.read_csv(buf, **read_csv_kwargs)
 
 
 CATEGORIES = ['variant', 'ASE', 'junction', 'isoform']
@@ -76,6 +62,7 @@ def _combo_label(combo):
     return " & ".join(combo) if combo else "(none)"
 
 
+# layout + drawing (boxes and points per sample type)
 def _group_layout(keys, sample_types):
     n_st = len(sample_types)
     group_width = n_st * BOX_WIDTH + (n_st - 1) * SUBCOL_GAP
@@ -167,6 +154,7 @@ def main():
     df = df.astype(object)
     df.fillna('.', inplace=True)
 
+    # flag each evidence type, then which combination each gene has
     df['_variant_hit'] = df['variant'].astype(bool)
     df['_ase_hit'] = df['ASE'].astype(bool)
     df['_junction_hit'] = (
@@ -219,11 +207,8 @@ def main():
     long_df.to_csv(f"{args.outdir}/hits_upset_counts.tsv", sep='\t', index=False)
     print(f"Saved counts tsv to {args.outdir}/hits_upset_counts.tsv")
 
-    n_combos = len(combo_order)
     st_total_counts_all = {st: args.sample_types.count(st) for st in set(args.sample_types)}
     sample_types_unique = sorted(st_total_counts_all, key=lambda st: st_total_counts_all[st], reverse=True)
-    n_st = len(sample_types_unique)
-    st_index = {st: i for i, st in enumerate(sample_types_unique)}
     st_total_counts = st_total_counts_all
     configured = {}
     for st, c in zip(args.sample_types, args.colors or []):

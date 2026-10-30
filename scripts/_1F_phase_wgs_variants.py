@@ -1,3 +1,6 @@
+# 1F - phase the WGS het sites. WGS phasing is treated as truth, the NanoTS RNA blocks are only used
+# to join WGS blocks together or phase sites WGS left unphased
+
 import argparse
 import os
 import subprocess
@@ -48,6 +51,7 @@ def variant_key(rec):
     return (rec.chrom, rec.pos, rec.ref, rec.alts[0])
 
 
+# union-find that also tracks parity, i.e. are two nodes on the same or opposite haplotype
 class PhaseGraph:
 
     def __init__(self):
@@ -131,6 +135,7 @@ def load_nanoTS_blocks(path, wgs_sites, stats):
     return blocks
 
 
+# phased sites are represented by their WGS block, unphased ones stand alone
 def site_node(key, site):
     return ("wgs_block",) + site["wgs_block"] if site["wgs_block"] else ("site",) + key
 
@@ -146,6 +151,7 @@ def site_hap_in_node(site):
     return site["hap"] if site["wgs_block"] else 0
 
 
+# returns None if the NanoTS block disagrees with WGS anywhere
 def block_flips(block, wgs_sites, graph):
     flips = {}
     for key, nanoTS_hap in block.items():
@@ -167,6 +173,7 @@ def apply_block(block, wgs_sites, graph):
     return True
 
 
+# add NanoTS blocks one by one, skipping any that contradict WGS or a block we already added
 def harmonize(wgs_sites, blocks, stats):
     graph = build_wgs_graph(wgs_sites)
     wgs_only = graph.copy()
@@ -243,15 +250,16 @@ def write_output(wgs_path, outfile, wgs_sites, phase, stats):
 
 
 def main():
-    print(f"\n\n\n******************************************************************************************")
-    print(f"Phasing WGS variants...")
-    print(f"******************************************************************************************\n")
+    print("\n\n\n******************************************************************************************")
+    print("Phasing WGS variants...")
+    print("******************************************************************************************\n")
 
     args = parse_args()
     for path in (args.wgs_vcf, args.nanoTS_vcf):
         if not os.path.isfile(path):
             fail(f"{path} not found.")
 
+    # load, merge, write, then print a summary
     stats = Counter()
     wgs_sites = load_wgs(args.wgs_vcf)
     stats["WGS het sites"] = len(wgs_sites)

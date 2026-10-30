@@ -1,3 +1,5 @@
+# 6E - rank a sample's panel genes by how well the literature links them to its HPO terms (AMELIE API)
+
 import argparse
 import json
 import os
@@ -58,6 +60,7 @@ def normalize(text):
     return re.sub(r"\s+", " ", text.strip().lower()).rstrip(".")
 
 
+# need the synonyms and obsolete->replacement links too, people type all sorts of things
 def load_obo(path):
     names, by_name, by_synonym, alt_ids, replaced = {}, {}, {}, {}, {}
     term = None
@@ -189,6 +192,7 @@ def batches(genes, size):
     return [genes[i:i + step] for i in range(0, len(genes), step)]
 
 
+# AMELIE caps the number of genes per request so we split and stitch the results
 def query_in_batches(url, hpo, genes, size, timeout, retries):
     chunks = batches(genes, size)
     data = []
@@ -231,9 +235,9 @@ def to_table(sample, genes, data, n_pmids):
 
 
 def main():
-    print(f"\n\n\n******************************************************************************************")
-    print(f"Ranking panel genes with AMELIE...")
-    print(f"******************************************************************************************\n")
+    print("\n\n\n******************************************************************************************")
+    print("Ranking panel genes with AMELIE...")
+    print("******************************************************************************************\n")
     args = parse_args()
     genes = load_panel_genes(args.bed)
     obo = None
@@ -270,6 +274,7 @@ def main():
         if data is not None:
             print(f"AMELIE ranked {len(data)} gene(s) in total.")
 
+    # AMELIE being down shouldn't kill the whole run, so write 'error' rows and move on
     if data is None:
         print(f"WARNING: AMELIE ranking unavailable for {args.sample} ({error}). "
               f"Writing status 'error'; rerun this rule later with --forcerun _6E_rank_genes_amelie.")

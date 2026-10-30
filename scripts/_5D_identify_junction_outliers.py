@@ -1,3 +1,5 @@
+# 5D - outlier junctions from the 5C results (padj + |delta-PSI| cutoffs)
+
 import os, argparse, warnings
 import pandas as pd
 import numpy as np

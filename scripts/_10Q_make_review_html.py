@@ -1,3 +1,5 @@
+# interactive HTML page for reviewing one sample's report (status + notes per gene, exports to TSV)
+
 import base64
 import datetime
 import html
@@ -26,6 +28,7 @@ def _unescape(text):
     return str(text or "").replace("\\n", "\n")
 
 
+# pick up statuses/notes from an earlier exported TSV so a review can be continued
 def load_previous_reviews(path, sample):
     if not path or not os.path.isfile(path):
         return {}
@@ -60,12 +63,14 @@ def load_previous_reviews(path, sample):
     return out
 
 
-def write_review_page(path, sample, sample_type, genes, pages, previous_reviews=None):
+# everything embedded (page images too) so the HTML works on its own
+def write_review_page(path, sample, sample_type, genes, pages, previous_reviews=None, label=None):
     page_list = [{"kind": k, "name": n, "src": "data:image/png;base64," + base64.b64encode(png).decode()}
                  for (k, n), png in pages]
     data = {
         "sample": str(sample),
         "sampleType": str(sample_type),
+        "label": str(label or ""),
         "generated": datetime.datetime.now().isoformat(timespec="seconds"),
         "statuses": [{"key": k, "label": l} for k, l in STATUSES],
         "noStatus": {"key": NO_STATUS[0], "label": NO_STATUS[1]},
@@ -76,7 +81,7 @@ def write_review_page(path, sample, sample_type, genes, pages, previous_reviews=
     }
     blob = json.dumps(data).replace("</", "<\\/")
     out = (_TEMPLATE
-           .replace("__TITLE__", html.escape(f"{sample} review"))
+           .replace("__TITLE__", html.escape(f"{sample} review" + (f" ({label})" if label else "")))
            .replace("__DATA__", blob))
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(out)
@@ -248,9 +253,10 @@ const el = (tag, attrs, ...kids) => {
   return e;
 };
 
-document.getElementById("title").textContent = D.sample;
+const LABEL = D.label ? " (" + D.label + ")" : "";
+document.getElementById("title").textContent = D.sample + LABEL;
 document.getElementById("meta").textContent = "sample type: " + D.sampleType + "  ·  generated " + D.generated.replace("T", " ");
-document.title = D.sample + " review";
+document.title = D.sample + " review" + LABEL;
 
 const filter = document.getElementById("filter");
 filter.append(el("option", {value: "all", text: "All genes"}));
@@ -380,7 +386,7 @@ function show(sel, keepScroll){
   } else if (sel.kind === "qc") {
     main.append(pageImgs(pagesBy("qc", sel.name)));
   } else {
-    main.append(pageImgs(pagesBy("overview")));
+    main.append(pageImgs(pagesBy("overview").concat(pagesBy("comparison"))));
   }
   main.scrollTop = keepScroll ? y : 0;
   refreshNav();
@@ -457,7 +463,7 @@ fileIn.addEventListener("change", () => {
 // ---- export PDF: every page in report order, each gene with its status and notes, via the print dialog
 document.getElementById("btnPdf").addEventListener("click", () => {
   const pr = document.getElementById("print"); pr.replaceChildren();
-  const sum = el("div", {class: "pp"}, el("h2", {text: D.sample + " — review (" + new Date().toISOString().slice(0, 10) + ")"}));
+  const sum = el("div", {class: "pp"}, el("h2", {text: D.sample + LABEL + " — review (" + new Date().toISOString().slice(0, 10) + ")"}));
   if (D.genes.some(g => carried(g.gene))) sum.append(el("p", {text: "* review carried over from an earlier run of the pipeline"}));
   const t = el("table", {class: "sum"});
   t.append(el("tr", {}, ...["Rank", "Gene", "Tier", "Status", "Reviewed externally", "Notes"].map(h => el("th", {text: h}))));

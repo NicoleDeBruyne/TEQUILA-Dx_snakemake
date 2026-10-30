@@ -1,3 +1,5 @@
+# 10J - CPTM / MOTR boxplots per gene, split by sample type
+
 import argparse
 import os
 
@@ -83,6 +85,7 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     label = f" ({args.metric_label})" if args.metric_label else ""
 
+    # one page per gene: CPTM on top, MOTR below, a column per sample type
     for gene in genes:
         fig, axes = plt.subplots(2, len(types), figsize=(PAGE_W, PAGE_H), squeeze=False)
         fig.suptitle(f"{gene}{label}", fontsize=13, fontweight="bold", x=0.07, ha="left")

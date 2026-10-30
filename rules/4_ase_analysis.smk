@@ -1,3 +1,5 @@
+# step 4 - allele-specific expression per sample
+
 rule _4A_detect_ase_outliers:
     input:
         infile = "{outdir}/phased_reads/{sample}_phasing_summary.tsv",

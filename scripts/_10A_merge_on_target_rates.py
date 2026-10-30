@@ -1,3 +1,5 @@
+# 10A - merge the per-sample on-target tables and plot mapping / on-target rates for the cohort
+
 import argparse
 
 import pandas as pd
@@ -110,6 +112,7 @@ def main():
     group_by_sample = dict(zip([d['sample'].iloc[0] for d in per_sample_dfs], groups))
     df['group'] = df['sample'].map(group_by_sample)
 
+    # rates, table, then the plots (once with IDs, once with aliases)
     df['unmapped'] = df['total'] - df['mapped']
     df['mapping_rate'] = df['mapped'] / df['total'] * 100
     df['on_target_rate'] = df['target'] / df['mapped'] * 100

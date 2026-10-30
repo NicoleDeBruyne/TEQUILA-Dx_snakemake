@@ -152,11 +152,21 @@ echo "  Progress: tail -f $CONTAINER_LOG"
         fi
         echo "  Pulling $uri -> $target"
         rm -f "$target.partial"
-        case "$uri" in
-            library://*) "$SING" pull --library https://library.sylabs.io "$target.partial" "$uri" ;;
-            *)           "$SING" pull "$target.partial" "$uri" ;;
-        esac
-        mv "$target.partial" "$target"
+        local lib_args=()
+        if [[ "$uri" == library://* ]]; then
+            if [ -n "${SING_LIBRARY:-}" ]; then
+                lib_args=(--library "$SING_LIBRARY")
+            elif [ "$SING" = apptainer ]; then
+                lib_args=(--library https://library.sylabs.io)
+            fi
+        fi
+        if "$SING" pull ${lib_args[@]+"${lib_args[@]}"} "$target.partial" "$uri"; then
+            mv "$target.partial" "$target"
+        else
+            rm -f "$target.partial"
+            echo "  FAILED: $uri. If an earlier run already used this image, copy the cached .sif to $target instead."
+            return 1
+        fi
     }
     status=0
     pull_image "library://zelinliu/nanots/nanots:1.0.0" "$CONTAINER_DIR/nanots_1.0.0.sif" || status=1

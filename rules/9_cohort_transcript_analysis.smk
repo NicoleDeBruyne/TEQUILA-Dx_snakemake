@@ -1,3 +1,5 @@
+# step 9 - AMALGAM: assemble a group transcriptome, quantify, find isoform usage outliers
+
 _cohort_outdir = config["output_dir"] + "/{cohort_id}"
 
 
@@ -13,6 +15,7 @@ def _amalgam_quantification_tsv(cohort_id, bed_id, sample_type, sample):
     return _amalgam_group_dir(cohort_id, bed_id, sample_type) + "/quantification/" + sample + "_transcript_quantification.tsv"
 
 
+# 9A-9D build and quantify the group transcriptome
 rule _9A_amalgam_merge_gtfs:
     input:
         annotation  = config["annotation"],
@@ -151,6 +154,7 @@ rule _9D_amalgam_quantify_transcripts:
         """
 
 
+# 9E per-sample quantifications -> group matrices
 rule _9E_amalgam_aggregate_matrices:
     input:
         tsvs = lambda wc: [
@@ -189,6 +193,7 @@ rule _9E_amalgam_aggregate_matrices:
         """
 
 
+# 9F/9G isoform usage scoring, outliers, sample QC
 rule _9F_fit_and_score_transcript_usage:
     input:
         tx_matrix = rules._9E_amalgam_aggregate_matrices.output.tx_matrix_raw,
@@ -197,6 +202,7 @@ rule _9F_fit_and_score_transcript_usage:
         landscape_scores = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_transcript_analysis/{sample_type}_gene_isoform_landscape_scores.tsv.gz",
         usage_matrix     = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_transcript_analysis/{sample_type}_transcript_usage_matrix.tsv",
         gene_status      = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_transcript_analysis/{sample_type}_transcript_usage_gene_status.tsv",
+        sample_qc        = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_transcript_analysis/{sample_type}_transcript_usage_sample_qc.tsv",
     params:
         outprefix      = lambda wc: _ctx_dir(wc.cohort_id, wc.bed_id, wc.sample_type) + "/" + wc.sample_type,
         method         = _ctx_method,
@@ -206,6 +212,8 @@ rule _9F_fit_and_score_transcript_usage:
         min_reads      = config.get("cohort_tx_min_reads", 10),
         rescale        = config.get("psi_rescale_factor", 0.001),
         dm_sims        = config.get("cohort_tx_dm_simulations", 10000),
+        filter_args    = _ctx_filter_args,
+        qc_mad         = config.get("cohort_tx_qc_mad_multiplier", 5),
         script         = workflow.basedir + "/scripts/_9F_fit_and_score_transcript_usage.py",
     threads: lambda wc: _group_threads(_group_id_from_ids(wc.cohort_id, wc.bed_id, wc.sample_type), "cohort_tx", 4)
     resources:
@@ -226,6 +234,8 @@ rule _9F_fit_and_score_transcript_usage:
             --min-reads      {params.min_reads} \\
             --rescale-factor {params.rescale} \\
             --dm-simulations {params.dm_sims} \\
+            {params.filter_args} \\
+            --qc-mad-multiplier {params.qc_mad} \\
             --threads        {threads} \\
         2>&1 | tee {log}
         """
@@ -235,6 +245,7 @@ rule _9G_identify_transcript_usage_outliers:
     input:
         isoform_scores   = rules._9F_fit_and_score_transcript_usage.output.isoform_scores,
         landscape_scores = rules._9F_fit_and_score_transcript_usage.output.landscape_scores,
+        sample_qc        = rules._9F_fit_and_score_transcript_usage.output.sample_qc,
     output:
         isoform_outliers   = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_transcript_analysis/{sample_type}_transcript_usage_outliers_{tx_thr}.tsv",
         landscape_outliers = _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/cohort_transcript_analysis/{sample_type}_gene_isoform_landscape_outliers_{tx_thr}.tsv",
@@ -259,6 +270,7 @@ rule _9G_identify_transcript_usage_outliers:
         python -u {params.script} \\
             --isoform-scores    {input.isoform_scores} \\
             --landscape-scores  {input.landscape_scores} \\
+            --sample-qc         {input.sample_qc} \\
             --method            {params.method} \\
             {params.filter_args} \\
             --isoform-outfile   {output.isoform_outliers} \\

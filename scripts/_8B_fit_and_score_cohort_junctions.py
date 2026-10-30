@@ -1,15 +1,14 @@
+# 8B - fit each junction metric across the group (beta-binomial or modified z) and score every sample
+# and haplotype against the rest
+
 from __future__ import annotations
 
 import os
-import sys
 import argparse
 import warnings
 import traceback
 import time
-import math
-import glob as _glob
-from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -18,6 +17,8 @@ from scipy.stats import betabinom, beta
 from scipy.special import digamma, polygamma
 from statsmodels.stats.multitest import multipletests
 from pandas.errors import PerformanceWarning
+from bed_utils import load_bed
+from common import OUTPUT_COLS, select_output_columns
 
 warnings.filterwarnings("ignore", category=PerformanceWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -53,28 +54,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def load_bed(path: str) -> Dict[str, Tuple[str, str, str]]:
-    gene_info: Dict[str, Tuple[str, str, str]] = {}
-    with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 6:
-                print(f"[WARNING] BED line has <6 columns, skipping: {line!r}")
-                continue
-            chrom, start, end, gene, _, strand = parts[:6]
-            gene   = gene.strip()
-            strand = strand.strip()
-            region = f"{chrom.strip()}:{start.strip()}-{end.strip()}"
-            if gene in gene_info:
-                print(f"[WARNING] Gene '{gene}' appears more than once in BED. Using last entry.")
-            gene_info[gene] = (chrom.strip(), region, strand)
-    print(f"BED file loaded: {len(gene_info)} gene(s)")
-    return gene_info
-
-
 def load_manifest(path: str) -> List[Tuple[str, Optional[str]]]:
     df = pd.read_csv(path, sep="\t", dtype=str)
     rows: List[Tuple[str, Optional[str]]] = []
@@ -97,6 +76,7 @@ def load_gene_raw_metrics(path: str) -> pd.DataFrame:
     return df
 
 
+# beta fit per feature. (almost) zero variance gets a fixed fit around the median, the MLE falls over there
 def _fit_one_beta(x: np.ndarray, tol: float, n_threshold: int):
     x = x[np.isfinite(x)]
     n = len(x)
@@ -272,6 +252,7 @@ def fit_modz_dist_chunk(mat, feat_names, tol, n_threshold, threads: int = 1):
 TRIM_MIN_SAMPLES = 30
 
 
+# BH within each sample, not across the whole cohort
 def bh_by_sample(p_values, samples):
     p = np.asarray(p_values, dtype=float)
     samples = np.asarray(samples, dtype=object)
@@ -283,6 +264,7 @@ def bh_by_sample(p_values, samples):
     return out
 
 
+# range of everyone else, so the sample can't stretch its own range
 def leave_one_out_range(mat: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     mat = np.asarray(mat, dtype=np.float64)
     n_feat, n_samp = mat.shape
@@ -337,6 +319,7 @@ def _run_one_metric(
     else:
         fit_id_col = id_col
 
+    # fit on bulk values only. the 5'/3' IR metrics get fit per splice site
     bulk_sub = combined_df[combined_df["phasing"] == "bulk"][
         ["sample", fit_id_col, coverage_col, rescaled_col, metric_col]
     ].copy()
@@ -376,6 +359,7 @@ def _run_one_metric(
             combined_df[col] = "low_n"
         return combined_df
 
+    # features with too few covered samples just don't get a fit
     mat        = bulk_wide.to_numpy(dtype=np.float32)
     feat_names = bulk_wide.index.tolist()
 
@@ -432,6 +416,7 @@ def _run_one_metric(
         for col in (median_col, mad_col):
             combined_df[col] = combined_df[col].fillna("low_n")
 
+    # score everything, then flag low coverage and haplotypes that are barely phased
     fit_vals     = combined_df[fit_indicator_col]
     is_low_n     = fit_vals == "low_n"
     is_error     = fit_vals == "error"
@@ -628,46 +613,6 @@ def run_gene_stats_pipeline(
     return combined
 
 
-def _per_metric_output_cols(metric_col: str) -> List[str]:
-    return [
-        f"n_{metric_col}",
-        f"alpha_{metric_col}", f"beta_{metric_col}", f"expected_{metric_col}",
-        f"p1_{metric_col}", f"p99_{metric_col}",
-        f"delta_{metric_col}", f"p_value_{metric_col}", f"padj_{metric_col}",
-        f"median_{metric_col}", f"mad_{metric_col}", f"modz_{metric_col}",
-    ]
-
-
-_OUTPUT_COLS = [
-    "sample", "gene", "gene_rank", "region", "phasing", "junction", "5ss", "3ss",
-    "junction_type",
-    "junction_usage",
-    "junction_coverage_approx",
-    "junction_PSI_approx", "rescaled_junction_PSI_approx",
-    *_per_metric_output_cols("junction_PSI_approx"),
-    "junction_coverage",
-    "junction_PSI", "rescaled_junction_PSI",
-    *_per_metric_output_cols("junction_PSI"),
-    "5ss_usage", "5ss_coverage",
-    "5ss_IR_ratio", "rescaled_5ss_IR_ratio",
-    *_per_metric_output_cols("5ss_IR_ratio"),
-    "3ss_usage", "3ss_coverage",
-    "3ss_IR_ratio", "rescaled_3ss_IR_ratio",
-    *_per_metric_output_cols("3ss_IR_ratio"),
-    "junction_full_IR_count",
-    "junction_full_IR_ratio", "rescaled_junction_full_IR_ratio",
-    *_per_metric_output_cols("junction_full_IR_ratio"),
-    "junction_IPA_count",
-    "junction_IPA_ratio", "rescaled_junction_IPA_ratio",
-    *_per_metric_output_cols("junction_IPA_ratio"),
-]
-
-
-def select_output_columns(df: pd.DataFrame, *_) -> pd.DataFrame:
-    present = [c for c in _OUTPUT_COLS if c in df.columns]
-    return df[present]
-
-
 def _score_one_gene(task):
     import io, contextlib
     (gene, path, approx_only, coverage_threshold, phasing_threshold, PSI_rescale_factor,
@@ -738,7 +683,7 @@ def main() -> None:
               "run either skipped entirely (see that rule's --note output) or every gene failed.")
         results_subdir = _results_dir()
         all_scored_path = os.path.join(results_subdir, "all_scored_results.tsv")
-        pd.DataFrame(columns=_OUTPUT_COLS).to_csv(all_scored_path, sep="\t", index=False)
+        pd.DataFrame(columns=OUTPUT_COLS).to_csv(all_scored_path, sep="\t", index=False)
         with open(os.path.join(results_subdir, "method.txt"), "w") as fh:
             fh.write(method + "\n")
         with open(os.path.join(results_subdir, "computed_metrics.txt"), "w") as fh:
@@ -748,6 +693,7 @@ def main() -> None:
         print("\nDone (nothing to do).")
         return
 
+    # merge genes, do the per-sample BH, tidy columns
     def _finalize_results(
         all_results: List[pd.DataFrame],
         computed_metrics: List[str],
@@ -801,6 +747,7 @@ def main() -> None:
         print(f"       Done ({time.time()-t_fdr:.2f}s)")
         return fmt_df
 
+    # score in parallel, write results + the sentinel file snakemake waits on
     gene_args = [
         (gene, path, approx_only, args.coverage_threshold, args.phasing_threshold,
          args.PSI_rescale_factor, args.n_threshold, args.has_ipa, args.no_ss_IR, method)
@@ -821,7 +768,7 @@ def main() -> None:
               "produced empty output, during statistical testing).")
         results_subdir = _results_dir()
         all_scored_path = os.path.join(results_subdir, "all_scored_results.tsv")
-        pd.DataFrame(columns=_OUTPUT_COLS).to_csv(all_scored_path, sep="\t", index=False)
+        pd.DataFrame(columns=OUTPUT_COLS).to_csv(all_scored_path, sep="\t", index=False)
         with open(os.path.join(results_subdir, "method.txt"), "w") as fh:
             fh.write(method + "\n")
         with open(os.path.join(results_subdir, "computed_metrics.txt"), "w") as fh:
@@ -841,7 +788,7 @@ def main() -> None:
         print("[WARNING] Result assembly produced no rows.")
         results_subdir = _results_dir()
         all_scored_path = os.path.join(results_subdir, "all_scored_results.tsv")
-        pd.DataFrame(columns=_OUTPUT_COLS).to_csv(all_scored_path, sep="\t", index=False)
+        pd.DataFrame(columns=OUTPUT_COLS).to_csv(all_scored_path, sep="\t", index=False)
         with open(os.path.join(results_subdir, "method.txt"), "w") as fh:
             fh.write(method + "\n")
         with open(os.path.join(results_subdir, "computed_metrics.txt"), "w") as fh:

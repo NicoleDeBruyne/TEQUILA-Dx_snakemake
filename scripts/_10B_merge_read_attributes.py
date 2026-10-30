@@ -1,3 +1,5 @@
+# 10B - merge per-sample read length summaries into one cohort boxplot
+
 import argparse
 
 import pandas as pd
@@ -6,7 +8,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 rcParams['pdf.fonttype'] = 42
-import seaborn as sns
 
 from palette import SELECT_ORDER, GREY, use_fonts
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve, resolve_all
@@ -24,6 +25,7 @@ def parse_args():
     return parser.parse_args()
 
 
+# one box per sample, split on/off target
 def plot_boxplot(df, sample_order, target_order, palette_dict, outfile, title):
     fig, ax = plt.subplots(figsize=(max(6, len(sample_order) * 0.5), 6))
 

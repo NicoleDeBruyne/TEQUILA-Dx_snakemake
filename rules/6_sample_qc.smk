@@ -1,3 +1,5 @@
+# step 6 - per-sample QC, and ranking genes by phenotype
+
 rule _6A_get_on_target_rate:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -50,6 +52,7 @@ rule _6B_get_read_attributes:
         """
 
 
+# 6C how full-length the reads are per gene
 rule _6C_get_full_length_ratio:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -108,6 +111,7 @@ rule _6D_get_avg_coverage:
         """
 
 
+# 6E AMELIE ranking from the HPO terms
 rule _6E_rank_genes_amelie:
     input:
         bed = lambda wc: SAMPLES[wc.sample]["bed"],

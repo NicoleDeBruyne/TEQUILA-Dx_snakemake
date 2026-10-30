@@ -1,3 +1,5 @@
+# 11B - merge soft-clip clusters across the group and flag the ones only one sample has
+
 import argparse
 import math
 import os
@@ -66,6 +68,7 @@ def main():
         return
     df = pd.concat(frames, ignore_index=True)
     df["sample"] = df["sample"].astype(str)
+    # a site = gene + position + side
     df["site"] = df["gene"].astype(str) + ":" + df["chrom"].astype(str) + ":" + df["pos"].astype(str) + ":" + \
         df["side"].astype(str)
     df["alias"] = [resolve(s, alias) for s in df["sample"]]
@@ -75,6 +78,8 @@ def main():
     df["n_samples"] = n
     df["consensus_identity"] = pd.to_numeric(df["consensus_identity"], errors="coerce")
     df["null_identity"] = pd.to_numeric(df["null_identity"], errors="coerce")
+    # outlier needs enough clipped reads, a high clipped fraction, a consistent clip sequence,
+    # and has to be rare in the rest of the group
     max_other = math.ceil(a.max_sample_fraction * n) - 1
     df["outlier"] = ((df["n_clipped"] >= a.min_reads) & (df["clip_fraction"] >= a.min_fraction)
                      & (df["consensus_identity"] >= a.min_identity) & (df["n_other_samples_present"] <= max_other))
@@ -87,6 +92,7 @@ def main():
     if not out.empty:
         print(out.groupby(["location", "end"]).size().rename("outliers").to_string())
 
+    # clipped reads vs fraction, and clip identity vs a random-clip null
     use_fonts()
     fig, (ax, bx) = plt.subplots(1, 2, figsize=(10, 4), gridspec_kw=dict(width_ratios=[1.4, 1]))
     rec = df[~df["outlier"]]

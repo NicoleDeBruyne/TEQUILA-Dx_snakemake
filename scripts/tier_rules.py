@@ -1,6 +1,9 @@
+# rules for evidence strength and gene tiers (tier 1 = strongest)
+
 STRONG, MODERATE, WEAK, NONE = "Strong", "Moderate", "Weak", "None"
 
 
+# Strong/Moderate/Weak/None from the biggest delta-PSI across bulk, hap1 and hap2
 def junction_strength(max_bulk, max_hap1, max_hap2):
     def ge(x, t):
         return x == x and x >= t
@@ -19,6 +22,7 @@ def is_dominant(inheritance_patterns):
     return ("AD" in s) or ("XLD" in s)
 
 
+# the main tiering logic. isoform evidence only ever counts as weak on purpose
 def assign_tier(vc, ase, haploinsufficient, strength, dominant, isoform=False):
     if isoform:
         strength = strongest(strength, WEAK)
@@ -64,6 +68,7 @@ def strongest(*labels):
     return best if best in order else NONE
 
 
+# walk every evidence combo so the tier heatmaps can show cells that never got any genes
 _EMPTY = dict(has_pathogenic=False, has_vus=False, has_homozygous_pathogenic=False, has_homozygous_vus=False,
               has_2_pathogenic_trans=False, has_2_pathogenic_unclear=False,
               has_1_pathogenic_1_vus_trans=False, has_2_vus_trans=False)

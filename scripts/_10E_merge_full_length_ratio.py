@@ -1,3 +1,5 @@
+# 10E - merge the full-length ratios into cohort matrices and a heatmap (split by gene read depth)
+
 import argparse
 
 import pandas as pd
@@ -128,8 +130,8 @@ def _draw_heatmap_panel(fig, x0, y_top, flr_df, gene_median_reads, sample_total_
         jitter = (rng.rand(len(vals)) - 0.5) * 0.35
         ax_box.scatter(np.full(len(vals), xi) + jitter, vals, color=c, s=6, zorder=2, edgecolors="none")
     _black = dict(color="black", linewidth=0.7, zorder=3)
-    bp = ax_box.boxplot(box_data, positions=x, widths=0.6, showfliers=False,
-                         boxprops=_black, whiskerprops=_black, capprops=_black, medianprops=_black)
+    ax_box.boxplot(box_data, positions=x, widths=0.6, showfliers=False,
+                   boxprops=_black, whiskerprops=_black, capprops=_black, medianprops=_black)
     ax_box.set_ylim(-0.02, 1.02)
     ax_box.set_ylabel("avgFLR", fontsize=7)
     ax_box.tick_params(axis="x", labelbottom=False, bottom=False)
@@ -141,6 +143,7 @@ def _draw_heatmap_panel(fig, x0, y_top, flr_df, gene_median_reads, sample_total_
     ax_sbar.tick_params(axis="x", labelbottom=False, bottom=False)
 
 
+# high-read and low-read genes on the same page. low-read genes are noisy so keep them apart
 def make_combined_heatmap(flr_high, flr_low, gene_median_reads, sample_total_reads,
                            sample_type_map, sample_colors, out_pdf, title_high, title_low,
                            suptitle, n_samples):
@@ -219,6 +222,7 @@ def main():
     count_matrix.to_csv(out_counts, sep="\t")
     print("Saved read-count matrix: " + out_counts)
 
+    # split genes on median read count
     gene_median_reads = count_matrix.median(axis=1)
     sample_total_reads = count_matrix.sum(axis=0)
 

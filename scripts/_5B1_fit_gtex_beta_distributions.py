@@ -1,3 +1,6 @@
+# 5B1 - fit a beta distribution to each GTEx junction's PSI for one tissue.
+# only panel junctions, and results are cached per run since this is slow
+
 import argparse
 import concurrent.futures
 import os
@@ -5,6 +8,7 @@ import os
 import numpy as np
 import pandas as pd
 from math import ceil
+from common import compute_rescaled_psi_column
 
 
 def parse_args():
@@ -25,27 +29,6 @@ def parse_args():
     parser.add_argument('--gtex-n-threshold', type=int, default=100)
     parser.add_argument('--threads', type=int, default=1)
     return parser.parse_args()
-
-
-def compute_rescaled_psi_column(jxn_counts, ss1, ss2, PSI_rescale_factor, gtex_coverage_threshold):
-    jxn_counts = pd.to_numeric(pd.Series(jxn_counts), errors='coerce').fillna(0).astype(int)
-
-    ss1_sums = jxn_counts.groupby(ss1).sum()
-    ss2_sums = jxn_counts.groupby(ss2).sum()
-
-    ss1_coverage = pd.Series(ss1).map(ss1_sums).fillna(0).to_numpy()
-    ss2_coverage = pd.Series(ss2).map(ss2_sums).fillna(0).to_numpy()
-
-    jxn_counts = jxn_counts.to_numpy(dtype=np.float64)
-    jxn_coverage = ss1_coverage + ss2_coverage - jxn_counts
-
-    with np.errstate(divide='ignore', invalid='ignore'):
-        psi = np.where(jxn_coverage == 0, np.nan, jxn_counts / jxn_coverage)
-
-    rescaled_psi = psi * (1 - 2 * PSI_rescale_factor) + PSI_rescale_factor
-    rescaled_psi[jxn_coverage < gtex_coverage_threshold] = np.nan
-
-    return rescaled_psi
 
 
 def load_merged_bed_regions(bed_paths):
@@ -101,6 +84,7 @@ def junctions_overlap_regions(chrom, start, end, merged_regions):
     return keep
 
 
+# beta fit + 1st/99th percentile PSI. too few covered GTEx samples -> 'low_n'
 def fit_beta_dist(x, tol, n_threshold):
     from scipy.stats import beta
 
@@ -156,6 +140,7 @@ def main():
     gtex_samples = list(gtex_df.columns)
     gtex_df.columns = [c + '_jxn_alignment_count' for c in gtex_samples]
 
+    # split junction IDs into coords and splice-site keys
     idx_chrom_coord = gtex_df.index.str.split(':')
     gtex_chrom = idx_chrom_coord.map(lambda p: p[0])
     idx_coords = idx_chrom_coord.map(lambda p: p[1]).str.split('-')
@@ -186,6 +171,7 @@ def main():
 
     print(f"\nLoading BED panel(s) to restrict fitting to junctions any sample in this run "
           f"could query: {args.bed_files}")
+    # no point fitting junctions that no sample in the run will ever look up
     merged_regions = load_merged_bed_regions(args.bed_files)
     in_panel = junctions_overlap_regions(junction_chrom, junction_start, junction_end, merged_regions)
 
@@ -199,6 +185,7 @@ def main():
     print(f"\nFitting beta distributions for {len(junctions)} junctions using {args.threads} thread(s). "
           f"This may take a while...")
 
+    # fit in parallel. the thresholds go in the header line so we can tell later what was used
     rows = list(zip(junctions, psi_matrix))
 
     if args.threads <= 1 or len(rows) < 2:

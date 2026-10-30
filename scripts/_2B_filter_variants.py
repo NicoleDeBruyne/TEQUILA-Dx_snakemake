@@ -1,3 +1,5 @@
+# 2B - final variant filters (gnomAD AF, ClinVar, CADD/SpliceAI, depth, AF)
+
 import argparse
 import pandas as pd
 
@@ -43,7 +45,7 @@ def filter_variants(input_df, args):
 
     if args.final_gnomadAF_threshold:
         if 'gnomAD_AF' not in filtered_df.columns:
-            print(f"\nWARNING: gnomAD_AF column not found in DataFrame. Skipping filter.")
+            print("\nWARNING: gnomAD_AF column not found in DataFrame. Skipping filter.")
         else:
             gnomad_num = pd.to_numeric(filtered_df['gnomAD_AF'], errors='coerce')
             filtered_df = filtered_df[
@@ -52,10 +54,11 @@ def filter_variants(input_df, args):
 
     if args.final_CLNSIG_filter:
         if 'CLNSIG' not in filtered_df.columns:
-            print(f"\nWARNING: CLNSIG column not found in DataFrame. Skipping filter.")
+            print("\nWARNING: CLNSIG column not found in DataFrame. Skipping filter.")
         else:
             filtered_df = filtered_df[~filtered_df['CLNSIG'].isin(args.final_CLNSIG_filter)]
 
+    # passing either score is enough. no CADD score = keep it, better safe than sorry
     if args.final_CADD_phred_threshold or args.final_SpliceAI_threshold:
         cadd_missing = pd.Series(False, index=filtered_df.index)
         cadd_high = pd.Series(False, index=filtered_df.index)
@@ -63,7 +66,7 @@ def filter_variants(input_df, args):
 
         if args.final_CADD_phred_threshold:
             if 'CADD_PHRED' not in filtered_df.columns:
-                print(f"\nWARNING: CADD_PHRED column not found in DataFrame. Skipping CADD phred filter.")
+                print("\nWARNING: CADD_PHRED column not found in DataFrame. Skipping CADD phred filter.")
             else:
                 cadd_num = pd.to_numeric(filtered_df['CADD_PHRED'], errors='coerce')
                 cadd_missing = filtered_df['CADD_PHRED'].isin(['.', 'fail']) | cadd_num.isna()
@@ -71,7 +74,7 @@ def filter_variants(input_df, args):
 
         if args.final_SpliceAI_threshold:
             if 'SpliceAI' not in filtered_df.columns:
-                print(f"\nWARNING: SpliceAI column not found in DataFrame. Skipping SpliceAI filter.")
+                print("\nWARNING: SpliceAI column not found in DataFrame. Skipping SpliceAI filter.")
             else:
                 thr = args.final_SpliceAI_threshold
                 def _spliceai_score(x):
@@ -92,9 +95,10 @@ def filter_variants(input_df, args):
 
         filtered_df = filtered_df[keep_mask]
 
+    # depth / allele fraction come from the sample FORMAT fields
     if args.final_DP_threshold:
         if 'format' not in filtered_df.columns or 'value' not in filtered_df.columns:
-            print(f"\nWARNING: format or value column not found in DataFrame. Skipping filter.")
+            print("\nWARNING: format or value column not found in DataFrame. Skipping filter.")
         else:
             def _dp_ok(row):
                 fmt = row['format'].split(':')
@@ -107,7 +111,7 @@ def filter_variants(input_df, args):
 
     if args.final_AF_threshold:
         if 'format' not in filtered_df.columns or 'value' not in filtered_df.columns:
-            print(f"\nWARNING: format or value column not found in DataFrame. Skipping filter.")
+            print("\nWARNING: format or value column not found in DataFrame. Skipping filter.")
         else:
             def _af_ok(row):
                 fmt = row['format'].split(':')
@@ -120,6 +124,8 @@ def filter_variants(input_df, args):
                 return True
             filtered_df = filtered_df[filtered_df.apply(_af_ok, axis=1)]
 
+    # whitelisted ClinVar classes get added back at the end, even if hidden inside a
+    # 'conflicting classifications' entry
     def extract_CLNSIG_from_CLNSIGCONF(CLNSIG):
         if pd.isna(CLNSIG):
             return []
@@ -129,7 +135,7 @@ def filter_variants(input_df, args):
 
     if args.keep_CLNSIG:
         if 'CLNSIG' not in filtered_df.columns:
-            print(f"\nWARNING: CLNSIG column not found in DataFrame. Skipping filter.")
+            print("\nWARNING: CLNSIG column not found in DataFrame. Skipping filter.")
         else:
             keep_set = set(args.keep_CLNSIG)
             keep_mask = input_df['CLNSIG'].apply(
@@ -143,9 +149,9 @@ def filter_variants(input_df, args):
 
 def main():
 
-    print(f"\n\n\n******************************************************************************************")
-    print(f"Filtering variants...")
-    print(f"******************************************************************************************\n")
+    print("\n\n\n******************************************************************************************")
+    print("Filtering variants...")
+    print("******************************************************************************************\n")
 
     args = parse_args()
 
@@ -156,7 +162,7 @@ def main():
             args.final_DP_threshold or args.final_AF_threshold):
         filtered_df = filter_variants(df, args)
     else:
-        print(f"\nNo final filter thresholds configured. Writing input through unfiltered.")
+        print("\nNo final filter thresholds configured. Writing input through unfiltered.")
         filtered_df = df
 
     filtered_df.to_csv(args.outfile, sep='\t', index=False)

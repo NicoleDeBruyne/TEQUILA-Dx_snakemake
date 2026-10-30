@@ -1,3 +1,5 @@
+# 6B - read length summaries (min/q1/median/q3/max) by target type
+
 import argparse
 import bisect
 from collections import defaultdict

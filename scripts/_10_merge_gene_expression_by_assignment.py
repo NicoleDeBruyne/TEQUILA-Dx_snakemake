@@ -1,11 +1,10 @@
+# 10H - same as 10F but for the splice-site assignment counts, plus a summary of assignment outcomes
+
 import argparse
-import os
 
 import pandas as pd
-import numpy as np
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from matplotlib import rcParams
 
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve_all
@@ -66,6 +65,7 @@ def main():
     raw_all_df.to_csv(out_raw_all, sep="\t")
     print("Saved all-gene raw-value matrix: " + out_raw_all)
 
+    # only panel genes have a CPTM value, so use that to restrict
     targeted_genes = sorted(long_df.loc[long_df['cptm'].notna(), 'gene'].drop_duplicates())
     raw_df = raw_all_df.reindex(targeted_genes).fillna(0).astype(int)
     raw_df.index.name = "gene"
@@ -106,6 +106,7 @@ def main():
     print("Saved alias-labeled targeted-panel MOTR matrix: " + out_matrix_motr_alias)
 
 
+    # how reads got assigned in each sample (useful for spotting weird samples)
     stats_df = pd.concat([pd.read_csv(f, sep="\t") for f in args.stats_infiles], ignore_index=True)
     stats_df = stats_df.set_index("sample").reindex(samples)
     stats_df = stats_df[["n_total"] + [col for col, _ in _STATS_CATEGORIES]]

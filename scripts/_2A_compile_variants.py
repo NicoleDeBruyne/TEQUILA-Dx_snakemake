@@ -1,3 +1,6 @@
+# 2A - pull one sample's variant calls together (caller VCFs or the WGS VCF) in the panel, then annotate:
+# gnomAD AF, ClinVar, panel gene, ANNOVAR, CADD, SpliceAI
+
 import argparse
 import traceback
 import re
@@ -159,6 +162,7 @@ def parse_args():
     return parser.parse_args()
 
 
+# SpliceAI wants its own annotation table, so build it from the GTF exons
 def process_gtf(gtf, outfile):
     df = pd.read_csv(gtf, sep='\t', comment='#',
                      names=["CHROM", "SOURCE", "FEATURE", "START", "END", "SCORE", "STRAND", "FRAME", "ATTRIBUTES"])
@@ -178,6 +182,7 @@ def process_gtf(gtf, outfile):
     output_df.to_csv(outfile, sep='\t', index=False)
 
 
+# remote VCFs (URLs) fail randomly sometimes, hence the retries
 def _run_remote_bcftools_pipeline(view_cmd, query_cmd, max_retries=5, initial_delay=15, cwd=None, label=None,
                                    quiet_success=False):
     tag = f' ({label})' if label else ''
@@ -255,6 +260,7 @@ def _is_remote_url(path):
     return re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', path) is not None
 
 
+# chunk the BED and query in parallel, a single big query is slow
 def _query_vcf_regions(vcf_file, bed_file, format_string, threads, cwd, chunk_size=10, max_workers=None):
     if max_workers is None:
         max_workers = threads
@@ -313,6 +319,7 @@ def _query_vcf_regions(vcf_file, bed_file, format_string, threads, cwd, chunk_si
     return ''.join(results[i + 1] for i in range(n_chunks))
 
 
+# non-ref calls from one caller: GT, DP, VAF, phase set
 def process_vcf(vcf_file, vcf_file_name, bed_file, genome, vaf_from_ad=False):
 
     vcf_data = {}
@@ -350,6 +357,7 @@ def process_vcf(vcf_file, vcf_file_name, bed_file, genome, vaf_from_ad=False):
     return vcf_data
 
 
+# tries the local file first, falls back to remote
 def extract_gnomAD_AF(df, gnomad_vcf, outprefix, bed_file, threads, cache_dir, gnomad_vcf_fallback=None):
 
     start_time = time.time()
@@ -373,7 +381,7 @@ def extract_gnomAD_AF(df, gnomad_vcf, outprefix, bed_file, threads, cache_dir, g
         for gnomad_vcf_file in gnomad_vcf_value.split(','):
             gnomad_vcf_file = gnomad_vcf_file.strip()
             print(f'\nProcessing gnomAD VCF file: {gnomad_vcf_file}')
-            print(f'  Extracting gnomAD allele frequencies from gnomAD VCF. This may take a few minutes...')
+            print('  Extracting gnomAD allele frequencies from gnomAD VCF. This may take a few minutes...')
 
             file_is_remote = is_remote(gnomad_vcf_file)
             file_cwd = None
@@ -430,8 +438,8 @@ def extract_gnomAD_AF(df, gnomad_vcf, outprefix, bed_file, threads, cache_dir, g
                 traceback.print_exc()
                 df['gnomAD_AF'] = 'fail'
         else:
-            print(f'  No (different) fallback source available. '
-                  f'Filling gnomAD_AF with "fail" for all variants and continuing.\n')
+            print('  No (different) fallback source available. '
+                  'Filling gnomAD_AF with "fail" for all variants and continuing.\n')
             df['gnomAD_AF'] = 'fail'
 
     if os.path.exists(outprefix + '_compiled_variants.tsv'):
@@ -461,7 +469,7 @@ def extract_CLNSIG(df, clinvar_vcf, outprefix, bed_file, threads, cache_dir, cli
             if not os.path.isfile(f'{clinvar_vcf_value}.csi') and not os.path.isfile(f'{clinvar_vcf_value}.tbi'):
                 raise FileNotFoundError(f'ClinVar VCF file {clinvar_vcf_value} is not indexed.')
 
-        print(f'\nExtracting ClinVar CLNSIG annotations from ClinVar VCF. This may take a few minutes...')
+        print('\nExtracting ClinVar CLNSIG annotations from ClinVar VCF. This may take a few minutes...')
         format_string = '%CHROM\t%POS\t%REF\t%ALT\t%INFO/CLNSIG\t%INFO/CLNSIGCONF\n'
         query_stdout = _query_vcf_regions(clinvar_vcf_value, clinvar_bed_file, format_string, threads, cache_dir,
                                            chunk_size=None)
@@ -495,8 +503,8 @@ def extract_CLNSIG(df, clinvar_vcf, outprefix, bed_file, threads, cache_dir, cli
                 traceback.print_exc()
                 df['CLNSIG'] = 'fail'
         else:
-            print(f'  No (different) fallback source available. '
-                  f'Filling CLNSIG with "fail" for all variants and continuing.\n')
+            print('  No (different) fallback source available. '
+                  'Filling CLNSIG with "fail" for all variants and continuing.\n')
             df['CLNSIG'] = 'fail'
 
     if os.path.exists(outprefix + '_compiled_variants.tsv'):
@@ -546,7 +554,7 @@ def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
     try:
         ANNOVAR_outdir = os.path.join(os.path.dirname(outprefix), 'ANNOVAR')
         os.makedirs(ANNOVAR_outdir, exist_ok=True)
-        print(f'\nMaking a VCF file with all variants for Annovar analysis...')
+        print('\nMaking a VCF file with all variants for Annovar analysis...')
         variants = set(map(tuple, df[['chrom', 'pos', 'ref', 'alt']].values.tolist()))
         with open(os.path.join(ANNOVAR_outdir, 'compiled_variants.vcf'), 'w') as f:
             f.write('##fileformat=VCFv4.2\n')
@@ -557,7 +565,7 @@ def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
             for chrom, pos, ref, alt in variants:
                 f.write(f'{chrom}\t{pos}\t.\t{ref}\t{alt}\t.\t.\t.\n')
 
-        print(f'\nRunning Annovar on compiled variants...')
+        print('\nRunning Annovar on compiled variants...')
         log_file = os.path.join(ANNOVAR_outdir, 'ANNOVAR.log')
         with open(log_file, 'w') as log:
             subprocess.run(
@@ -604,7 +612,7 @@ def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
         df.drop(columns=['ANNOVAR_Chr', 'ANNOVAR_Start', 'ANNOVAR_End', 'ANNOVAR_Ref', 'ANNOVAR_Alt'], inplace=True)
         df = df.fillna('.')
 
-        print(f'\nAnnovar analysis complete.\n')
+        print('\nAnnovar analysis complete.\n')
 
     except Exception as e:
         print(f'\nWARNING: ANNOVAR annotation failed ({e}). '
@@ -618,6 +626,7 @@ def run_ANNOVAR(df, outprefix, ANNOVAR_dir, genome):
     return df
 
 
+# three ways to get CADD: local install, local prescored tables, or remote prescored
 def run_CADD_chunk(chunk_variants, idx, outprefix, CADD_script, CADD_data_dir, include_CADD_annotations):
 
     work_dir = os.path.dirname(outprefix)
@@ -661,6 +670,7 @@ def run_CADD_chunk(chunk_variants, idx, outprefix, CADD_script, CADD_data_dir, i
     return df_CADD
 
 
+# only score rare variants that ClinVar doesn't already rule out, otherwise CADD/SpliceAI take forever
 def _gnomad_clnsig_filter_mask(df, gnomad_af_threshold, clnsig_filter):
     mask = pd.Series(True, index=df.index)
     if gnomad_af_threshold is not None and 'gnomAD_AF' in df.columns:
@@ -686,13 +696,13 @@ def _print_filter_summary(label, df, mask, gnomad_af_threshold, clnsig_filter):
 
 def _run_CADD_local(df, outprefix, CADD_script, CADD_data_dir, include_CADD_annotations, mask, threads):
 
-    print(f'\nPreparing variants for CADD analysis...')
+    print('\nPreparing variants for CADD analysis...')
     filtered_df = df[mask].copy()
     filtered_df['chrom'] = filtered_df['chrom'].str.replace(r'^chr', '', regex=True)
     filtered_variants = list(set(map(tuple, filtered_df[['chrom', 'pos', 'ref', 'alt']].values.tolist())))
 
     if not filtered_variants:
-        print(f'\nNo variants left after filtering for CADD analysis. Skipping CADD analysis.')
+        print('\nNo variants left after filtering for CADD analysis. Skipping CADD analysis.')
         df['CADD_PHRED'] = '.'
         return df
 
@@ -731,7 +741,7 @@ def _run_CADD_local(df, outprefix, CADD_script, CADD_data_dir, include_CADD_anno
                   right_on=['CADD_#Chrom', 'CADD_Pos', 'CADD_Ref', 'CADD_Alt'], how='left')
     df = df.drop(columns=['CADD_#Chrom', 'CADD_Pos', 'CADD_Ref', 'CADD_Alt', 'CADD_RawScore'])
     df = df.fillna('.')
-    print(f'\nCADD analysis complete.\n')
+    print('\nCADD analysis complete.\n')
     return df
 
 
@@ -747,7 +757,7 @@ def _query_local_tabix_tsv(path, bed_file, cwd, columns):
 def _run_CADD_local_prescored(df, outprefix, CADD_local_prescored_snv, CADD_local_prescored_indel,
                                cache_dir, mask, threads):
 
-    print(f'\nLooking up CADD scores from local pre-scored file(s)...')
+    print('\nLooking up CADD scores from local pre-scored file(s)...')
     os.makedirs(cache_dir, exist_ok=True)
 
     filtered_df = df[mask].copy()
@@ -782,8 +792,8 @@ def _run_CADD_local_prescored(df, outprefix, CADD_local_prescored_snv, CADD_loca
             results.append(subset_result)
 
     if not results:
-        print(f'\nNo local pre-scored CADD matches found for this variant set. '
-              f'Filling CADD_PHRED with "." for all variants.\n')
+        print('\nNo local pre-scored CADD matches found for this variant set. '
+              'Filling CADD_PHRED with "." for all variants.\n')
         df['CADD_PHRED'] = '.'
         return df
 
@@ -804,7 +814,7 @@ def _run_CADD_local_prescored(df, outprefix, CADD_local_prescored_snv, CADD_loca
 
 def _run_CADD_remote_prescored(df, outprefix, CADD_prescored_url, cache_dir, mask, threads):
 
-    print(f'\nLooking up CADD scores from the remote pre-scored SNV file...')
+    print('\nLooking up CADD scores from the remote pre-scored SNV file...')
     os.makedirs(cache_dir, exist_ok=True)
 
     cadd_bed_file = outprefix + '_cadd_lookup_positions.bed'
@@ -816,7 +826,7 @@ def _run_CADD_remote_prescored(df, outprefix, CADD_prescored_url, cache_dir, mas
     }).drop_duplicates()
 
     if bed_df.empty:
-        print(f'\nNo variants left after filtering for CADD analysis. Skipping CADD analysis.')
+        print('\nNo variants left after filtering for CADD analysis. Skipping CADD analysis.')
         df['CADD_PHRED'] = '.'
         return df
 
@@ -829,8 +839,8 @@ def _run_CADD_remote_prescored(df, outprefix, CADD_prescored_url, cache_dir, mas
         names=['CADD_Chrom', 'CADD_Pos', 'CADD_Ref', 'CADD_Alt', 'CADD_RawScore', 'CADD_PHRED'], dtype=str)
 
     if df_CADD.empty:
-        print(f'\nNo pre-scored CADD matches found for this variant set (SNVs only -- '
-              f'any InDels are expected to miss). Filling CADD_PHRED with "." for all variants.\n')
+        print('\nNo pre-scored CADD matches found for this variant set (SNVs only -- '
+              'any InDels are expected to miss). Filling CADD_PHRED with "." for all variants.\n')
         df['CADD_PHRED'] = '.'
         return df
 
@@ -861,14 +871,14 @@ def run_CADD(df, outprefix, cache_dir, CADD_script, CADD_data_dir,
             print(f'\nWARNING: local CADD scoring failed ({e}).')
             traceback.print_exc()
     else:
-        print(f'\nNo local CADD install configured (--CADD-script not set, or "remote" was '
-              f'requested in config.yaml).')
+        print('\nNo local CADD install configured (--CADD-script not set, or "remote" was '
+              'requested in config.yaml).')
 
     used_local_prescored = False
     if not used_local_run:
         if CADD_local_prescored_snv or CADD_local_prescored_indel:
-            print(f'  Falling back to local pre-scored lookup...\n' if CADD_script else
-                  f'  Using local pre-scored lookup...\n')
+            print('  Falling back to local pre-scored lookup...\n' if CADD_script else
+                  '  Using local pre-scored lookup...\n')
             try:
                 df = _run_CADD_local_prescored(df, outprefix, CADD_local_prescored_snv,
                                                 CADD_local_prescored_indel, cache_dir, mask, threads)
@@ -877,12 +887,12 @@ def run_CADD(df, outprefix, cache_dir, CADD_script, CADD_data_dir,
                 print(f'\nWARNING: local CADD pre-scored lookup failed ({e}).')
                 traceback.print_exc()
         else:
-            print(f'  No local pre-scored CADD files configured either '
-                  f'(--CADD-local-prescored-snv/--CADD-local-prescored-indel).')
+            print('  No local pre-scored CADD files configured either '
+                  '(--CADD-local-prescored-snv/--CADD-local-prescored-indel).')
 
     if not used_local_run and not used_local_prescored:
         if CADD_prescored_url:
-            print(f'  Falling back to remote pre-scored SNV lookup...\n')
+            print('  Falling back to remote pre-scored SNV lookup...\n')
             try:
                 df = _run_CADD_remote_prescored(df, outprefix, CADD_prescored_url, cache_dir, mask, threads)
             except Exception as e:
@@ -891,8 +901,8 @@ def run_CADD(df, outprefix, cache_dir, CADD_script, CADD_data_dir,
                 traceback.print_exc()
                 df['CADD_PHRED'] = 'fail'
         else:
-            print(f'  No --CADD-prescored-url configured either -- '
-                  f'filling CADD_PHRED with "fail" for all variants and continuing.\n')
+            print('  No --CADD-prescored-url configured either -- '
+                  'filling CADD_PHRED with "fail" for all variants and continuing.\n')
             df['CADD_PHRED'] = 'fail'
 
     os.remove(outprefix + '_compiled_variants.tsv')
@@ -945,7 +955,7 @@ def run_SpliceAI_chunk(chunk_variants, idx, outprefix, genome, annotation_arg):
 
 def _run_SpliceAI_prescored_lookup(df, outprefix, snv_vcf, indel_vcf, mask, cache_dir, threads):
 
-    print(f'\nLooking up SpliceAI scores from precomputed VCF(s)...')
+    print('\nLooking up SpliceAI scores from precomputed VCF(s)...')
 
     filtered_df = df[mask].copy()
     filtered_df = filtered_df.drop_duplicates(subset=['chrom', 'pos', 'ref', 'alt'])
@@ -995,7 +1005,7 @@ def _run_SpliceAI_prescored_lookup(df, outprefix, snv_vcf, indel_vcf, mask, cach
 
 def _run_SpliceAI_live(df, outprefix, genome, gtf, SpliceAI_annotation, mask, threads):
 
-    print(f'\nPreparing variants for SpliceAI analysis...')
+    print('\nPreparing variants for SpliceAI analysis...')
 
     if shutil.which('spliceai') is None:
         raise FileNotFoundError(
@@ -1011,7 +1021,7 @@ def _run_SpliceAI_live(df, outprefix, genome, gtf, SpliceAI_annotation, mask, th
 
     variants = list(set(map(tuple, df[mask][['chrom', 'pos', 'ref', 'alt']].values.tolist())))
     if not variants:
-        print(f'\nNo variants to run SpliceAI on. Skipping SpliceAI analysis.')
+        print('\nNo variants to run SpliceAI on. Skipping SpliceAI analysis.')
         df['SpliceAI'] = '.'
         return df
 
@@ -1044,7 +1054,7 @@ def _run_SpliceAI_live(df, outprefix, genome, gtf, SpliceAI_annotation, mask, th
     df['pos'] = df['pos'].astype(str)
     df = df.merge(df_SpliceAI, on=['chrom', 'pos', 'ref', 'alt'], how='left')
     df['SpliceAI'] = df['SpliceAI'].fillna('.').astype(str)
-    print(f'\nSpliceAI analysis complete.\n')
+    print('\nSpliceAI analysis complete.\n')
     return df
 
 
@@ -1053,7 +1063,7 @@ def run_SpliceAI(df, outprefix, genome, gtf, SpliceAI_annotation, snv_vcf, indel
 
     used_live = False
     if force_prescored_lookup:
-        print(f'\n--SpliceAI-force-prescored-lookup set -- skipping live SpliceAI run.')
+        print('\n--SpliceAI-force-prescored-lookup set -- skipping live SpliceAI run.')
     elif genome:
         try:
             df = _run_SpliceAI_live(df, outprefix, genome, gtf, SpliceAI_annotation, mask, threads)
@@ -1062,12 +1072,12 @@ def run_SpliceAI(df, outprefix, genome, gtf, SpliceAI_annotation, snv_vcf, indel
             print(f'\nWARNING: local SpliceAI run failed ({e}).')
             traceback.print_exc()
     else:
-        print(f'\nGenome FASTA file not provided -- skipping live SpliceAI run.')
+        print('\nGenome FASTA file not provided -- skipping live SpliceAI run.')
 
     if not used_live:
         if snv_vcf or indel_vcf:
-            print(f'  Falling back to local prescored lookup...\n' if (genome and not force_prescored_lookup) else
-                  f'  Using local prescored lookup...\n')
+            print('  Falling back to local prescored lookup...\n' if (genome and not force_prescored_lookup) else
+                  '  Using local prescored lookup...\n')
             try:
                 df = _run_SpliceAI_prescored_lookup(df, outprefix, snv_vcf, indel_vcf,
                                                      mask, cache_dir, threads)
@@ -1077,8 +1087,8 @@ def run_SpliceAI(df, outprefix, genome, gtf, SpliceAI_annotation, snv_vcf, indel
                 traceback.print_exc()
                 df['SpliceAI'] = 'fail'
         else:
-            print(f'  No --SpliceAI-prescored-snv-vcf/--SpliceAI-prescored-indel-vcf '
-                  f'configured either -- filling SpliceAI with "fail" for all variants and continuing.\n')
+            print('  No --SpliceAI-prescored-snv-vcf/--SpliceAI-prescored-indel-vcf '
+                  'configured either -- filling SpliceAI with "fail" for all variants and continuing.\n')
             df['SpliceAI'] = 'fail'
 
     os.remove(outprefix + '_compiled_variants.tsv')
@@ -1088,9 +1098,9 @@ def run_SpliceAI(df, outprefix, genome, gtf, SpliceAI_annotation, snv_vcf, indel
 
 def main():
 
-    print(f"\n\n\n******************************************************************************************")
-    print(f"Compiling variants...")
-    print(f"******************************************************************************************\n")
+    print("\n\n\n******************************************************************************************")
+    print("Compiling variants...")
+    print("******************************************************************************************\n")
 
     args = parse_args()
 
@@ -1120,6 +1130,7 @@ def main():
         padded.to_csv(region_bed, sep='\t', header=False, index=False)
         print(f'Selecting variants in BED regions padded by {args.bed_padding} bp.')
 
+    # gather calls from every VCF into one table
     data = {}
     for i, vcf_file in enumerate(args.vcf_files):
         vcf_file_name = vcf_name_map.get(i, vcf_file.split('/')[-1].split('.')[0])
@@ -1144,6 +1155,7 @@ def main():
     }).drop_duplicates()
     bed_df.to_csv(bed_file, sep='\t', index=False, header=False)
 
+    # annotations
     if args.gnomad_vcf:
         df = extract_gnomAD_AF(df, args.gnomad_vcf, work_prefix, bed_file, args.threads, gnomad_cache_dir,
                                 gnomad_vcf_fallback=args.gnomad_vcf_fallback)
@@ -1156,10 +1168,11 @@ def main():
 
     if args.ANNOVAR_dir:
         if not args.genome:
-            print(f'\nGenome FASTA file not provided. Skipping Annovar analysis.')
+            print('\nGenome FASTA file not provided. Skipping Annovar analysis.')
         else:
             df = run_ANNOVAR(df, work_prefix, args.ANNOVAR_dir, args.genome)
 
+    # scores, but only for the filtered subset
     cadd_mask = _gnomad_clnsig_filter_mask(df, args.CADD_gnomadAF_threshold, args.CADD_CLNSIG_filter)
     spliceai_mask = _gnomad_clnsig_filter_mask(df, args.SpliceAI_gnomadAF_threshold, args.SpliceAI_CLNSIG_filter)
     _print_filter_summary('CADD', df, cadd_mask, args.CADD_gnomadAF_threshold, args.CADD_CLNSIG_filter)
@@ -1185,7 +1198,7 @@ def main():
         if os.path.isfile(work_tsv):
             os.remove(work_tsv)
     else:
-        print(f'\nERROR: Results file not found. Please check the output directory for errors.')
+        print('\nERROR: Results file not found. Please check the output directory for errors.')
         return
 
 

@@ -1,3 +1,5 @@
+# 10D - merge per-sample canonical transcript coverage into cohort matrices + heatmaps
+
 import argparse
 
 import numpy as np
@@ -57,6 +59,7 @@ def _check_len(name, values, n):
         raise ValueError(name + " must have one entry per --samples entry, or be omitted entirely")
 
 
+# gene x sample, with on-target reads and sample type as annotation bars
 def make_heatmap(matrix, on_target, sample_colors, sample_types, sample_labels, center,
                  metric_label, title, out_pdf, kind="depth"):
     n_genes, n_samples = matrix.shape
@@ -170,6 +173,7 @@ def main():
         {s: float(pd.read_csv(f, sep="\t")["target"].iloc[0]) for s, f in zip(samples, args.on_target_files)}
     )
 
+    # one matrix + heatmap per metric, genes sorted by mean coverage
     for name, column, label, kind in METRICS:
         missing = [s for s, d in per_sample.items() if column not in d.columns]
         if missing:

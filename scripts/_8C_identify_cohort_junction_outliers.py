@@ -1,12 +1,12 @@
+# 8C - call cohort junction outliers from the 8B scores (for each threshold set) and turn them into splice events
+
 from __future__ import annotations
 
 import os
-import sys
 import argparse
 import warnings
 import traceback
 import time
-import math
 import glob as _glob
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 import concurrent.futures
 from pandas.errors import PerformanceWarning
+from bed_utils import load_bed
+from common import OUTPUT_COLS
 
 warnings.filterwarnings("ignore", category=PerformanceWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -69,28 +71,8 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def load_bed(path: str) -> Dict[str, Tuple[str, str, str]]:
-    gene_info: Dict[str, Tuple[str, str, str]] = {}
-    with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 6:
-                print(f"[WARNING] BED line has <6 columns, skipping: {line!r}")
-                continue
-            chrom, start, end, gene, _, strand = parts[:6]
-            gene   = gene.strip()
-            strand = strand.strip()
-            region = f"{chrom.strip()}:{start.strip()}-{end.strip()}"
-            if gene in gene_info:
-                print(f"[WARNING] Gene '{gene}' appears more than once in BED. Using last entry.")
-            gene_info[gene] = (chrom.strip(), region, strand)
-    print(f"BED file loaded: {len(gene_info)} gene(s)")
-    return gene_info
-
-
+# alt 5'/3' SS, exon skipping/inclusion, IR, IPA. these come from junction pairs/triplets
+# moving in opposite directions, and at least one of them has to be canonical
 def _classify_events_for_metric(
     metric_col:         str,
     outlier_set:        set,
@@ -222,6 +204,7 @@ def _classify_events_for_metric(
     return dict(event_map), groups
 
 
+# exon-level events beat the others. more than one -> complex
 def _resolve_psi_events(events: set) -> set:
     out = set(events)
     for sfx in ("", "_approx"):
@@ -410,46 +393,6 @@ def classify_all_events(
     return sig_df
 
 
-def _per_metric_output_cols(metric_col: str) -> List[str]:
-    return [
-        f"n_{metric_col}",
-        f"alpha_{metric_col}", f"beta_{metric_col}", f"expected_{metric_col}",
-        f"p1_{metric_col}", f"p99_{metric_col}",
-        f"delta_{metric_col}", f"p_value_{metric_col}", f"padj_{metric_col}",
-        f"median_{metric_col}", f"mad_{metric_col}", f"modz_{metric_col}",
-    ]
-
-
-_OUTPUT_COLS = [
-    "sample", "gene", "gene_rank", "region", "phasing", "junction", "5ss", "3ss",
-    "junction_type",
-    "junction_usage",
-    "junction_coverage_approx",
-    "junction_PSI_approx", "rescaled_junction_PSI_approx",
-    *_per_metric_output_cols("junction_PSI_approx"),
-    "junction_coverage",
-    "junction_PSI", "rescaled_junction_PSI",
-    *_per_metric_output_cols("junction_PSI"),
-    "5ss_usage", "5ss_coverage",
-    "5ss_IR_ratio", "rescaled_5ss_IR_ratio",
-    *_per_metric_output_cols("5ss_IR_ratio"),
-    "3ss_usage", "3ss_coverage",
-    "3ss_IR_ratio", "rescaled_3ss_IR_ratio",
-    *_per_metric_output_cols("3ss_IR_ratio"),
-    "junction_full_IR_count",
-    "junction_full_IR_ratio", "rescaled_junction_full_IR_ratio",
-    *_per_metric_output_cols("junction_full_IR_ratio"),
-    "junction_IPA_count",
-    "junction_IPA_ratio", "rescaled_junction_IPA_ratio",
-    *_per_metric_output_cols("junction_IPA_ratio"),
-]
-
-
-def select_output_columns(df: pd.DataFrame, *_) -> pd.DataFrame:
-    present = [c for c in _OUTPUT_COLS if c in df.columns]
-    return df[present]
-
-
 def main() -> None:
     print("\n" + "*"*80)
     print("  Cohort Junction Outlier Identification")
@@ -457,6 +400,7 @@ def main() -> None:
 
     args = parse_args()
 
+    # thresholds are (padj, delta) for beta-binomial or (z, delta) for modified z
     if args.bb_thresholds is not None:
         expected_method = "beta_binomial"
         threshold_specs: List = []
@@ -483,8 +427,8 @@ def main() -> None:
     prefix        = args.outprefix.rstrip("/")
     outdir        = os.path.dirname(os.path.abspath(prefix))
     prefix_name   = os.path.basename(prefix)
-    approx_only   = args.approx
 
+    # make sure the 8B results were made with the same method
     results_dirs = _glob.glob(os.path.join(outdir, f"{prefix_name}_results_*"))
     if not results_dirs:
         raise FileNotFoundError(
@@ -566,7 +510,7 @@ def main() -> None:
 
     def _empty_outlier_outputs(reason: str) -> None:
         print(f"\n[WARNING] {reason}")
-        empty_cols = _OUTPUT_COLS + ["event_type"]
+        empty_cols = OUTPUT_COLS + ["event_type"]
         for thr in threshold_specs:
             thr_dir  = _threshold_dir(_thr_subdir_name(thr))
             empty_df = pd.DataFrame(columns=empty_cols)
@@ -654,6 +598,7 @@ def main() -> None:
             else:
                 print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions)")
 
+        # if bulk isn't between the two haplotypes the hap-only call is probably a phasing artifact
         unreliable_hap_outliers: Dict[str, set] = {}
 
         if not sig_df.empty:
@@ -704,7 +649,7 @@ def main() -> None:
                 unreliable_hap_outliers[mc] = set(pivot.index[~sandwiched | ~symmetric])
 
             sig_df = sig_df.drop(columns=["_key"])
-            print(f"  Removing unreliable haplotype-only outliers ...")
+            print("  Removing unreliable haplotype-only outliers ...")
             for mc in computed_metrics:
                 unreliable = unreliable_hap_outliers.get(mc, set())
                 if not unreliable or not _metric_cols_ok(sig_df, mc): continue
@@ -766,6 +711,7 @@ def main() -> None:
             else:
                 print(f"       {mc}: {n_rows:,} rows ({n_jxns} unique junctions)")
 
+        # recurrence: how many samples are outliers for each junction
         n_sample_counts: Dict[str, Optional[pd.DataFrame]] = {}
         for mc in computed_metrics:
             n_col = f"n_sample_outlier_{mc}"
@@ -781,7 +727,7 @@ def main() -> None:
 
         n_sig = len(sig_df)
         print(f"  Outliers identified ({time.time() - t_thr:.2f}s)")
-        print(f"  Classifying events ...")
+        print("  Classifying events ...")
         t_cls = time.time()
         if n_sig > 0:
             sig_df = classify_all_events(
@@ -864,7 +810,7 @@ def main() -> None:
 
         outlier_anchor_col = "padj_" if method == "beta_binomial" else "modz_"
         outlier_tsv_cols = []
-        for col in _OUTPUT_COLS:
+        for col in OUTPUT_COLS:
             outlier_tsv_cols.append(col)
             for mc in computed_metrics:
                 if col == f"{outlier_anchor_col}{mc}":
@@ -879,6 +825,7 @@ def main() -> None:
         t_out = time.time()
         out_jobs = []
 
+        # all outliers, the ones with an event ('filtered'), and an alias copy
         _outliers_data = sig_df[outlier_tsv_cols].copy()
         if "event_type" in sig_df.columns:
             filt = sig_df[sig_df["event_type"] != "none"]
@@ -963,7 +910,7 @@ def main() -> None:
                 sep    = f"  {'-'*40}" + ("-"*col_w) * len(header_metrics)
                 print("\n" + "="*len(sep.rstrip()))
                 print(f"  Outlier summary -- {thr_desc}")
-                print(f"  (samples ranked by total genes with outlier)")
+                print("  (samples ranked by total genes with outlier)")
                 print("="*len(sep.rstrip()))
                 print(header); print(sep)
                 for _, row in summary.iterrows():

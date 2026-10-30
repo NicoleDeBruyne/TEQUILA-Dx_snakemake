@@ -1,3 +1,5 @@
+# step 11 - soft clip analysis, to catch insertions / structural stuff that shows up at read ends
+
 def _softclip_alu_arg(wc):
     path = config.get("softclip_alu_annotation") or ""
     return ("--alu " + shlex.quote(str(path))) if path else ""
@@ -10,10 +12,12 @@ def _softclip_genes_arg(wc):
     return ("--genes " + " ".join(shlex.quote(str(g)) for g in genes)) if genes else ""
 
 
+# haplotype BAMs only exist when read phasing is on
 def _softclip_mapping(wc):
     return _sample_gene_bam_mapping(wc.sample) if flag("phase_reads") else []
 
 
+# 11A classify read ends per sample
 rule _11A_classify_read_ends:
     input:
         bam     = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -66,6 +70,7 @@ def _softclip_dir():
     return _cohort_outdir + "/{bed_id}/output/sample_types/{sample_type}/output/softclip_analysis"
 
 
+# 11B clusters that only one sample in the group has
 rule _11B_find_softclip_outliers:
     input:
         clusters = lambda wc: [str(SAMPLES[s]["outdir"]) + "/softclip_analysis/" + str(s) + "_softclip_clusters.tsv"

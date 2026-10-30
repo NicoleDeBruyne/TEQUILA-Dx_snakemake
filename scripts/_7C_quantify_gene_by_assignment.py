@@ -1,10 +1,13 @@
+# 7C - give each read to the gene it shares the most annotated splice sites with
+# (unspliced reads go by exon containment) and count reads per gene
+
 import argparse
 import gzip
-import re
 from collections import defaultdict
 
 import pandas as pd
 import pysam
+from gtf_utils import get_attr, strip_version
 
 
 def parse_args():
@@ -43,22 +46,6 @@ def load_targeted_genes(bed):
     return genes
 
 
-_ATTR_RE_CACHE = {}
-
-
-def _attr(attr_str, key):
-    rx = _ATTR_RE_CACHE.get(key)
-    if rx is None:
-        rx = re.compile(key + r'\s+"([^"]+)"')
-        _ATTR_RE_CACHE[key] = rx
-    m = rx.search(attr_str)
-    return m.group(1) if m else None
-
-
-def _strip_ver(s):
-    return re.sub(r'\.\d+$', '', s) if s else s
-
-
 def _merge_intervals(intervals):
     if not intervals:
         return []
@@ -92,13 +79,13 @@ def parse_gtf(gtf_path):
             end = int(parts[4])
             attrs = parts[8]
 
-            gname = _attr(attrs, "gene_name") or _attr(attrs, "gene_symbol")
-            gid = _strip_ver(_attr(attrs, "gene_id"))
+            gname = get_attr(attrs, "gene_name") or get_attr(attrs, "gene_symbol")
+            gid = strip_version(get_attr(attrs, "gene_id"))
             gene_key = gname or gid
             if gene_key is None:
                 continue
 
-            tx_id = _attr(attrs, "transcript_id")
+            tx_id = get_attr(attrs, "transcript_id")
             if tx_id is None:
                 continue
 
@@ -139,6 +126,7 @@ def parse_gtf(gtf_path):
 _BIN_SIZE = 100_000
 
 
+# bin genes along the genome so we only check a handful of candidates per read
 def build_gene_bins(genes, bin_size=_BIN_SIZE):
     bins = defaultdict(list)
     for gene_key, info in genes.items():
@@ -203,6 +191,7 @@ def _keep_read(r):
     return not r.is_unmapped and not r.is_secondary
 
 
+# assign everything and keep track of why reads did or didn't get assigned
 def assign_sample(bam, genes, gene_bins):
 
     counts = defaultdict(int)
@@ -229,6 +218,7 @@ def assign_sample(bam, genes, gene_bins):
             cands = candidate_genes(read.reference_name, read.reference_start,
                                      read.reference_end, genes, gene_bins)
 
+            # spliced: most shared splice sites wins, ties stay unassigned
             if sites:
                 best_gene, best_count, n_at_best = None, 0, 0
                 for gene_key in cands:
@@ -245,6 +235,7 @@ def assign_sample(bam, genes, gene_bins):
                 else:
                     stats["spliced_unassigned_tied"] += 1
             else:
+                # unspliced: only if exactly one gene overlaps and the read sits inside its exons
                 overlapping = [
                     gene_key for gene_key in cands
                     if _overlaps_exons(genes[gene_key]["exons"], read.reference_start, read.reference_end)
@@ -293,6 +284,7 @@ def main():
     print(args.sample + ": " + str(stats["spliced_assigned"] + stats["unspliced_assigned"]) +
           "/" + str(stats["n_total"]) + " alignments assigned")
 
+    # raw counts for every gene, CPTM just for the panel
     panel_total = sum(counts.get(g, 0) for g in targeted_genes)
     all_genes = sorted(set(counts) | set(targeted_genes))
     rows = []

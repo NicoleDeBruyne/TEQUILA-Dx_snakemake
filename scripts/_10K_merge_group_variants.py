@@ -1,7 +1,9 @@
+# 10K - merge candidate variants across the group, apply depth / caller count filters, and drop variants
+# that show up in too many samples (common or artifacts)
+
 import argparse
 import pandas as pd
 import os
-from math import ceil
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from palette import use_fonts
@@ -187,12 +189,13 @@ def main():
 
     if not args.include_multiallelic:
         merged_df = merged_df[~merged_df['alt'].str.contains(',')]
-        print(f"Removed multiallelic variants.")
+        print("Removed multiallelic variants.")
 
     if args.filters:
         merged_df = merged_df[merged_df['filter'].isin(args.filters)]
         print(f"Filtered for variants with filters: {', '.join(args.filters)}")
 
+    # WGS variants skip the RNA depth and caller count filters, they don't depend on expression
     is_wgs = merged_df['name'].astype(str).str.endswith('_wgs')
     wgs_df = merged_df[is_wgs].copy()
     rna_df = merged_df[~is_wgs].copy()
@@ -206,6 +209,7 @@ def main():
     SNV_df = rna_df[(rna_df['ref'].str.len() == 1) & (rna_df['alt'].str.len() == 1)]
     indel_df = rna_df[(rna_df['ref'].str.len() > 1) | (rna_df['alt'].str.len() > 1)]
 
+    # SNVs and indels get separate depth cutoffs
     if args.min_DP or args.min_DP_SNV or args.max_DP or args.max_DP_SNV:
         initial_SNV_count = SNV_df[['input_file', 'chrom', 'pos', 'ref', 'alt']].drop_duplicates().shape[0]
         min_DP_SNV = args.min_DP_SNV if args.min_DP_SNV else args.min_DP if args.min_DP else None
@@ -243,6 +247,7 @@ def main():
     wgs_df['num_callers'] = 1
     merged_df = pd.concat([SNV_df, indel_df, wgs_df], ignore_index=True).sort_values(by=['input_file', 'chrom', 'pos'])
 
+    # recurrence filter: something in lots of samples isn't going to be the diagnosis
     variant_cols = ['chrom', 'pos', 'ref', 'alt']
     merged_df['sample_count'] = merged_df.groupby(variant_cols)['input_file'].transform('nunique')
     merged_is_wgs = merged_df['name'].astype(str).str.endswith('_wgs')

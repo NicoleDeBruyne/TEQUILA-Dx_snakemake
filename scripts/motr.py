@@ -1,3 +1,5 @@
+# median-of-ratios (MOTR) normalization, shared by the expression merge scripts
+
 import numpy as np
 
 
@@ -10,6 +12,7 @@ def add_motr_args(parser):
              "Default: 0.25 (25%% zero)")
 
 
+# basically DESeq's size factors: each sample's median ratio to the per-gene geometric mean
 def compute_size_factors(raw_df, max_zero_fraction=0.25):
     nonzero = raw_df.gt(0)
     n_samples = raw_df.shape[1]
@@ -24,6 +27,7 @@ def compute_size_factors(raw_df, max_zero_fraction=0.25):
 
     size_factors = np.exp(log_ratios.median(axis=0, skipna=True))
 
+    # samples that are mostly zeros give garbage size factors, so they get NaN and drop out
     zero_fraction = (~nonzero).sum(axis=0) / n_genes
     excluded = zero_fraction >= max_zero_fraction
     if excluded.any():

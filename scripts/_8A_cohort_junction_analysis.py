@@ -1,7 +1,9 @@
+# 8A - per-gene junction tables for a sample-type group. junction reads plus splice-site, intron retention
+# and intronic polyA (IPA) coverage, for bulk and both haplotypes. one TSV per gene
+
 from __future__ import annotations
 
 import os
-import sys
 import argparse
 import warnings
 import traceback
@@ -14,6 +16,8 @@ import pandas as pd
 import pysam
 import concurrent.futures
 from pandas.errors import PerformanceWarning
+from bed_utils import load_bed
+from gtf_utils import parse_gtf_junctions
 
 warnings.filterwarnings("ignore", category=PerformanceWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -22,6 +26,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 _REF_OPS  = frozenset((0, 2, 3, 7, 8))
 _SKIP_OP  = 3
 
+# what each ratio gets divided by
 _METRIC_DENOMINATOR: Dict[str, str] = {
     "junction_PSI_approx":    "junction_coverage_approx",
     "junction_PSI":           "junction_coverage",
@@ -64,28 +69,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threads",                    type=int,   default=1)
     p.add_argument("--test-n-genes",               type=int,   default=None)
     return p.parse_args()
-
-
-def load_bed(path: str) -> Dict[str, Tuple[str, str, str]]:
-    gene_info: Dict[str, Tuple[str, str, str]] = {}
-    with open(path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 6:
-                print(f"[WARNING] BED line has <6 columns, skipping: {line!r}")
-                continue
-            chrom, start, end, gene, _, strand = parts[:6]
-            gene   = gene.strip()
-            strand = strand.strip()
-            region = f"{chrom.strip()}:{start.strip()}-{end.strip()}"
-            if gene in gene_info:
-                print(f"[WARNING] Gene '{gene}' appears more than once in BED. Using last entry.")
-            gene_info[gene] = (chrom.strip(), region, strand)
-    print(f"BED file loaded: {len(gene_info)} gene(s)")
-    return gene_info
 
 
 def load_and_validate_mapping(path: str) -> pd.DataFrame:
@@ -227,6 +210,7 @@ def iter_read_data(
     counts["gene_cov"] = gene_cov
 
 
+# approx mode: count unique read footprints instead of going through every read
 def footprint_unique_counts(footprints, jxn_coords):
     index = {c: i for i, c in enumerate(jxn_coords)}
     by_start, by_end = defaultdict(list), defaultdict(list)
@@ -252,6 +236,7 @@ def footprint_unique_counts(footprints, jxn_coords):
     return usage, approx
 
 
+# splice-site / IR / IPA counting, done in batches of reads
 class CoverageAccumulator:
 
     BATCH = 4096
@@ -272,6 +257,7 @@ class CoverageAccumulator:
         self.u_ss1_ir, self.u_ss2_ir, self.u_full_ir, self.u_ipa = z(), z(), z(), z()
         self._buf: List = []
 
+    # a polyA-looking soft clip means oligo-dT priming. Alu polyA counts too
     def is_polya(self, sc_tuple) -> bool:
         sc, g, pos3, leading = sc_tuple
         if _is_oligo_dt_priming(sc, g, leading):
@@ -403,6 +389,7 @@ def compute_coverage_metrics(
     return acc.result()
 
 
+# ignore it if the genome itself has an A/T run there, that's internal priming not a real end
 def _is_oligo_dt_priming(sc: str, g: str, leading: bool) -> bool:
     frag = sc[-10:] if leading else sc[:10]
     if len(frag) < 10:
@@ -445,6 +432,7 @@ def load_alu_intervals(alu_bed: str) -> dict:
     return dict(ivs)
 
 
+# approx coverage = reads using either splice site
 def compute_junction_coverage_approx(
     junction_counts: Dict[str, int],
     all_jxns: Optional[List[str]] = None,
@@ -510,6 +498,7 @@ def process_sample(
     empty = pd.DataFrame()
 
     if approx_only:
+        # approx mode: just junction counts + approximate coverage
         raw: List[Tuple[str, int, dict, set]] = []
         for label, bam in (("bulk", bulk_bam), ("hap1", hap1_bam), ("hap2", hap2_bam)):
             if not bam or not isinstance(bam, str): continue
@@ -584,6 +573,7 @@ def process_sample(
         parts = jxn.split("_")
         jxn_coords_for_cov.append((int(parts[-2]), int(parts[-1])))
 
+    # full mode: stream every BAM through the accumulator
     chunks_wide: List = []
     for label, bam in (("bulk", bulk_bam), ("hap1", hap1_bam), ("hap2", hap2_bam)):
         if not bam or not isinstance(bam, str): continue
@@ -665,6 +655,7 @@ def process_sample(
                 return np.array([ac.get(j, 0) for j in all_jxns], dtype=np.int32)
         return np.zeros(n_jxns, dtype=np.int32)
 
+    # ratios (PSI, IR, IPA) and their rescaled versions
     denom_arrays: Dict[str, Dict[str, np.ndarray]] = {}
     for denom_col in ("junction_coverage", "5ss_coverage", "3ss_coverage"):
         denom_arrays[denom_col] = {
@@ -766,6 +757,7 @@ def process_sample(
     return df, time.time() - t0
 
 
+# first pass: which junctions exist at all (bulk counts per sample)
 def _discover_junctions_worker(
     sample_name: str, bulk_bam: str, region: str,
     include_monoexonic: bool = False,
@@ -796,6 +788,7 @@ def _sample_args(row: pd.Series):
     return row["sample"], bulk, hap1, hap2
 
 
+# biggest BAMs first so one huge sample doesn't end up running alone at the end
 def _rows_by_bam_size(region_df: pd.DataFrame) -> List[pd.Series]:
     rows = [pd.Series(r._asdict()) for r in region_df.itertuples(index=False)]
     return sorted(rows, key=_row_bam_size, reverse=True)
@@ -816,6 +809,7 @@ class _GeneJob:
         self.lines: List[str] = []
 
 
+# several genes share one process pool, so workers don't sit idle between genes
 def run_all_genes(gene_groups, approx_only, PSI_rescale_factor, threads, include_monoexonic,
                   min_jxn_reads, genome_path, alu, on_gene_done) -> None:
     max_inflight = max(2, threads)
@@ -953,81 +947,6 @@ OUTPUT_COLUMNS = [
 ]
 
 
-def parse_gtf_junctions(
-    gtf_path: str,
-    gene_names: List[str],
-) -> Dict[str, Dict]:
-    import gzip as _gz
-    import re as _re
-
-    gene_set = set(gene_names)
-
-    def _attr(attr_str, key):
-        m = _re.search(rf'{key}' + r'\s+"([^"]+)"', attr_str)
-        return m.group(1) if m else None
-
-    def _strip_ver(s):
-        return _re.sub(r'\.\d+$', '', s) if s else s
-
-    tx_canonical: set = set()
-    gene_exons: Dict[str, Dict[str, List[Tuple[str, int, int]]]] = defaultdict(lambda: defaultdict(list))
-
-    open_fn = _gz.open if gtf_path.endswith(".gz") else open
-
-    with open_fn(gtf_path, "rt") as fh:
-        for line in fh:
-            if line.startswith("#"): continue
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 9: continue
-            feat = parts[2]
-            if feat not in ("transcript", "exon"): continue
-
-            chrom = parts[0]
-            start = int(parts[3]) - 1
-            end   = int(parts[4])
-            attrs = parts[8]
-
-            gname = _attr(attrs, "gene_name") or _attr(attrs, "gene_symbol")
-            gid   = _strip_ver(_attr(attrs, "gene_id"))
-            gene_key = None
-            if gname and gname in gene_set:
-                gene_key = gname
-            elif gid and gid in gene_set:
-                gene_key = gid
-            if gene_key is None:
-                continue
-
-            tx_id = _attr(attrs, "transcript_id")
-            if tx_id is None: continue
-
-            if feat == "transcript":
-                if "Ensembl_canonical" in attrs:
-                    tx_canonical.add(tx_id)
-            elif feat == "exon":
-                gene_exons[gene_key][tx_id].append((chrom, start, end))
-
-    result: Dict[str, Dict] = {}
-    for gene_key, tx_dict in gene_exons.items():
-        canonical_jxns: set = set()
-        all_jxns_set:   set = set()
-        for tx_id, exons in tx_dict.items():
-            if len(exons) < 2: continue
-            exons_sorted = sorted(exons, key=lambda x: x[1])
-            for i in range(len(exons_sorted) - 1):
-                chrom_e, _, end_e   = exons_sorted[i]
-                chrom_n, start_n, _ = exons_sorted[i + 1]
-                if chrom_e != chrom_n: continue
-                jxn = f"{chrom_e}_{end_e + 1}_{start_n}"
-                all_jxns_set.add(jxn)
-                if tx_id in tx_canonical:
-                    canonical_jxns.add(jxn)
-        result[gene_key] = {
-            "canonical_junctions": canonical_jxns,
-            "all_junctions":       all_jxns_set,
-        }
-    return result
-
-
 def assign_junction_types(
     df: pd.DataFrame,
     gtf_junctions: Dict[str, Dict],
@@ -1057,6 +976,7 @@ def finalize_columns(df: pd.DataFrame, gtf_junctions: Optional[Dict[str, Dict]])
     return df[ordered + [c for c in df.columns if c not in ordered]]
 
 
+# gene -> result file, the downstream rules read this
 def _write_manifest(gene_info: Dict[str, Tuple[str, str, str]],
                      result_paths: Dict[str, Optional[str]],
                      manifest_path: str) -> None:
@@ -1129,6 +1049,7 @@ def main() -> None:
     else:
         print("[INFO] --gtf not provided; junction_type column will be omitted.")
 
+    # write each gene out as soon as it finishes
     def on_gene_done(gene, combined, elapsed, lines):
         for line in sorted(lines): print(line)
         if combined is not None and len(combined):

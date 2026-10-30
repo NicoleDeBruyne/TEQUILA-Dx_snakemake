@@ -1,3 +1,7 @@
+# 10Q - the per-sample PDF report. QC overview, method comparison, a section per hit gene (IGV-style
+# alignments, cohort distributions, sashimis, isoform usage), then the rest of the panel.
+# can also spit out an HTML page for reviewing it
+
 import argparse
 import gzip
 import io
@@ -16,20 +20,22 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.collections import PolyCollection, LineCollection
+from matplotlib.collections import PolyCollection
 from matplotlib.path import Path
 from matplotlib.patches import Patch, PathPatch, Rectangle, FancyBboxPatch
 from matplotlib import rcParams, font_manager
 from matplotlib.font_manager import FontProperties
 from matplotlib.textpath import TextPath
-from matplotlib.colors import LinearSegmentedColormap, to_rgb, to_hex
+from matplotlib.colors import LinearSegmentedColormap
 
 import tier_rules
 from palette import LIGHT_GREY as PALETTE_LIGHT_GREY, SELECT_ORDER as PALETTE_ORDER
 from scipy.cluster.hierarchy import leaves_list, linkage
+from palette import darker
 
 
 rcParams["pdf.fonttype"] = 42
+# layout / colour / drawing constants
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 if os.path.isdir(FONT_DIR):
     for _f in sorted(os.listdir(FONT_DIR)):
@@ -175,6 +181,29 @@ def parse_args():
                    help="Also write an offline HTML review page (the same pages as images, with a review "
                         "status and notes per gene) to this path.")
     p.add_argument("--html-dpi", type=int, default=200, help="Resolution of the page images in --html-out.")
+    p.add_argument("--cmp-unavailable", default=None,
+                   help="Method comparison page: why it is not available (shown instead of the plots).")
+    p.add_argument("--cmp-tissues", nargs="*", default=[], help="Method comparison page: GTEx tissues of the group.")
+    p.add_argument("--cmp-gtex-final-files", nargs="*", default=[], help="_10M final tables, one per --cmp-tissues.")
+    p.add_argument("--cmp-gtex-significant-files", nargs="*", default=[],
+                   help="_10M significant-junction tables, one per --cmp-tissues.")
+    p.add_argument("--cmp-gtex-sample-thresholds", nargs="*", type=int, default=[],
+                   help="Recurrence limit (samples) per --cmp-tissues.")
+    p.add_argument("--cmp-gtex-all-junction-files", nargs="*", default=[],
+                   help="This sample's _5D <sample>_gtex_<tissue>_all_junctions.tsv files.")
+    p.add_argument("--cmp-gtex-all-junction-tissues", nargs="*", default=[],
+                   help="Tissue of each --cmp-gtex-all-junction-files entry.")
+    p.add_argument("--cmp-cohort-results-dir", default=None, help="8B per-gene results directory.")
+    p.add_argument("--cmp-cohort-outliers", default=None, help="8C outliers.tsv.")
+    p.add_argument("--cmp-cohort-outliers-filtered", default=None, help="8C outliers_filtered.tsv.")
+    p.add_argument("--cmp-min-jxn-reads", type=int, default=20)
+    p.add_argument("--cmp-coverage-threshold", type=int, default=50)
+    p.add_argument("--cmp-n-threshold", type=int, default=10)
+    p.add_argument("--cmp-drop-events", nargs="*", default=[],
+                   help="Cohort event labels left out of the comparison (e.g. 5ss_IR 3ss_IR), as in the hits.")
+    p.add_argument("--hit-set-label", default=None,
+                   help="Shown after the sample name on the overview page and the review page, e.g. "
+                        "\"including 5'/3' ss IR\".")
     p.add_argument("--previous-reviews", default=None,
                    help="Reviews TSV exported from an earlier review page for this sample; its statuses and "
                         "notes are carried into --html-out and marked as coming from an earlier run.")
@@ -185,6 +214,9 @@ def parse_args():
                         "tested, and each sample's gene read count).")
     p.add_argument("--tx-isoform-outliers", default=None, help="Isoform pages: _9G individual isoform outliers.")
     p.add_argument("--tx-landscape-outliers", default=None, help="Isoform pages: _9G isoform mix outliers.")
+    p.add_argument("--tx-sample-qc", default=None,
+                   help="_9F <sample_type>_transcript_usage_sample_qc.tsv. A sample that failed is flagged on the "
+                        "overview page and its isoform outliers are shown but not treated as hits.")
     p.add_argument("--tx-gtf", default=None,
                    help="Isoform pages: the AMALGAM transcript GTF the isoforms were quantified against "
                         "(_9B annotation/filtered.gtf.gz, tabix-indexed); draws each isoform's structure.")
@@ -200,6 +232,7 @@ def parse_args():
     return p.parse_args()
 
 
+# parsing helpers for the hit table
 def _nonempty(v):
     return v is not None and not (isinstance(v, float) and np.isnan(v)) and str(v).strip().lower() not in _MISSING
 
@@ -379,6 +412,7 @@ def junction_calls(row):
     return calls
 
 
+# group a gene's outlier junctions into events, from both the GTEx and cohort calls
 def build_events(calls):
     events = {}
 
@@ -456,6 +490,7 @@ _MANIFEST_CACHE = {}
 _RESULT_CACHE = {}
 
 
+# cohort metric values from 8A/8B for the distribution panels
 def _manifest_paths(mpath, gene):
     man = _MANIFEST_CACHE.get(mpath)
     if man is None:
@@ -500,6 +535,7 @@ def load_metric_values(manifests, gene, pairs, coverage_threshold):
     return vals
 
 
+# which reads go in the alignment panels: downsample, but keep spliced reads near the events
 def _keep(read):
     return not (read.flag & SKIP_FLAGS)
 
@@ -561,6 +597,7 @@ for _i, _b in enumerate("ACGT"):
     _BASE_INDEX[ord(_b)] = _i
 
 
+# IGV-ish coverage track with mismatch bars and junction arcs
 def draw_coverage(ax, acgt, ref_seq, start, end, label, arcs=None, show_xticks=True):
     depth = acgt.sum(axis=0)
     L = end - start
@@ -652,6 +689,7 @@ def _track_label(ax, label):
             fontfamily=WIDE_FONT)
 
 
+# read stack. small indels are hidden unless they're one of our variants, nanopore reads are full of tiny ones
 def indel_specs(variants):
     out = []
     for v in variants:
@@ -897,6 +935,7 @@ def _counts_line(counts):
     return f"{num:,} ({num_u:,} unique) out of {den:,} ({den_u:,} unique)"
 
 
+# cohort distribution of one metric with this sample highlighted
 def draw_distribution(ax, metric, junction, values, sample, shown, tgroups, counts=None, hap=None):
     title = f"{METRIC_SHORT.get(metric, metric)} | {junction}"
     if not values:
@@ -927,6 +966,7 @@ def draw_distribution(ax, metric, junction, values, sample, shown, tgroups, coun
         line.set_fontsize(size)
 
 
+# PDF page capture, internal links, contents page and navigation
 def _flush_pdf_images(pdf):
     f = getattr(pdf, "_file", None)
     needed = ("_images", "_unpack", "_writeImg", "reserveObject", "writeImages")
@@ -991,11 +1031,52 @@ def nav_links(fig, prev_gene=None, next_gene=None):
         x -= t.get_window_extent(renderer=r).width / fig.dpi + 0.25
 
 
+COMPARISON = "Junction method comparison"
+
+
+def draw_comparison_page(pdf, args, sample, shown):
+    global REVIEW_CTX
+    import junction_method_comparison as jmc
+    REVIEW_CTX = ("comparison", None)
+    fig = plt.figure(figsize=(PAGE_W, PAGE_H))
+    nav_links(fig)
+    fig.text(MARGIN_L / PAGE_W, 1 - 0.22 / PAGE_H, f"{shown}  |  {COMPARISON}"
+             + (f"  |  {args.hit_set_label}" if args.hit_set_label else ""),
+             fontsize=11 * FS, fontweight="bold", va="top", fontfamily=WIDE_FONT)
+    fig.text(MARGIN_L / PAGE_W, 1 - 0.48 / PAGE_H, "GTEx vs in-house (cohort) junction analysis, and which analyses "
+             "flag each gene", fontsize=6.5 * FS, va="top", color="#333", fontfamily=WIDE_FONT)
+    if args.cmp_unavailable:
+        fig.text(0.5, 0.5, f"Not available: {args.cmp_unavailable}", ha="center", va="center", fontsize=8 * FS,
+                 color="#777", fontfamily=WIDE_FONT)
+        print(f"  {COMPARISON}: not available ({args.cmp_unavailable})")
+    else:
+        a = argparse.Namespace(
+            bed=args.bed, tissues=args.cmp_tissues, gtex_final_files=args.cmp_gtex_final_files,
+            gtex_significant_files=args.cmp_gtex_significant_files,
+            gtex_sample_thresholds=args.cmp_gtex_sample_thresholds,
+            gtex_all_junction_files=args.cmp_gtex_all_junction_files,
+            gtex_all_junction_samples=[sample] * len(args.cmp_gtex_all_junction_files),
+            gtex_all_junction_tissues=args.cmp_gtex_all_junction_tissues,
+            cohort_results_dir=args.cmp_cohort_results_dir, cohort_outliers=args.cmp_cohort_outliers,
+            cohort_outliers_filtered=args.cmp_cohort_outliers_filtered,
+            isoform_outliers=None if args.tx_unavailable else args.tx_isoform_outliers,
+            landscape_outliers=None if args.tx_unavailable else args.tx_landscape_outliers,
+            min_jxn_reads=args.cmp_min_jxn_reads, coverage_threshold=args.cmp_coverage_threshold,
+            n_threshold=args.cmp_n_threshold, drop_events=args.cmp_drop_events)
+        n = jmc.draw_comparison(fig, (0.0, 0.08, 0.98, 0.86), a, sample, shown)
+        fig.text(0.5, 0.015, jmc.NOTE, ha="center", fontsize=7, color="#555555")
+        print(f"  {COMPARISON}: {n} junction(s) with an event hit in GTEx or the cohort")
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 def draw_contents(pdf, shown, genes):
     global REVIEW_CTX
     fp_ = pdf.first_page
     qc_sections = sorted(((n, i) for (k, n), i in fp_.items() if k == "qc"), key=lambda x: x[1])
     rows = [("Overview", None, None, None, ("overview", None))]
+    if ("comparison", None) in fp_:
+        rows.append((COMPARISON, None, None, None, ("comparison", None)))
     rows += [(g["gene"], g["rank"], g["tier"], g["hits"], ("gene", g["gene"])) for g in genes
              if ("gene", g["gene"]) in fp_]
     for n, _ in qc_sections:
@@ -1018,7 +1099,7 @@ def draw_contents(pdf, shown, genes):
         y -= 0.24
         prev_kind = "overview"
         for name, rank, tier, hits, target in rows[k * per_page:(k + 1) * per_page]:
-            kind = "qc" if target[0] == "ohit" else target[0]
+            kind = "qc" if target[0] == "ohit" else "overview" if target[0] == "comparison" else target[0]
             if kind != prev_kind:
                 y -= 0.06
                 prev_kind = kind
@@ -1032,7 +1113,8 @@ def draw_contents(pdf, shown, genes):
                 h = hits if len(hits) <= 95 else hits[:92] + "..."
                 fig.text((MARGIN_L + 2.8) / PAGE_W, y / PAGE_H, h, fontsize=5.5 * FS, va="top", color="#333")
             if i is not None:
-                fig.text((PAGE_W - MARGIN_R - 0.4) / PAGE_W, y / PAGE_H, str(i + 1 + (n_cont if i > 0 else 0)),
+                fig.text((PAGE_W - MARGIN_R - 0.4) / PAGE_W, y / PAGE_H,
+                         str(i + 1 + (n_cont if i >= getattr(pdf, "lead", 1) else 0)),
                          fontsize=6.5 * FS, va="top")
             y -= 0.205
         pdf.savefig(fig)
@@ -1043,6 +1125,7 @@ def draw_contents(pdf, shown, genes):
 _OBJ_AT = re.compile(rb"(\d+) 0 obj\s*(.*?)\s*endobj", re.S)
 
 
+# post-processing the PDF by hand to add bookmarks and link targets
 def _xref_offsets(data):
     offsets = {}
     try:
@@ -1096,8 +1179,8 @@ def add_pdf_navigation(path, cap, rows):
         return
 
     cont = [i for i in range(cap.n) if cap.page_ctx[i][0] == "contents"]
-    order = [0] + cont + [i for i in range(1, cap.n) if i not in cont]
-    pos = {orig: new for new, orig in enumerate(order)}
+    lead = getattr(cap, "lead", 1)
+    order = list(range(lead)) + cont + [i for i in range(lead, cap.n) if i not in cont]
 
     letter_pages = getattr(cap, "letter_pages", {})
     ohit_pages = getattr(cap, "ohit_pages", {})
@@ -1137,6 +1220,8 @@ def add_pdf_navigation(path, cap, rows):
     def esc(t):
         return t.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)").encode("latin-1", "replace")
     tops = [("Overview", ("overview", None), [])]
+    if dest(("comparison", None)) is not None:
+        tops.append((COMPARISON, ("comparison", None), []))
     if cont:
         tops.append(("Contents", ("contents",), []))
     genes_ = [(f"{r[1]}. {r[0]} (tier {r[2]})", r[4]) for r in rows if r[4][0] == "gene" and dest(r[4]) is not None]
@@ -1234,6 +1319,7 @@ def _compact_png(png):
     return out.getvalue() if out.tell() < len(png) else png
 
 
+# PdfPages that also keeps a PNG of every page for the HTML review
 class CapturePdf:
 
     def __init__(self, pdf, dpi):
@@ -1336,6 +1422,7 @@ def right_header_text(fig, left_artist, prefix, items, sep=", ", y_in=0.30, **kw
         t.remove()
 
 
+# stacks fixed-height rows and starts a new page when the next one won't fit
 class Pager:
 
     def __init__(self, pdf, header_fn):
@@ -1459,6 +1546,7 @@ REP_MIN_JUNCTIONS = 3
 REP_DEPTH_MARGIN = 0.02
 
 
+# pick a control sample with typical PSI to show next to this one
 def load_gene_psi(manifests, gene, coverage_threshold):
     rows = []
     for stype, mpath in manifests.items():
@@ -1544,6 +1632,7 @@ def choose_representative(gene, sample, samples, sample_to_type, sample_bams, ps
                 scope="window" if junctions is not None else "gene-wide")
 
 
+# sashimis with compressed introns, otherwise the exons are tiny
 def sashimi_data(bam, chrom, start, end, keep, min_frac):
     L = end - start
     jx = defaultdict(int)
@@ -1677,11 +1766,7 @@ _BLACK_LINE = dict(color="black", linewidth=0.8)
 BOX_STYLE = dict(boxprops=_BLACK_LINE, whiskerprops=_BLACK_LINE, capprops=_BLACK_LINE, medianprops=_BLACK_LINE)
 
 
-def darker(color, f=0.5):
-    r, g, b = to_rgb(color)
-    return to_hex((r * (1 - f), g * (1 - f), b * (1 - f)))
-
-
+# QC page panels (read counts/lengths, sample-type PCA, coverage, FLR, expression)
 def _read_tsv(path, **kw):
     if not path or not os.path.isfile(path):
         if path:
@@ -1908,7 +1993,6 @@ def _ranked(values, grid):
 
 def qc_curve(ax, matrix, sample, shown, tgroups, ylim=(-0.02, 1.02), ylabel=None):
     grid = np.linspace(0, 100, 201)
-    handles = []
     for t, members, col in tgroups:
         members = [s for s in members if s in matrix.columns]
         if not members:
@@ -1984,7 +2068,7 @@ def draw_hit_tier_grid(fig, rows, left=1.3, bottom=0.35, cw=0.62, rh=0.32, max_w
             ("variant", _hit_flag(r.get("variant"))),
             ("ASE", _hit_flag(r.get("ASE"))),
             ("junction", _hit_flag(r.get("outlier_junction")) or _hit_flag(r.get("cohort_outlier_junction"))),
-            ("isoform", _hit_flag(r.get("isoform_outlier"))),
+            ("isoform", str(r.get("isoform_outlier", "")).strip().upper() == "TRUE"),
         ) if ok)
         tier = pd.to_numeric(pd.Series([r.get("tier")]), errors="coerce").iloc[0]
         if pd.isna(tier) or int(tier) not in tiers:
@@ -2155,7 +2239,7 @@ def wgs_concordance_text(path, sample):
     return None, None
 
 
-def draw_qc_page(pdf, args, sample, shown, sample_to_type, type_colors, hit_rows, all_rows=None):
+def draw_qc_page(pdf, args, sample, shown, sample_to_type, type_colors, hit_rows, all_rows=None, tx_qc_fail=None):
     stype = sample_to_type.get(sample, "unknown")
     global QC_SAMPLE_COLOR
     QC_SAMPLE_COLOR = darker(type_colors.get(stype, "#4c72b0"))
@@ -2174,7 +2258,8 @@ def draw_qc_page(pdf, args, sample, shown, sample_to_type, type_colors, hit_rows
 
     fig = plt.figure(figsize=(PAGE_W, PAGE_H))
     nav_links(fig)
-    fig.text(MARGIN_L / PAGE_W, 1 - 0.22 / PAGE_H, f"{shown}  |  Overview  (sample type: {stype})",
+    fig.text(MARGIN_L / PAGE_W, 1 - 0.22 / PAGE_H, f"{shown}  |  Overview  (sample type: {stype})"
+             + (f"  |  {args.hit_set_label}" if args.hit_set_label else ""),
              fontsize=11 * FS, fontweight="bold", va="top", fontfamily=WIDE_FONT)
     fig.text(MARGIN_L / PAGE_W, 1 - 0.48 / PAGE_H,
              ", ".join(f"{t} (n = {len(m_)}{' others' if t == stype else ''})" for t, m_, _ in tgroups),
@@ -2184,6 +2269,9 @@ def draw_qc_page(pdf, args, sample, shown, sample_to_type, type_colors, hit_rows
         fig.text((PAGE_W - MARGIN_R) / PAGE_W, 1 - 0.48 / PAGE_H, concord_text, ha="right",
                  fontsize=6.5 * FS, va="top", color=concord_color, fontfamily=WIDE_FONT,
                  fontweight="bold" if concord_color == "#c62828" else "normal")
+    if tx_qc_fail:
+        fig.text((PAGE_W - MARGIN_R) / PAGE_W, 1 - 0.66 / PAGE_H, tx_qc_fail, ha="right",
+                 fontsize=6.5 * FS, va="top", color="#c62828", fontfamily=WIDE_FONT, fontweight="bold")
     qc_read_counts(_ax(fig, 1.05, 5.05, 1.95, 2.45), _read_tsv(args.on_target_tsv), sample, shown, tgroups)
     qc_read_lengths(_ax(fig, 3.65, 5.05, 2.2, 2.25), _read_tsv(args.read_attributes_tsv), sample, shown, tgroups)
     refs = qc_pca(_ax(fig, 6.45, 5.05, 2.0, 2.45), _read_tsv(args.pca_coords), sample, shown)
@@ -2237,11 +2325,19 @@ OTHER_HITS = "Other gene hits"
 OTHER_ISOFORMS = "other"
 
 
+# isoform usage outliers from 9F/9G
 def load_tx(args, sample):
     tx = dict(unavailable=args.tx_unavailable, usage={}, status=None, iso=pd.DataFrame(), land=pd.DataFrame(),
-              args=args)
+              args=args, qc_fail=None)
     if tx["unavailable"]:
         return tx
+    qc = _read_tsv(args.tx_sample_qc, dtype=str)
+    if qc is not None and {"sample", "qc"} <= set(qc.columns):
+        row = qc[qc["sample"].astype(str) == str(sample)]
+        if not row.empty and str(row["qc"].iloc[0]).lower() == "fail":
+            r = row.iloc[0]
+            tx["qc_fail"] = (f"Isoform QC FAILED: {int(float(r['n_outlier_genes']))} genes with an isoform outlier "
+                             f"(threshold {float(r['threshold']):g}); isoform outliers not used for tiering")
     usage = _read_tsv(args.tx_usage_matrix, dtype={"gene": str, "transcript_id": str})
     status = _read_tsv(args.tx_gene_status, dtype={"gene": str, "status": str})
     if usage is None or status is None:
@@ -2260,6 +2356,8 @@ def load_tx(args, sample):
 
 
 def tx_outlier_genes(tx):
+    if tx.get("qc_fail"):
+        return set()
     return {str(g) for key in ("iso", "land") if not tx[key].empty for g in tx[key]["gene"]}
 
 
@@ -2528,6 +2626,8 @@ def draw_isoform_rows(pager, gene, sample, shown, ctx, tx, kind="half"):
     parts += [f"isoform mix outlier: TVD {float(r['tvd']):.2f} from the typical mix, "
               + (f"{float(r['nearest_tvd']):.2f} from the nearest sample" if _nonempty(r.get("nearest_tvd")) else "")
               + " (" + "; ".join(x for x in (_tx_stat(r), _recur(r)[2:]) if x) + ")" for r in land]
+    if parts and tx.get("qc_fail"):
+        parts.insert(0, "sample failed isoform QC")
     if parts:
         renderer = fig.canvas.get_renderer()
         x0 = title_artist.get_window_extent(renderer=renderer).x1 / fig.dpi + 0.2
@@ -2560,6 +2660,7 @@ def draw_isoform_rows(pager, gene, sample, shown, ctx, tx, kind="half"):
         fit_axes_to_row(fig, axes, top, h)
 
 
+# genes with only isoform hits get pages, the other panel genes get compact rows
 def draw_other_hit_pages(pdf, args, sample, shown, ctx, genes, hit_info, expr, tx):
     global REVIEW_CTX
     if not genes:
@@ -2718,6 +2819,7 @@ def main():
     type_colors = {}
     for t, c in zip(args.sample_types, args.colors):
         type_colors.setdefault(t, c)
+    # load hits, isoform results, annotations, BAMs, expression
     manifests = {}
     for item in args.cohort_manifests:
         st, _, path = item.partition(":")
@@ -2754,7 +2856,8 @@ def main():
     tx_data["regions"] = load_bed(args.bed)
     tx_genes = tx_outlier_genes(tx_data)
     print(f"{sample}: {len(tx_genes)} gene(s) with an isoform outlier"
-          + (f" (isoform results not available: {tx_data['unavailable']})" if tx_data["unavailable"] else ""))
+          + (f" (isoform results not available: {tx_data['unavailable']})" if tx_data["unavailable"] else "")
+          + (f" ({tx_data['qc_fail']})" if tx_data.get("qc_fail") else ""))
 
     regions = load_bed(args.bed)
     tx_by_gene = load_canonical_transcripts(args.gtf, genes) if genes else {}
@@ -2771,12 +2874,15 @@ def main():
 
     global REVIEW_CTX
     review_genes = []
+    # pages in order: QC, method comparison, hit genes, other genes, contents
     with PdfPages(args.outfile) as real_pdf:
         pdf = CapturePdf(real_pdf, args.html_dpi if args.html_out else 0)
         REVIEW_CTX = ("overview", None)
         qc_ctx = draw_qc_page(pdf, args, str(sample), shown_name, sample_to_type, type_colors,
                               hits[hits["sample"].astype(str) == str(sample)] if not hits.empty else hits,
-                              all_rows)
+                              all_rows, tx_data.get("qc_fail"))
+        draw_comparison_page(pdf, args, str(sample), shown_name)
+        pdf.lead = pdf.n
         if not genes:
             fig = plt.figure(figsize=(PAGE_W, PAGE_H))
             fig.text(0.5, 0.5, f"{shown_name}: no candidate gene hits.", ha="center", va="center", fontsize=14 * FS)
@@ -2795,6 +2901,7 @@ def main():
         contents_rows = draw_contents(pdf, shown_name, review_genes)
     bulk.close()
     fasta.close()
+    # links have to be added after the PDF is written, then the HTML page
     add_pdf_navigation(args.outfile, pdf, contents_rows)
     print(f"Saved: {args.outfile}")
     if args.html_out:
@@ -2802,10 +2909,12 @@ def main():
         previous = review_html.load_previous_reviews(args.previous_reviews, shown_name)
         if previous:
             print(f"  {len(previous)} earlier review(s) loaded from {args.previous_reviews}")
-        review_html.write_review_page(args.html_out, shown_name, qc_ctx["stype"], review_genes, pages, previous)
+        review_html.write_review_page(args.html_out, shown_name, qc_ctx["stype"], review_genes, pages, previous,
+                                      label=args.hit_set_label)
         print(f"Saved: {args.html_out}")
 
 
+# one section per hit gene
 def _draw_gene_pages(pdf, args, sample, shown_name, mine, regions, tx_by_gene, hap_bams, sample_bams, expr,
                      jxn_outlier_samples, type_color, fasta, bulk, sample_to_type, type_colors,
                      manifests, qc_ctx, review_genes, tx_data):
@@ -2878,6 +2987,7 @@ def _draw_gene_pages(pdf, args, sample, shown_name, mine, regions, tx_by_gene, h
                     hap_handles.append(hh)
                     tracks.append((name, hh))
             fig, top, h = pager.next_row("third")
+            # gene QC row, then whole-gene alignments (bulk, plus haplotypes when they matter)
             gene_box_row(fig, top, h, gene, str(sample), shown_name, qc_ctx, expr, args)
             for k, (name, handle) in enumerate(tracks):
                 if k == 1:
@@ -2893,6 +3003,7 @@ def _draw_gene_pages(pdf, args, sample, shown_name, mine, regions, tx_by_gene, h
 
             if variants:
                 pager.break_page()
+            # zoomed in on each candidate variant
             for i in range(0, len(variants), VARIANT_PANELS_PER_ROW):
                 chunk = variants[i:i + VARIANT_PANELS_PER_ROW]
                 fig, top, h = pager.next_row("half")
@@ -2938,6 +3049,7 @@ def _draw_gene_pages(pdf, args, sample, shown_name, mine, regions, tx_by_gene, h
             rep_handles = {}
             igv_w = full_w * EVENT_IGV_FRAC - PANEL_GAP
             sash_left, sash_w = full_left + full_w * EVENT_IGV_FRAC, full_w * (1 - EVENT_IGV_FRAC)
+            # per splice event: zoomed alignments next to a sashimi, with the control sample for comparison
             for ev_i, e in enumerate(events, 1):
                 s = min(_jxn_coords(j)[1] for j in e["junctions"]) - 1
                 t = max(_jxn_coords(j)[2] for j in e["junctions"])
@@ -2965,7 +3077,7 @@ def _draw_gene_pages(pdf, args, sample, shown_name, mine, regions, tx_by_gene, h
                          + "; ".join(f"{j} ({junction_annotation(tx, j)})" for j in e["junctions"]))
                 title = fit_text(title, full_w, 6.5 * FS, "bold")
                 ev_pairs = [p_ for p_ in pairs if p_[1] in e["junctions"]] if manifests else []
-                is_hap_event = any(f", hap1]" in c or f", hap2]" in c for c in e["calls"])
+                is_hap_event = any(", hap1]" in c or ", hap2]" in c for c in e["calls"])
                 ev_tracks = [("bulk", None)]
                 if is_hap_event and gene in hap_bams:
                     ev_tracks += list(zip(("hap1", "hap2"), hap_bams[gene]))

@@ -1,3 +1,5 @@
+# 7A/7B - read count or max coverage over each panel gene, plus CPTM
+
 import argparse
 
 import pandas as pd

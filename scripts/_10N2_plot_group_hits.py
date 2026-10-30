@@ -1,29 +1,15 @@
+# 10N2 - stacked bars of hit genes per sample, coloured by evidence type
+
 import argparse
-import io
-import os, glob, pandas as pd, ast, matplotlib.pyplot as plt, numpy as np
+import os, pandas as pd, matplotlib.pyplot as plt
 from matplotlib import rcParams
 from matplotlib.ticker import MaxNLocator
 
 from palette import RED_FAMILY, TEAL_FAMILY, PURPLE_FAMILY, GOLD_FAMILY, use_fonts
+from common import read_hit_rows
 use_fonts()
 
 rcParams['pdf.fonttype'] = 42
-
-
-HIT_COL = "hit"
-
-
-def is_hit(values):
-    return values.astype(str).str.strip().str.upper() == "TRUE"
-
-
-def read_hit_rows(path, **read_csv_kwargs):
-    raw = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
-    if HIT_COL in raw.columns:
-        raw = raw[is_hit(raw[HIT_COL])]
-    buf = io.StringIO(raw.to_csv(sep="\t", index=False))
-    read_csv_kwargs.setdefault("sep", "\t")
-    return pd.read_csv(buf, **read_csv_kwargs)
 
 
 def parse_args():
@@ -65,6 +51,7 @@ def main():
     df.fillna('.', inplace=True)
 
     isoform = (df['isoform_outlier'].astype(str).str.upper() == 'TRUE') if 'isoform_outlier' in df.columns else False
+    # lump the RNA evidence together so each gene lands in one category
     df['RNA_dysregulation'] = (df['ASE'] | (df['outlier_junction'] != 'None') | isoform)
     df['final_grouping'] = df.apply(lambda row: 
         "RNA dysregulation with candidate variant" if row['RNA_dysregulation'] and row['variant'] else
@@ -79,6 +66,7 @@ def main():
     plot(df, samples, "outlier_junction", ["Strong", "Moderate", "Weak"], TEAL_FAMILY[:3], f'{args.outdir}/genes_with_outlier_junction.pdf', "Candidate Genes", "Alternative Splicing")
     plot(df, samples, "final_grouping", ["RNA dysregulation", "RNA dysregulation with candidate variant"], [GOLD_FAMILY[0], GOLD_FAMILY[2]], f'{args.outdir}/genes_with_RNA_dysregulation.pdf', "Candidate Genes", "Group")
 
+    # and again, but only for genes that pass the AMELIE cutoff
     if args.amelie_score_threshold:
         filtered_df = df[pd.to_numeric(df['max_AMELIE_score'], errors='coerce') >= args.amelie_score_threshold]
         plot(filtered_df[filtered_df['pathogenic_variant']].copy(), samples, "pathogenic_variant", [True, False], [RED_FAMILY[0], RED_FAMILY[2]], f'{args.outdir}/genes_with_pathogenic_variant_amelie_score_{args.amelie_score_threshold}.pdf', f"Candidate Genes with Pathogenic Variant, AMELIE Score >= {args.amelie_score_threshold}", "Pathogenic Variant")

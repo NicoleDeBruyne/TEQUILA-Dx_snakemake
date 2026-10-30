@@ -1,3 +1,5 @@
+# step 1 - small variant calling on the RNA BAM, plus pulling in / phasing a WGS VCF if there is one
+
 def _bam(wc):
     return SAMPLES[wc.sample]["bam"]
 
@@ -12,6 +14,7 @@ def _bam_size_gb(wc):
     except FileNotFoundError:
         return 10
 
+# singularity needs every directory we touch bind-mounted
 def _bind_dirs(files=(), dirs=()):
     import os
     out = [os.path.dirname(os.path.abspath(f)) for f in files]
@@ -19,6 +22,7 @@ def _bind_dirs(files=(), dirs=()):
     return ",".join(dict.fromkeys(d for d in out if d))
 
 
+# 1A NanoTS
 rule _1A_nanots:
     input:
         bam = _bam,
@@ -64,6 +68,7 @@ rule _1A_nanots:
         """
 
 
+# 1B longcallR
 rule _1B_longcallr:
     input:
         bam = _bam,
@@ -98,6 +103,7 @@ rule _1B_longcallr:
         """
 
 
+# 1C Clair3-RNA
 rule _1C_clair3_rna:
     input:
         bam = _bam,
@@ -142,6 +148,7 @@ rule _1C_clair3_rna:
         """
 
 
+# 1D DeepVariant (long-read RNA model)
 rule _1D_deepvariant:
     input:
         bam = _bam,
@@ -184,6 +191,7 @@ rule _1D_deepvariant:
         """
 
 
+# 1E/1F only run for samples that come with a WGS VCF
 rule _1E_prepare_wgs_vcf:
     input:
         vcf = lambda wc: SAMPLES[wc.sample]["wgs_vcf"],

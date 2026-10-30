@@ -1,3 +1,5 @@
+# step 7 - gene quantification per sample (counts, coverage, splice-site assignment, StringTie for AMALGAM)
+
 rule _7A_quantify_gene_count:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -52,6 +54,7 @@ rule _7B_quantify_gene_coverage:
         """
 
 
+# 7C reads assigned to genes by their splice sites
 rule _7C_quantify_gene_by_assignment:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],
@@ -82,6 +85,7 @@ rule _7C_quantify_gene_by_assignment:
         """
 
 
+# 7D StringTie, feeds the AMALGAM transcriptome in step 9
 rule _7D_amalgam_stringtie:
     input:
         bam = lambda wc: SAMPLES[wc.sample]["bam"],

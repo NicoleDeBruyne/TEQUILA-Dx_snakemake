@@ -1,3 +1,6 @@
+# 10C2 - check each sample really is the tissue it's labelled as, by comparing its junction PSI to reference
+# tissues (PCA + mean |delta-PSI| over the junctions that separate tissues best)
+
 import argparse
 import gc
 import os
@@ -18,59 +21,10 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from sample_alias import add_alias_map_arg, parse_alias_map, resolve
+from bed_utils import in_bed, build_bed_dict, read_bed, touches_bed
 use_fonts()
 
 warnings.filterwarnings("ignore")
-
-
-def read_bed(path: str) -> pd.DataFrame:
-    bed = pd.read_csv(
-        path, sep="\t", header=None, comment="#",
-        usecols=[0, 1, 2], names=["chrom", "start", "end"]
-    )
-    bed["start"] = bed["start"].astype(int)
-    bed["end"]   = bed["end"].astype(int)
-    return bed
-
-
-def build_bed_dict(bed: pd.DataFrame) -> dict:
-    bed_dict = {}
-    for chrom, sub in bed.groupby("chrom", sort=False):
-        starts = np.sort(sub["start"].to_numpy())
-        ends   = sub["end"].to_numpy()[np.argsort(sub["start"].to_numpy())]
-        bed_dict[chrom] = (starts, ends)
-    return bed_dict
-
-
-def _in_bed(bed_dict: dict, chrom_arr: np.ndarray, pos_arr: np.ndarray) -> np.ndarray:
-    result = np.zeros(len(pos_arr), dtype=bool)
-    for chrom, (starts, ends) in bed_dict.items():
-        mask = (chrom_arr == chrom)
-        if not mask.any():
-            continue
-        p = pos_arr[mask]
-        idx = np.searchsorted(starts, p, side="right") - 1
-        valid = idx >= 0
-        hit = np.zeros(len(p), dtype=bool)
-        if valid.any():
-            hit[valid] = p[valid] < ends[idx[valid]]
-        result[mask] = hit
-    return result
-
-
-def touches_bed(index: pd.Index, bed_dict: dict) -> np.ndarray:
-    keep = np.zeros(len(index), dtype=bool)
-    split = index.to_series(index=range(len(index))).astype(str).str.rsplit("_", n=2, expand=True)
-    if split.shape[1] < 3:
-        return keep
-    ss1 = pd.to_numeric(split[1], errors="coerce")
-    ss2 = pd.to_numeric(split[2], errors="coerce")
-    ok = (split[0].notna() & ss1.notna() & ss2.notna()).to_numpy()
-    chrom_arr = split[0].to_numpy()[ok]
-    hit = (_in_bed(bed_dict, chrom_arr, ss1.to_numpy()[ok].astype(np.int64))
-           | _in_bed(bed_dict, chrom_arr, ss2.to_numpy()[ok].astype(np.int64)))
-    keep[np.flatnonzero(ok)[hit]] = True
-    return keep
 
 
 def parse_args():
@@ -146,6 +100,7 @@ def parse_args():
     return args
 
 
+# junction IDs aren't formatted the same everywhere, so normalize before matching
 def _normalize_junction_index(index: pd.Index) -> pd.Index:
     idx = index.to_series(index=range(len(index))).astype(str)
     is_colon_fmt = idx.str.contains(':', regex=False)
@@ -230,7 +185,7 @@ def filter_to_bed(psi_df: pd.DataFrame, bed_dict: dict) -> pd.DataFrame:
     jxn_info = parse_junctions(psi_df.index)
 
     def in_bed_vectorized(chrom_arr: np.ndarray, pos_arr: np.ndarray) -> np.ndarray:
-        return _in_bed(bed_dict, chrom_arr, pos_arr)
+        return in_bed(bed_dict, chrom_arr, pos_arr)
 
     chrom_arr = jxn_info["chr"].to_numpy()
     ss1_arr   = jxn_info["ss1"].to_numpy(dtype=np.int64)
@@ -243,6 +198,7 @@ def filter_to_bed(psi_df: pd.DataFrame, bed_dict: dict) -> pd.DataFrame:
     return psi_df.loc[jxn_info.index[keep]]
 
 
+# NaN below min coverage, we don't want PSI from 2 reads
 def compute_psi(counts: pd.DataFrame,
                 min_coverage: int = 20,
                 min_samples: int = 50) -> pd.DataFrame:
@@ -287,6 +243,7 @@ def compute_psi(counts: pd.DataFrame,
     return psi_df
 
 
+# only junctions covered in enough reference samples
 def load_ref_matrix(path: str, name: str,
                     bed_dict: dict,
                     min_coverage: int,
@@ -356,6 +313,7 @@ def load_query_matrix(path: str, name: str,
     return psi, sample_to_query
 
 
+# most variable junctions across tissues, cut at the elbow of the variance curve unless overridden
 def _detect_elbow(values: np.ndarray) -> int:
     n = len(values)
     if n < 3:
@@ -549,6 +507,7 @@ def run_pca(ref_psi: dict,
     ), var_exp
 
 
+# mean |PSI difference| to each reference tissue's average
 def compute_distance_scores(ref_avg_psi: pd.DataFrame,
                              query_psi_all: pd.DataFrame,
                              variable_jxns: pd.Index) -> pd.DataFrame:
@@ -678,6 +637,7 @@ def main():
     bed_dict = build_bed_dict(bed)
     del bed
 
+    # reference tissue PSI, and averages per tissue over the shared junctions
     ref_psi = {}
     for path, name in zip(args.matrix_refs, args.ref_names):
         ref_psi[name] = load_ref_matrix(

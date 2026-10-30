@@ -1,3 +1,5 @@
+# 10P - sanity check that each RNA sample matches its WGS, using high-confidence NanoTS SNVs in the panel
+
 import argparse
 import os
 from collections import Counter
@@ -99,6 +101,7 @@ def wgs_alleles(path, regions):
     return alleles
 
 
+# ok / low / mismatch (some other WGS fits better) / matches a different WGS
 def summarize(samples, wgs_samples, rna_sites, scores, args):
     rows = []
     for s in samples:
@@ -156,9 +159,9 @@ def plot_heatmap(scores, outfile):
 
 
 def main():
-    print(f"\n\n\n******************************************************************************************")
-    print(f"Checking RNA vs WGS concordance...")
-    print(f"******************************************************************************************\n")
+    print("\n\n\n******************************************************************************************")
+    print("Checking RNA vs WGS concordance...")
+    print("******************************************************************************************\n")
 
     args = parse_args()
     if len(args.samples) != len(args.nanoTS_vcfs):
@@ -176,6 +179,7 @@ def main():
         wgs[s] = wgs_alleles(path, regions)
         print(f"{s} WGS: {len(wgs[s])} variant allele(s) in the panel gene regions")
 
+    # concordance = fraction of the sample's RNA SNVs that show up in each WGS
     scores = pd.DataFrame(
         [[len(rna_sites[s] & wgs[w]) / len(rna_sites[s]) if rna_sites[s] else 0.0 for w in args.wgs_samples]
          for s in args.samples],
